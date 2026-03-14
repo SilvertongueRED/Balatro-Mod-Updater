@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <!-- Arrowhead for refresh arrows -->
+    <marker id="arrowhead" markerWidth="10" markerHeight="10"
+            refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M 0,0 L 10,5 L 0,10 Z" fill="#F0C040"/>
+    </marker>
+    <!-- Subtle inner glow for the card face -->
+    <radialGradient id="cardGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"  stop-color="#3D1A8A" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#1A0840" stop-opacity="1"/>
+    </radialGradient>
+  </defs>
+
+  <!-- ── Playing card body ── -->
+  <!-- Outer gold frame -->
+  <rect x="5" y="5" width="118" height="118" rx="14" ry="14"
+        fill="#F0C040" />
+  <!-- Card face (deep purple gradient) -->
+  <rect x="9" y="9" width="110" height="110" rx="11" ry="11"
+        fill="url(#cardGlow)"/>
+  <!-- Inner decorative border -->
+  <rect x="14" y="14" width="100" height="100" rx="8" ry="8"
+        fill="none" stroke="#F0C040" stroke-width="0.8" opacity="0.45"/>
+
+  <!-- ── Circular refresh / update arrows ──
+       Two 150° arcs centred at (64, 64) r=22, clockwise (sweep=1).
+       Arc 1: 270° → 60°   (top → lower-right)
+       Arc 2:  90° → 240°  (bottom → upper-left)
+       Points computed as: (cx + r·cos θ, cy + r·sin θ), θ in SVG convention. -->
+  <g transform="translate(64,64)" stroke="#F0C040" stroke-width="6"
+     fill="none" stroke-linecap="round">
+    <!-- Arc 1 -->
+    <path d="M 0,-22 A 22,22 0 0,1 11,19.05"
+          marker-end="url(#arrowhead)"/>
+    <!-- Arc 2 -->
+    <path d="M 0,22 A 22,22 0 0,1 -11,-19.05"
+          marker-end="url(#arrowhead)"/>
+  </g>
+
+  <!-- ── Corner suit symbols ── -->
+  <!-- ♠ top-left (white) -->
+  <text x="15" y="30" font-size="15" font-family="serif"
+        fill="white">&#x2660;</text>
+  <!-- ♥ top-right (red) -->
+  <text x="113" y="30" font-size="15" font-family="serif"
+        fill="#E84040" text-anchor="end">&#x2665;</text>
+  <!-- ♦ bottom-left (red) -->
+  <text x="15" y="120" font-size="15" font-family="serif"
+        fill="#E84040">&#x2666;</text>
+  <!-- ♣ bottom-right (white) -->
+  <text x="113" y="120" font-size="15" font-family="serif"
+        fill="white" text-anchor="end">&#x2663;</text>
+</svg>
