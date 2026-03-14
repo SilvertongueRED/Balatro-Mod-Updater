@@ -603,7 +603,7 @@ SMODS.current_mod.extra_tabs = function()
               { n = G.UIT.B, config = { h = 0.15, w = 0.1 } },
               -- Page selector
               (total_pages > 1) and {
-                n = G.UIT.R, config = { align = "cm", padding = 0.3 }, nodes = {
+                n = G.UIT.R, config = { align = "cm", padding = 0.7 }, nodes = {
                   create_option_cycle {
                     w = 4.5,
                     scale = 0.7,
