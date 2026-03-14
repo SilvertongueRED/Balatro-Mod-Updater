@@ -12,3 +12,4 @@ _framework_backups/
 # Per-mod updater state
 .autoupdater_state.json
 .framework_state.json
+.amu_restored_backup
