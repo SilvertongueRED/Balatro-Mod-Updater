@@ -570,56 +570,56 @@ end
 ---------------------------------------------------------------------------
 
 SMODS.current_mod.extra_tabs = function()
-  local purple = (G.C and G.C.PURPLE) or RGBA(0.62, 0.33, 0.92, 1)
-
-  local entries = get_sorted_mod_entries()
-  local total_pages = math.max(1, math.ceil(#entries / MODS_PER_PAGE))
-  if AMU_CONFIG_PAGE > total_pages then AMU_CONFIG_PAGE = total_pages end
-  if AMU_CONFIG_PAGE < 1 then AMU_CONFIG_PAGE = 1 end
-
-  local page_options = {}
-  for p = 1, total_pages do
-    page_options[p] = "Page " .. p .. "/" .. total_pages
-  end
-
-  local static_def = {
-    n = G.UIT.R,
-    config = { align = "cm", padding = 0.05 },
-    nodes = {
-      { n = G.UIT.C, config = { align = "tm", padding = 0.05, minw = 6 }, nodes = {
-        -- Header
-        { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-          { n = G.UIT.T, config = { text = "Mod Update Toggles", scale = 0.5, colour = purple, shadow = true } }
-        }},
-        -- Dynamic placeholder for mod toggles
-        { n = G.UIT.R, config = { align = "cm", padding = 0.05, minh = 4.5, minw = 5.5 }, nodes = {
-          { n = G.UIT.O, config = { align = "cm", id = "amu_mod_toggle_list", object = Moveable() } },
-        }},
-        -- Spacer to push page selector below the toggles
-        { n = G.UIT.B, config = { h = 0.15, w = 0.1 } },
-        -- Page selector
-        (total_pages > 1) and {
-          n = G.UIT.R, config = { align = "cm", padding = 0.1 }, nodes = {
-            create_option_cycle {
-              w = 4.5,
-              scale = 0.7,
-              label = "",
-              options = page_options,
-              current_option = AMU_CONFIG_PAGE,
-              opt_callback = "amu_mod_toggles_page",
-              cycle_shoulders = true,
-              no_pips = true,
-            }
-          }
-        } or nil,
-      }}
-    }
-  }
-
   return {
     {
       label = "Mod Toggles",
       tab_definition_function = function()
+        local purple = (G.C and G.C.PURPLE) or RGBA(0.62, 0.33, 0.92, 1)
+
+        local entries = get_sorted_mod_entries()
+        local total_pages = math.max(1, math.ceil(#entries / MODS_PER_PAGE))
+        if AMU_CONFIG_PAGE > total_pages then AMU_CONFIG_PAGE = total_pages end
+        if AMU_CONFIG_PAGE < 1 then AMU_CONFIG_PAGE = 1 end
+
+        local page_options = {}
+        for p = 1, total_pages do
+          page_options[p] = "Page " .. p .. "/" .. total_pages
+        end
+
+        local static_def = {
+          n = G.UIT.R,
+          config = { align = "cm", padding = 0.05 },
+          nodes = {
+            { n = G.UIT.C, config = { align = "tm", padding = 0.05, minw = 6 }, nodes = {
+              -- Header
+              { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
+                { n = G.UIT.T, config = { text = "Mod Update Toggles", scale = 0.5, colour = purple, shadow = true } }
+              }},
+              -- Dynamic placeholder for mod toggles
+              { n = G.UIT.R, config = { align = "cm", padding = 0.05, minh = 4.5, minw = 5.5 }, nodes = {
+                { n = G.UIT.O, config = { align = "cm", id = "amu_mod_toggle_list", object = Moveable() } },
+              }},
+              -- Spacer to push page selector below the toggles
+              { n = G.UIT.B, config = { h = 0.15, w = 0.1 } },
+              -- Page selector
+              (total_pages > 1) and {
+                n = G.UIT.R, config = { align = "cm", padding = 0.1 }, nodes = {
+                  create_option_cycle {
+                    w = 4.5,
+                    scale = 0.7,
+                    label = "",
+                    options = page_options,
+                    current_option = AMU_CONFIG_PAGE,
+                    opt_callback = "amu_mod_toggles_page",
+                    cycle_shoulders = true,
+                    no_pips = true,
+                  }
+                }
+              } or nil,
+            }}
+          }
+        }
+
         return SMODS.GUI.DynamicUIManager.initTab({
           updateFunctions = {
             amu_mod_toggle_list = function(args)
