@@ -162,7 +162,10 @@ function Update-GitMod([string]$folderPath, [string]$folderName) {
 
     # Restore stashed local changes (best-effort).
     if ($didStash) {
-      Run-Git $folderPath @("stash","pop","-q") | Out-Null
+      $popRes = Run-Git $folderPath @("stash","pop","-q")
+      if ($popRes.code -ne 0) {
+        $summary.errors += "WARNING (git) ${folderName}: stash pop failed – local changes remain in git stash"
+      }
     }
 
     if ($pull.code -ne 0) {
