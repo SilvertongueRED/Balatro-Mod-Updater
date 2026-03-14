@@ -51,7 +51,7 @@ $defaults = [ordered]@{
   update_git = $true
   update_updatejson = $true
   make_backups = $true
-  skip_folders = @("smods", "_AutoModUpdater_Backups")
+  skip_folders = @("smods", "_Balatro-Automatic-Mod-Updater_Backups")
   nexus_api_key = ""
   nexus_game_domain = "balatro"
   git_pull_mode = "ff-only"  # "ff-only" (default) or "rebase"
@@ -75,7 +75,7 @@ if (-not $config) {
 $skipSet = @{}
 foreach ($n in $config.skip_folders) { $skipSet[$n] = $true }
 
-$backupRoot = Join-Path $modsDirResolved "_AutoModUpdater_Backups"
+$backupRoot = Join-Path $modsDirResolved "_Balatro-Automatic-Mod-Updater_Backups"
 try { Ensure-Dir $backupRoot } catch { $summary.errors += "Couldn't create backup folder '$backupRoot': $($_.Exception.Message)" }
 
 function Backup-Folder([string]$folderPath, [string]$folderName) {
@@ -353,7 +353,7 @@ try {
     $name = $_.Name
     $path = $_.FullName
     if ($skipSet.ContainsKey($name)) { return }
-    if ($name -eq "_AutoModUpdater_Backups") { return }
+    if ($name -eq "_Balatro-Automatic-Mod-Updater_Backups") { return }
 
     $handled = (Update-GitMod $path $name)
     if (-not $handled) { [void](Update-UpdateJsonMod $path $name) }
