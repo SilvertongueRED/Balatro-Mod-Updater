@@ -141,7 +141,6 @@ G.FUNCS = G.FUNCS or {}
 local always_skip = {
   ["smods"] = true,
   [mod_folder_name] = true,
-  ["AutoModUpdater"] = true,
   ["_Balatro-Automatic-Mod-Updater_Backups"] = true,
 }
 
@@ -150,6 +149,14 @@ local always_skip = {
 local config_always_skip = {
   ["smods"] = true,
   ["_Balatro-Automatic-Mod-Updater_Backups"] = true,
+}
+
+-- Legacy folder names from older versions that should never appear in the
+-- generated autoupdater_config.json skip_folders list.  They may still be
+-- present in SMODS-persisted config.skip_folders from a previous release.
+local legacy_skip_deny = {
+  ["AutoModUpdater"] = true,
+  ["_AutoModUpdater_Backups"] = true,
 }
 
 local function scan_mods_and_init_config()
@@ -204,7 +211,9 @@ local function write_ps1_config_overlay()
     local set = {}
     for _, n in ipairs(skip) do set[n] = true end
     for _, n in ipairs(config.skip_folders) do
-      if not set[n] then skip[#skip+1] = n end
+      if not set[n] and not legacy_skip_deny[n] and n ~= mod_folder_name then
+        skip[#skip+1] = n
+      end
     end
   end
   table.sort(skip)
@@ -352,7 +361,7 @@ end
 -- CONFIG TAB helpers
 ---------------------------------------------------------------------------
 
-local MODS_PER_PAGE = 6
+local MODS_PER_PAGE = 8
 local AMU_CONFIG_PAGE = 1
 
 local function get_display_name(folder_name)
@@ -554,7 +563,7 @@ SMODS.current_mod.config_tab = function()
 end
 
 ---------------------------------------------------------------------------
--- EXTRA TAB: Mod Toggles (paginated, 6 per page)
+-- EXTRA TAB: Mod Toggles (paginated, 8 per page)
 -- Note: SMODS.GUI.DynamicUIManager.initTab wraps staticPageDefinition
 -- inside a ROOT node with minh=6, minw=8, align="cm".
 -- updateDynamicAreas creates UIBox with offset y=0.5, so we account for that.
@@ -579,18 +588,18 @@ SMODS.current_mod.extra_tabs = function()
     nodes = {
       { n = G.UIT.C, config = { align = "cm", padding = 0.05, minw = 6 }, nodes = {
         -- Header
-        { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
-          { n = G.UIT.T, config = { text = "Mod Update Toggles", scale = 0.45, colour = purple, shadow = true } }
+        { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
+          { n = G.UIT.T, config = { text = "Mod Update Toggles", scale = 0.4, colour = purple, shadow = true } }
         }},
         -- Dynamic placeholder for mod toggles
-        { n = G.UIT.R, config = { align = "cm", padding = 0, minh = 3.2, minw = 5.5 }, nodes = {
+        { n = G.UIT.R, config = { align = "cm", padding = 0, minh = 4.2, minw = 5.5 }, nodes = {
           { n = G.UIT.O, config = { align = "cm", id = "amu_mod_toggle_list", object = Moveable() } },
         }},
-        -- Large spacer to push page selector well below the toggles
-        { n = G.UIT.B, config = { h = 2.0, w = 0.1 } },
+        -- Spacer to push page selector below the toggles
+        { n = G.UIT.B, config = { h = 0.8, w = 0.1 } },
         -- Page selector
         (total_pages > 1) and {
-          n = G.UIT.R, config = { align = "cm", padding = 0.45 }, nodes = {
+          n = G.UIT.R, config = { align = "cm", padding = 0.15 }, nodes = {
             create_option_cycle {
               w = 4.5,
               scale = 0.7,
