@@ -216,6 +216,14 @@ local function write_ps1_config_overlay()
     balatro_game_dir = "",
   }
 
+  -- Auto-detect Balatro game directory from the running executable location
+  if love and love.filesystem and love.filesystem.getSourceBaseDirectory then
+    local detected = love.filesystem.getSourceBaseDirectory()
+    if detected and detected ~= "" then
+      merged.balatro_game_dir = detected
+    end
+  end
+
   -- Preserve fields from the existing JSON that the user may have set manually
   local existing_path = join_path(mod_path, "autoupdater_config.json")
   local existing_data = read_all(existing_path)
@@ -223,7 +231,7 @@ local function write_ps1_config_overlay()
     local existing = decode_json(existing_data)
     if existing then
       if existing.nexus_game_domain then merged.nexus_game_domain = existing.nexus_game_domain end
-      if existing.balatro_game_dir then merged.balatro_game_dir = existing.balatro_game_dir end
+      if existing.balatro_game_dir and existing.balatro_game_dir ~= "" then merged.balatro_game_dir = existing.balatro_game_dir end
     end
   end
 
@@ -571,7 +579,7 @@ SMODS.current_mod.extra_tabs = function()
           { n = G.UIT.O, config = { align = "cm", id = "amu_mod_toggle_list", object = Moveable() } },
         }},
         -- Large spacer to push page selector well below the toggles
-        { n = G.UIT.B, config = { h = 0.6, w = 0.1 } },
+        { n = G.UIT.B, config = { h = 1.2, w = 0.1 } },
         -- Page selector
         (total_pages > 1) and {
           n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
