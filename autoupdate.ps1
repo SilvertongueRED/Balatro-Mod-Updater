@@ -1,6 +1,8 @@
 param(
   [Parameter(Mandatory=$true)][string]$ModsDir,
-  [Parameter(Mandatory=$true)][string]$SelfDir
+  [Parameter(Mandatory=$true)][string]$SelfDir,
+  [string]$RestoreModName = "",
+  [string]$RestoreBackupFile = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,6 +60,7 @@ $defaults = [ordered]@{
   update_frameworks = $false
   update_steamodded = $false
   update_lovely = $false
+  pinned_mods = [PSCustomObject]@{}
   balatro_game_dir = ""  # optional override
 }
 
@@ -89,6 +92,77 @@ function Backup-Folder([string]$folderPath, [string]$folderName) {
     $summary.errors += "Backup failed for ${folderName}: $($_.Exception.Message)"
   }
 }
+
+# Restore a named backup zip over a mod folder.
+# Preserves update.json so the updater can resume normally after the mod is unpinned.
+function Restore-ModBackup([string]$modName, [string]$backupFile) {
+  $modPath = Join-Path $modsDirResolved $modName
+  $backupPath = Join-Path $backupRoot $backupFile
+  if (-not (Test-Path -LiteralPath $backupPath)) { throw "Backup file not found: $backupPath" }
+  if (-not (Test-Path -LiteralPath $modPath))    { throw "Mod folder not found: $modPath" }
+
+  # Save files we never want to overwrite
+  $preserve = @("update.json")
+  $tmpPreserve = Join-Path ([IO.Path]::GetTempPath()) ("amu_preserve_" + [Guid]::NewGuid().ToString("N"))
+  Ensure-Dir $tmpPreserve
+  foreach ($p in $preserve) {
+    $pp = Join-Path $modPath $p
+    if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $tmpPreserve $p) -Force }
+  }
+
+  # Extract backup to a temp directory first so we can copy cleanly
+  $tmpExtract = Join-Path ([IO.Path]::GetTempPath()) ("amu_restore_" + [Guid]::NewGuid().ToString("N"))
+  Ensure-Dir $tmpExtract
+  Expand-Archive -LiteralPath $backupPath -DestinationPath $tmpExtract -Force
+
+  # Remove existing mod contents (keep .git to avoid destroying git history)
+  Get-ChildItem -LiteralPath $modPath -Force |
+    Where-Object { $_.Name -ne ".git" } |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+
+  # Copy restored files into mod folder
+  Get-ChildItem -LiteralPath $tmpExtract -Force | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $modPath $_.Name) -Recurse -Force
+  }
+
+  # Restore preserved files
+  foreach ($p in $preserve) {
+    $pp = Join-Path $tmpPreserve $p
+    if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $modPath $p) -Force }
+  }
+
+  # Clear autoupdater state so the version is re-evaluated after unpinning
+  $statePath = Join-Path $modPath ".autoupdater_state.json"
+  if (Test-Path -LiteralPath $statePath) { Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue }
+
+  Remove-Item -LiteralPath $tmpExtract  -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $tmpPreserve -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# Build a fast-lookup set of pinned mod names from config.pinned_mods
+$pinnedSet = @{}
+if ($config.pinned_mods) {
+  try {
+    if ($config.pinned_mods -is [System.Collections.IDictionary]) {
+      foreach ($key in $config.pinned_mods.Keys) { $pinnedSet[$key] = $true }
+    } else {
+      foreach ($prop in $config.pinned_mods.PSObject.Properties) { $pinnedSet[$prop.Name] = $true }
+    }
+  } catch {}
+}
+
+# Restore-only mode: when called with -RestoreModName and -RestoreBackupFile, just restore and exit.
+if ($RestoreModName -ne "" -and $RestoreBackupFile -ne "") {
+  try {
+    Restore-ModBackup $RestoreModName $RestoreBackupFile
+    $summary.skipped_mods += "Restored $RestoreModName from $RestoreBackupFile"
+  } catch {
+    $summary.errors += "ERROR restoring ${RestoreModName}: $($_.Exception.Message)"
+  }
+  try { Save-JsonNoBom $summaryPath $summary } catch {}
+  exit 0
+}
+
 
 function Run-Git([string]$folderPath, [string[]]$gitArgs) {
   $old = $ErrorActionPreference
@@ -352,7 +426,10 @@ try {
   Get-ChildItem -LiteralPath $modsDirResolved -Directory -Force | ForEach-Object {
     $name = $_.Name
     $path = $_.FullName
-    if ($skipSet.ContainsKey($name)) { return }
+    if ($skipSet.ContainsKey($name)) {
+      if ($pinnedSet.ContainsKey($name)) { $summary.skipped_mods += "$name (pinned at backup)" }
+      return
+    }
     if ($name -eq "_Balatro-Automatic-Mod-Updater_Backups") { return }
     if ($name -eq "_AutoModUpdater_Backups") { return }
 

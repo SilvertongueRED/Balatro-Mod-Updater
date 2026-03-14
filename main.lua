@@ -163,6 +163,9 @@ local function scan_mods_and_init_config()
   if not config.mod_update_enabled then
     config.mod_update_enabled = {}
   end
+  if not config.mod_pinned then
+    config.mod_pinned = {}
+  end
 
   local items = love.filesystem.getDirectoryItems("Mods")
   if items then
@@ -182,6 +185,21 @@ local function scan_mods_and_init_config()
     local info = love.filesystem.getInfo("Mods/" .. name)
     if (not info or info.type ~= "directory") or always_skip[name] then
       config.mod_update_enabled[name] = nil
+    end
+  end
+
+  -- Remove pin entries for mods that no longer exist
+  for name, _ in pairs(config.mod_pinned) do
+    local info = love.filesystem.getInfo("Mods/" .. name)
+    if (not info or info.type ~= "directory") or always_skip[name] then
+      config.mod_pinned[name] = nil
+    end
+  end
+
+  -- Enforce consistency: pinned mods must have updates disabled
+  for name, pin_info in pairs(config.mod_pinned) do
+    if type(pin_info) == "table" and pin_info.pinned then
+      config.mod_update_enabled[name] = false
     end
   end
 end
@@ -219,6 +237,19 @@ local function write_ps1_config_overlay()
   table.sort(skip)
 
   -- Always use rebase as the git pull mode
+  local pinned_mods = {}
+  if config.mod_pinned then
+    for name, info in pairs(config.mod_pinned) do
+      if type(info) == "table" and info.pinned then
+        pinned_mods[name] = {
+          pinned = true,
+          backup_file = info.backup_file or "",
+          pinned_at = info.pinned_at or "",
+        }
+      end
+    end
+  end
+
   local merged = {
     update_git = config.cfg_update_git ~= false,
     update_updatejson = config.cfg_update_updatejson ~= false,
@@ -230,6 +261,7 @@ local function write_ps1_config_overlay()
     update_frameworks = (config.cfg_update_steamodded == true) or (config.cfg_update_lovely == true),
     update_steamodded = config.cfg_update_steamodded == true,
     update_lovely = config.cfg_update_lovely == true,
+    pinned_mods = pinned_mods,
     balatro_game_dir = "",
   }
 
@@ -364,6 +396,12 @@ end
 local MODS_PER_PAGE = 8
 local AMU_CONFIG_PAGE = 1
 
+-- Backup browser state (forward-declared; build_backup_mods_page defined after open_overlay)
+local AMU_BACKUP_PAGE = 1
+local amu_backup_status = { text = "" }
+local amu_restore_in_progress = false
+local build_backup_mods_page  -- forward declaration; assigned after close_overlay is defined
+
 local function get_display_name(folder_name)
   local display = folder_name
   if SMODS and SMODS.Mods then
@@ -483,6 +521,131 @@ end
 -- Check for updates now button
 G.FUNCS.amu_check_updates_now = function(e)
   run_manual_check()
+end
+
+-- Backup browser page callback
+G.FUNCS.amu_backup_mods_page = function(args)
+  if not args or not args.cycle_config then return end
+  local page = args.cycle_config.current_option or 1
+  AMU_BACKUP_PAGE = page
+  SMODS.GUI.DynamicUIManager.updateDynamicAreas({
+    ["amu_backup_mod_list"] = build_backup_mods_page(page)
+  })
+end
+
+---------------------------------------------------------------------------
+-- BACKUP BROWSER: helper functions
+---------------------------------------------------------------------------
+
+-- Return a sorted list (newest first) of backup zip files for a given mod folder.
+local function list_backups_for_mod(folder_name)
+  local backups = {}
+  local items = love.filesystem.getDirectoryItems("Mods/_Balatro-Automatic-Mod-Updater_Backups")
+  if not items then return backups end
+  local prefix = folder_name .. "-"
+  for _, name in ipairs(items) do
+    if name:sub(1, #prefix) == prefix then
+      local rest = name:sub(#prefix + 1)
+      -- Only match files whose suffix is a yyyyMMdd_HHmmss timestamp + .zip
+      if rest:sub(-4):lower() == ".zip" and rest:match("^%d%d%d%d%d%d%d%d_%d%d%d%d%d%d") then
+        backups[#backups + 1] = name
+      end
+    end
+  end
+  table.sort(backups, function(a, b) return a > b end)  -- newest first
+  return backups
+end
+
+-- Format a backup zip filename into a human-readable date/time string.
+local function format_backup_label(mod_folder, zip_name)
+  local prefix = mod_folder .. "-"
+  local s = zip_name
+  if s:sub(1, #prefix) == prefix then s = s:sub(#prefix + 1) end
+  if s:sub(-4):lower() == ".zip" then s = s:sub(1, -5) end
+  local y, mo, d, h, mi, sec = s:match("^(%d%d%d%d)(%d%d)(%d%d)_(%d%d)(%d%d)(%d%d)$")
+  if y then return y .. "-" .. mo .. "-" .. d .. "  " .. h .. ":" .. mi .. ":" .. sec end
+  return s
+end
+
+-- Pin a mod at a specific backup and restore that backup via the PS1 script.
+local function revert_and_pin_mod(folder_name, backup_file)
+  if not is_windows() then
+    amu_backup_status.text = "Windows only"
+    return
+  end
+
+  -- Update config immediately so the UI reflects the pinned state right away
+  if not config.mod_pinned then config.mod_pinned = {} end
+  config.mod_pinned[folder_name] = {
+    pinned = true,
+    backup_file = backup_file,
+    pinned_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+  }
+  if config.mod_update_enabled then
+    config.mod_update_enabled[folder_name] = false
+  end
+  pcall(write_ps1_config_overlay)
+
+  local save_dir = love.filesystem.getSaveDirectory()
+  local mods_dir = join_path(save_dir, "Mods")
+  local mod_path = (SMODS.current_mod and SMODS.current_mod.path) or join_path(mods_dir, mod_folder_name)
+  local ps1 = join_path(mod_path, "autoupdate.ps1")
+
+  if not file_exists(ps1) then
+    amu_backup_status.text = folder_name .. " pinned. (autoupdate.ps1 missing – restore files manually)"
+    return
+  end
+
+  local cmd = table.concat({
+    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+    "-File", safe_quote(winpath(ps1)),
+    "-ModsDir", safe_quote(winpath(mods_dir)),
+    "-SelfDir", safe_quote(winpath(mod_path)),
+    "-RestoreModName", safe_quote(folder_name),
+    "-RestoreBackupFile", safe_quote(backup_file),
+  }, " ")
+
+  amu_restore_in_progress = true
+  amu_backup_status.text = "Restoring " .. folder_name .. "..."
+
+  if love and love.thread and love.thread.newThread and love.thread.getChannel then
+    local channel = love.thread.getChannel("amu_restore_status")
+    channel:clear()
+    local thread_code = [[
+      local cmd = ...
+      local ok = pcall(function() os.execute(cmd) end)
+      local ch = love.thread.getChannel("amu_restore_status")
+      ch:push(ok and "done" or "error")
+    ]]
+    local t = love.thread.newThread(thread_code)
+    t:start(cmd)
+    G.E_MANAGER:add_event(Event({
+      blockable = false,
+      blocking = false,
+      func = function()
+        local msg = channel:pop()
+        if msg then
+          amu_restore_in_progress = false
+          amu_backup_status.text = folder_name ..
+            (msg == "done" and " restored. Restart to apply." or " restore error. See last_run.json.")
+          return true
+        end
+        return false
+      end
+    }))
+  else
+    os.execute(cmd)
+    amu_restore_in_progress = false
+    amu_backup_status.text = folder_name .. " restored. Restart to apply."
+  end
+end
+
+-- Unpin a mod so auto-updates resume on the next cycle.
+local function unpin_mod(folder_name)
+  if config.mod_pinned then config.mod_pinned[folder_name] = nil end
+  if config.mod_update_enabled then config.mod_update_enabled[folder_name] = true end
+  pcall(write_ps1_config_overlay)
+  amu_backup_status.text = folder_name .. " unpinned. Updates will resume."
 end
 
 ---------------------------------------------------------------------------
@@ -632,7 +795,73 @@ SMODS.current_mod.extra_tabs = function()
           staticPageDefinition = static_def,
         })
       end
-    }
+    },
+    {
+      label = "Backups",
+      tab_definition_function = function()
+        local purple = (G.C and G.C.PURPLE) or RGBA(0.62, 0.33, 0.92, 1)
+
+        local entries = get_sorted_mod_entries()
+        local total_pages = math.max(1, math.ceil(#entries / MODS_PER_PAGE))
+        if AMU_BACKUP_PAGE > total_pages then AMU_BACKUP_PAGE = total_pages end
+        if AMU_BACKUP_PAGE < 1 then AMU_BACKUP_PAGE = 1 end
+
+        local page_options = {}
+        for p = 1, total_pages do
+          page_options[p] = "Page " .. p .. "/" .. total_pages
+        end
+
+        local static_def = {
+          n = G.UIT.R,
+          config = { align = "cm", padding = 0.05 },
+          nodes = {
+            { n = G.UIT.C, config = { align = "tm", padding = 0.05, minw = 6 }, nodes = {
+              -- Header
+              { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
+                { n = G.UIT.T, config = { text = "Mod Backups & Pinning", scale = 0.5, colour = purple, shadow = true } }
+              }},
+              -- Dynamic placeholder for backup mod list
+              { n = G.UIT.R, config = { align = "cm", padding = 0.2, minh = 4.5, minw = 5.5 }, nodes = {
+                { n = G.UIT.O, config = { align = "cm", id = "amu_backup_mod_list", object = Moveable() } },
+              }},
+              -- Status line
+              { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
+                { n = G.UIT.T, config = { ref_table = amu_backup_status, ref_value = "text", scale = 0.3, colour = purple } }
+              }},
+              -- Spacer
+              { n = G.UIT.B, config = { h = 0.8, w = 0.1 } },
+              -- Page selector
+              (total_pages > 1) and {
+                n = G.UIT.R, config = { align = "cm", padding = 0.1 }, nodes = {
+                  create_option_cycle {
+                    w = 4.5,
+                    scale = 0.7,
+                    label = "",
+                    options = page_options,
+                    current_option = AMU_BACKUP_PAGE,
+                    opt_callback = "amu_backup_mods_page",
+                    cycle_shoulders = true,
+                    no_pips = true,
+                  }
+                }
+              } or nil,
+            }}
+          }
+        }
+
+        return SMODS.GUI.DynamicUIManager.initTab({
+          updateFunctions = {
+            amu_backup_mod_list = function(args)
+              local page = (args and args.cycle_config and args.cycle_config.current_option) or AMU_BACKUP_PAGE or 1
+              SMODS.GUI.DynamicUIManager.updateDynamicAreas({
+                ["amu_backup_mod_list"] = build_backup_mods_page(page)
+              })
+            end,
+          },
+          staticPageDefinition = static_def,
+        })
+      end
+    },
   }
 end
 
@@ -676,8 +905,200 @@ local function close_overlay()
 end
 
 ---------------------------------------------------------------------------
--- Restart prompt overlay
+-- BACKUP BROWSER: build_backup_mods_page and amu_backup_picker overlay
+-- (defined here, after open_overlay/close_overlay are in scope)
 ---------------------------------------------------------------------------
+
+-- Overlay that lists available backups for a single mod and lets the user
+-- revert to one (which also pins the mod so updates are frozen).
+G.UIDEF.amu_backup_picker = function(ref)
+  local purple = (G.C and G.C.PURPLE) or RGBA(0.62, 0.33, 0.92, 1)
+  local bg     = RGBA(0.08, 0.08, 0.08, 0.96)
+  local panel  = RGBA(0.12, 0.12, 0.12, 0.96)
+
+  local folder   = ref.folder  or ""
+  local display  = ref.display or folder
+  local backups  = ref.backups or {}
+
+  local pinned_info   = config.mod_pinned and config.mod_pinned[folder]
+  local pinned_backup = pinned_info and pinned_info.backup_file or ""
+
+  local max_show = 5
+  local shown = math.min(#backups, max_show)
+
+  -- Register one revert G.FUNC per visible backup entry
+  for i = 1, shown do
+    local bf = backups[i]
+    G.FUNCS["amu_revert_" .. tostring(i)] = function(e)
+      close_overlay()
+      revert_and_pin_mod(folder, bf)
+      SMODS.GUI.DynamicUIManager.updateDynamicAreas({
+        ["amu_backup_mod_list"] = build_backup_mods_page(AMU_BACKUP_PAGE)
+      })
+    end
+  end
+
+  local rows = {}
+  for i = 1, shown do
+    local bf    = backups[i]
+    local label = format_backup_label(folder, bf)
+    local is_cur_pin = (bf == pinned_backup)
+
+    local btn_node
+    if is_cur_pin then
+      btn_node = {
+        n = G.UIT.C, config = { align = "cm", padding = 0.05, minw = 1.9, minh = 0.45, r = 0.1, colour = panel }, nodes = {
+          { n = G.UIT.T, config = { text = "\226\156\147 Pinned", scale = 0.32, colour = G.C.GREEN } }
+        }
+      }
+    else
+      btn_node = {
+        n = G.UIT.C, config = { align = "cm", padding = 0.05, minw = 1.9, minh = 0.45, r = 0.1,
+          colour = G.C.GREEN, button = "amu_revert_" .. tostring(i), hover = true, shadow = true }, nodes = {
+          { n = G.UIT.T, config = { text = "Revert & Pin", scale = 0.32, colour = purple } }
+        }
+      }
+    end
+
+    rows[#rows + 1] = {
+      n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+        { n = G.UIT.C, config = { align = "cl", padding = 0.04, minw = 3.8 }, nodes = {
+          { n = G.UIT.T, config = { text = label, scale = 0.34, colour = G.C.UI.TEXT_LIGHT } }
+        }},
+        { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
+        btn_node,
+      }
+    }
+  end
+
+  if #backups == 0 then
+    rows[1] = {
+      n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
+        { n = G.UIT.T, config = { text = "No backups found.", scale = 0.38, colour = purple } }
+      }
+    }
+  elseif #backups > max_show then
+    rows[#rows + 1] = {
+      n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
+        { n = G.UIT.T, config = { text = "(showing " .. max_show .. " most recent of " .. #backups .. ")", scale = 0.3, colour = purple } }
+      }
+    }
+  end
+
+  local minh = math.max(3.5, shown * 0.55 + 2.2)
+
+  return {
+    n = G.UIT.ROOT,
+    config = { align = "cm", minw = 7.4, minh = minh, padding = 0.24, r = 0.2, colour = bg, shadow = true, hover = true },
+    nodes = {
+      { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
+        { n = G.UIT.T, config = { text = "Backups: " .. display, scale = 0.52, colour = purple, shadow = true } }
+      }},
+      { n = G.UIT.B, config = { h = 0.12, w = 0.1 } },
+      { n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
+        { n = G.UIT.C, config = { align = "cl", padding = 0.12, minw = 6.6, r = 0.12, colour = panel }, nodes = rows }
+      }},
+      { n = G.UIT.B, config = { h = 0.14, w = 0.1 } },
+      { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
+        { n = G.UIT.C, config = { align = "cm", padding = 0.1, minw = 2.5, minh = 0.7, r = 0.12,
+          colour = panel, button = "amu_close_prompt", hover = true, shadow = true }, nodes = {
+          { n = G.UIT.T, config = { text = "Close", scale = 0.42, colour = purple } }
+        }},
+      }},
+    }
+  }
+end
+
+-- Paginated list of all mods with their pin state and backup/unpin buttons.
+-- NOTE: this is assigned to the forward-declared local 'build_backup_mods_page'.
+build_backup_mods_page = function(page)
+  local entries = get_sorted_mod_entries()
+  local total_pages = math.max(1, math.ceil(#entries / MODS_PER_PAGE))
+  page = math.max(1, math.min(page or 1, total_pages))
+  AMU_BACKUP_PAGE = page
+
+  local rows = {}
+  local start_i = (page - 1) * MODS_PER_PAGE + 1
+  local end_i   = math.min(#entries, page * MODS_PER_PAGE)
+
+  for i = start_i, end_i do
+    local entry = entries[i]
+    if entry then
+      local row_i     = i - start_i + 1
+      local folder    = entry.folder
+      local display   = entry.display
+      local pin_info  = config.mod_pinned and config.mod_pinned[folder]
+      local is_pinned = type(pin_info) == "table" and pin_info.pinned == true
+
+      -- Register per-row button handlers (overwritten each page rebuild)
+      G.FUNCS["amu_open_backups_" .. row_i] = function(e)
+        local backups = list_backups_for_mod(folder)
+        open_overlay(G.UIDEF.amu_backup_picker({ folder = folder, display = display, backups = backups }))
+      end
+
+      G.FUNCS["amu_unpin_mod_" .. row_i] = function(e)
+        unpin_mod(folder)
+        SMODS.GUI.DynamicUIManager.updateDynamicAreas({
+          ["amu_backup_mod_list"] = build_backup_mods_page(AMU_BACKUP_PAGE)
+        })
+      end
+
+      -- Build the row node list
+      local pin_badge
+      if is_pinned then
+        pin_badge = {
+          n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 0.95, minh = 0.32,
+            r = 0.08, colour = RGBA(0.7, 0.45, 0.0, 0.95) }, nodes = {
+            { n = G.UIT.T, config = { text = "PINNED", scale = 0.25, colour = RGBA(1,1,1,1) } }
+          }
+        }
+      else
+        pin_badge = { n = G.UIT.B, config = { h = 0.1, w = 0.95 } }
+      end
+
+      local row_nodes = {
+        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 2.3 }, nodes = {
+          { n = G.UIT.T, config = { text = display, scale = 0.34, colour = G.C.UI.TEXT_LIGHT } }
+        }},
+        { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
+        pin_badge,
+        { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
+        { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.1, minh = 0.38, r = 0.09,
+          colour = G.C.BLUE, button = "amu_open_backups_" .. row_i, hover = true, shadow = true }, nodes = {
+          { n = G.UIT.T, config = { text = "Backups", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } }
+        }},
+      }
+
+      if is_pinned then
+        row_nodes[#row_nodes + 1] = { n = G.UIT.B, config = { h = 0.1, w = 0.1 } }
+        row_nodes[#row_nodes + 1] = {
+          n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 0.9, minh = 0.38, r = 0.09,
+            colour = G.C.RED, button = "amu_unpin_mod_" .. row_i, hover = true, shadow = true }, nodes = {
+            { n = G.UIT.T, config = { text = "Unpin", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } }
+          }
+        }
+      end
+
+      rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = row_nodes }
+    end
+  end
+
+  -- Pad remaining rows to keep height consistent
+  local shown = end_i - start_i + 1
+  for _ = shown + 1, MODS_PER_PAGE do
+    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = {
+      { n = G.UIT.B, config = { h = 0.38, w = 5.5 } }
+    }}
+  end
+
+  return {
+    n = G.UIT.ROOT,
+    config = { align = "cm", colour = G.C.CLEAR, padding = 0.02 },
+    nodes = {
+      { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = rows }
+    }
+  }
+end
 
 local AMU_PROMPT = { title = "Auto Mod Updater", lines = {}, has_updates = false }
 

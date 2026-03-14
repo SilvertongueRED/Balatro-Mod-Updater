@@ -37,6 +37,10 @@ return {
   -- Keys are folder names, values are booleans (true = update enabled)
   mod_update_enabled = {},
 
+  -- Per-mod version pinning: when a mod is reverted to a backup it is frozen here.
+  -- Keys are folder names; values are { pinned=true, backup_file="name.zip", pinned_at="ISO" }.
+  mod_pinned = {},
+
   -- General settings (mirrored to autoupdater_config.json for the PS1 script)
   cfg_update_git = true,
   cfg_update_updatejson = true,
