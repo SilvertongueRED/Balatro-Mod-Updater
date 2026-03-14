@@ -354,6 +354,7 @@ try {
     $path = $_.FullName
     if ($skipSet.ContainsKey($name)) { return }
     if ($name -eq "_Balatro-Automatic-Mod-Updater_Backups") { return }
+    if ($name -eq "_AutoModUpdater_Backups") { return }
 
     $handled = (Update-GitMod $path $name)
     if (-not $handled) { [void](Update-UpdateJsonMod $path $name) }
