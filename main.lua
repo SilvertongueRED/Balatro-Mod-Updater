@@ -6,6 +6,13 @@
 local mod = SMODS.current_mod
 local config = mod and mod.config or {}
 
+SMODS.Atlas {
+  key = 'modicon',
+  path = 'modicon.png',
+  px = 34,
+  py = 34,
+}
+
 -- Derive the actual folder name of this mod dynamically so it works
 -- regardless of what the user names the mod folder (e.g. after cloning the repo).
 local mod_folder_name = "AutoModUpdater"
