@@ -144,6 +144,13 @@ local always_skip = {
   ["_AutoModUpdater_Backups"] = true,
 }
 
+-- Subset of always_skip that should appear in skip_folders in the generated config.
+-- The updater's own folder is excluded so it can self-update via git/GitHub releases.
+local config_always_skip = {
+  ["smods"] = true,
+  ["_AutoModUpdater_Backups"] = true,
+}
+
 local function scan_mods_and_init_config()
   if not config.mod_update_enabled then
     config.mod_update_enabled = {}
@@ -165,7 +172,7 @@ local function scan_mods_and_init_config()
 
   for name, _ in pairs(config.mod_update_enabled) do
     local info = love.filesystem.getInfo("Mods/" .. name)
-    if not info or info.type ~= "directory" then
+    if (not info or info.type ~= "directory") or always_skip[name] then
       config.mod_update_enabled[name] = nil
     end
   end
@@ -182,7 +189,7 @@ local function write_ps1_config_overlay()
   if mod_path == "" then return end
 
   local skip = {}
-  for name, _ in pairs(always_skip) do
+  for name, _ in pairs(config_always_skip) do
     skip[#skip+1] = name
   end
   if config.mod_update_enabled then
@@ -579,7 +586,7 @@ SMODS.current_mod.extra_tabs = function()
           { n = G.UIT.O, config = { align = "cm", id = "amu_mod_toggle_list", object = Moveable() } },
         }},
         -- Large spacer to push page selector well below the toggles
-        { n = G.UIT.B, config = { h = 1.2, w = 0.1 } },
+        { n = G.UIT.B, config = { h = 2.0, w = 0.1 } },
         -- Page selector
         (total_pages > 1) and {
           n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
