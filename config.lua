@@ -26,7 +26,7 @@ return {
 
   -- Loading indicator placement (Balatro UI units)
   loading_align = "cm",
-  loading_offset = { x = 0, y = 8 },
+  loading_offset = { x = 0, y = -20 },
 
   -- Framework staging/apply
   framework_pending_file = "pending_apply.json",
