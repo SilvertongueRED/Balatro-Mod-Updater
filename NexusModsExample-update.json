@@ -7,6 +7,8 @@
   3. Edit the values below ==== to match the mod's Nexus Mods page.
   4. Make sure your Nexus API key is set in the Auto Mod Updater's
      in-game settings (only needs to be done once).
+     To get your API key, go to https://www.nexusmods.com/users/myaccount?tab=api+keys
+     and copy your Personal API Key.
 
   NOTE: update.json is automatically preserved across updates —
   the updater backs it up and restores it, so you will not lose
