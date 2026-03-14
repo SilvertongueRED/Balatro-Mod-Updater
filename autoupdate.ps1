@@ -142,6 +142,16 @@ function Update-GitMod([string]$folderPath, [string]$folderName) {
     Backup-Folder $folderPath $folderName
     $oldHead = $local
 
+    # Stash any local changes to prevent "Your local changes would be
+    # overwritten" errors (e.g. runtime-generated config files that were
+    # previously tracked before being added to .gitignore).
+    $didStash = $false
+    $dirtyCheck = Run-Git $folderPath @("diff-index","--quiet","HEAD","--")
+    if ($dirtyCheck.code -ne 0) {
+      $stashRes = Run-Git $folderPath @("stash","push","-q")
+      if ($stashRes.code -eq 0) { $didStash = $true }
+    }
+
     $pullArgs = @("pull")
     if ($config.git_pull_mode -and [string]$config.git_pull_mode -eq "rebase") {
       $pullArgs += @("--rebase","--autostash")
@@ -149,6 +159,12 @@ function Update-GitMod([string]$folderPath, [string]$folderName) {
       $pullArgs += @("--ff-only")
     }
     $pull = Run-Git $folderPath $pullArgs
+
+    # Restore stashed local changes (best-effort).
+    if ($didStash) {
+      Run-Git $folderPath @("stash","pop","-q") | Out-Null
+    }
+
     if ($pull.code -ne 0) {
       $summary.errors += "ERROR updating (git) ${folderName}: pull failed ($($pull.code)) [mode=$($config.git_pull_mode)] " + (Short-Out $pull.out)
       return $true
