@@ -932,7 +932,7 @@ G.UIDEF.amu_backup_picker = function(ref)
     G.FUNCS["amu_revert_" .. tostring(i)] = function(e)
       close_overlay()
       revert_and_pin_mod(folder, bf)
-      SMODS.GUI.DynamicUIManager.updateDynamicAreas({
+      pcall(SMODS.GUI.DynamicUIManager.updateDynamicAreas, {
         ["amu_backup_mod_list"] = build_backup_mods_page(AMU_BACKUP_PAGE)
       })
     end
