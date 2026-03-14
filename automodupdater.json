@@ -5,6 +5,7 @@
   "author": [
     "SilvertongueRED+ChatGPT+Claude"
   ],
+  "icon": "modicon.png",
   "description": "Automatically checks for and applies mod updates from Git, GitHub Releases, and Nexus. Features an in-game config with per-mod toggles, Nexus API key input, and a manual update check button. (v0.6.6)",
   "prefix": "amu",
   "main_file": "main.lua",
