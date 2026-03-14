@@ -3,7 +3,7 @@
   THIS FILE IS AN EXAMPLE ONLY. It will do nothing here in
   the repo root. To use it:
   1. Copy this file into the mod folder you want to auto-update.
-  2. Rename it to exactly  update.json  (remove ".nexus-example").
+  2. Rename it to exactly  update.json  (remove "NexusModsExample-").
   3. Edit the values below to match the mod's Nexus Mods page.
   4. Make sure your Nexus API key is set in the Auto Mod Updater's
      in-game settings (only needs to be done once).
