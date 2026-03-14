@@ -140,7 +140,6 @@ G.FUNCS = G.FUNCS or {}
 
 local always_skip = {
   ["smods"] = true,
-  [mod_folder_name] = true,
   ["_AutoModUpdater_Backups"] = true,
 }
 
@@ -579,7 +578,7 @@ SMODS.current_mod.extra_tabs = function()
           { n = G.UIT.O, config = { align = "cm", id = "amu_mod_toggle_list", object = Moveable() } },
         }},
         -- Large spacer to push page selector well below the toggles
-        { n = G.UIT.B, config = { h = 1.2, w = 0.1 } },
+        { n = G.UIT.B, config = { h = 2.0, w = 0.1 } },
         -- Page selector
         (total_pages > 1) and {
           n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
