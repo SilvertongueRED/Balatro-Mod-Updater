@@ -135,6 +135,16 @@ function Restore-ModBackup([string]$modName, [string]$backupFile) {
   $statePath = Join-Path $modPath ".autoupdater_state.json"
   if (Test-Path -LiteralPath $statePath) { Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue }
 
+  # If this is a git mod, leave a marker so the updater can reset the working
+  # tree to HEAD after the mod is unpinned (backup files differ from HEAD).
+  $gitDir = Join-Path $modPath ".git"
+  if (Test-Path -LiteralPath $gitDir -PathType Container) {
+    $markerPath = Join-Path $modPath ".amu_restored_backup"
+    try { Set-Content -LiteralPath $markerPath -Value (Get-Date).ToString("o") -Encoding UTF8 } catch {
+      $summary.errors += "Failed to create restore marker for ${modName}: $($_.Exception.Message)"
+    }
+  }
+
   Remove-Item -LiteralPath $tmpExtract  -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $tmpPreserve -Recurse -Force -ErrorAction SilentlyContinue
 }
@@ -148,7 +158,9 @@ if ($config.pinned_mods) {
     } else {
       foreach ($prop in $config.pinned_mods.PSObject.Properties) { $pinnedSet[$prop.Name] = $true }
     }
-  } catch {}
+  } catch {
+    $summary.errors += "Failed to parse pinned_mods from config: $($_.Exception.Message)"
+  }
 }
 
 # Restore-only mode: when called with -RestoreModName and -RestoreBackupFile, just restore and exit.
@@ -190,6 +202,20 @@ function Update-GitMod([string]$folderPath, [string]$folderName) {
   $git = Get-Command git -ErrorAction SilentlyContinue
   if (-not $git) { $summary.skipped_mods += "$folderName (git: no git in PATH)"; return $true }
 
+  # If a backup was restored while the mod was pinned, reset the working tree
+  # to match HEAD so the updater can properly compare and pull new changes.
+  $markerPath = Join-Path $folderPath ".amu_restored_backup"
+  $wasRestored = Test-Path -LiteralPath $markerPath
+  if ($wasRestored) {
+    Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
+    try {
+      Run-Git $folderPath @("checkout","--",".") | Out-Null
+      Run-Git $folderPath @("clean","-fd") | Out-Null
+    } catch {
+      $summary.errors += "Failed to reset working tree for ${folderName} after backup restore: $($_.Exception.Message)"
+    }
+  }
+
   try {
     $fetch = Run-Git $folderPath @("fetch","--all","--prune")
     if ($fetch.code -ne 0) {
@@ -211,7 +237,12 @@ function Update-GitMod([string]$folderPath, [string]$folderName) {
     }
     $upstream = ($upRes.out | Select-Object -First 1).Trim()
 
-    if ($local -eq $upstream) { return $true }
+    if ($local -eq $upstream) {
+      # If working tree was just restored from backup, report as updated since
+      # the checkout/clean above already brought it back to HEAD (latest).
+      if ($wasRestored) { $summary.updated_mods += $folderName }
+      return $true
+    }
 
     Backup-Folder $folderPath $folderName
     $oldHead = $local
@@ -427,7 +458,11 @@ try {
     $name = $_.Name
     $path = $_.FullName
     if ($skipSet.ContainsKey($name)) {
-      if ($pinnedSet.ContainsKey($name)) { $summary.skipped_mods += "$name (pinned at backup)" }
+      if ($pinnedSet.ContainsKey($name)) {
+        $summary.skipped_mods += "$name (pinned at backup)"
+      } else {
+        $summary.skipped_mods += "$name (updates disabled)"
+      }
       return
     }
     if ($name -eq "_Balatro-Automatic-Mod-Updater_Backups") { return }
