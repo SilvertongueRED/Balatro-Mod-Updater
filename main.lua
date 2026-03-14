@@ -141,14 +141,15 @@ G.FUNCS = G.FUNCS or {}
 local always_skip = {
   ["smods"] = true,
   [mod_folder_name] = true,
-  ["_AutoModUpdater_Backups"] = true,
+  ["AutoModUpdater"] = true,
+  ["_Balatro-Automatic-Mod-Updater_Backups"] = true,
 }
 
 -- Subset of always_skip that should appear in skip_folders in the generated config.
 -- The updater's own folder is excluded so it can self-update via git/GitHub releases.
 local config_always_skip = {
   ["smods"] = true,
-  ["_AutoModUpdater_Backups"] = true,
+  ["_Balatro-Automatic-Mod-Updater_Backups"] = true,
 }
 
 local function scan_mods_and_init_config()
@@ -589,7 +590,7 @@ SMODS.current_mod.extra_tabs = function()
         { n = G.UIT.B, config = { h = 2.0, w = 0.1 } },
         -- Page selector
         (total_pages > 1) and {
-          n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
+          n = G.UIT.R, config = { align = "cm", padding = 0.45 }, nodes = {
             create_option_cycle {
               w = 4.5,
               scale = 0.7,

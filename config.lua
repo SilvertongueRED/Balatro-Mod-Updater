@@ -20,7 +20,7 @@ return {
   -- Ignore these folders when scanning mods (base list, merged with in-game toggles)
   -- NOTE: "smods" is skipped for MOD-level updates only. Steamodded framework updates
   -- use their own separate path and are NOT affected by this list.
-  skip_folders = { "smods", "_AutoModUpdater_Backups" },
+  skip_folders = { "smods", "_Balatro-Automatic-Mod-Updater_Backups" },
 
   make_backups = true,
 
