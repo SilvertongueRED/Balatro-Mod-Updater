@@ -655,7 +655,7 @@ G.UIDEF.amu_loading_box = function(ref)
     nodes = {
       { n = G.UIT.C, config = { align = "cm", padding = 0.02, colour = clear }, nodes = {
         { n = G.UIT.T, config = { ref_table = ref, ref_value = "text", scale = 0.72, colour = purple, shadow = true } },
-        { n = G.UIT.B, config = { h = 9.00, w = 0.1 } },
+        { n = G.UIT.B, config = { h = 2.00, w = 0.1 } },
         { n = G.UIT.T, config = { ref_table = ref, ref_value = "suits", scale = 0.7, colour = purple, shadow = true } },
       }}
     }
