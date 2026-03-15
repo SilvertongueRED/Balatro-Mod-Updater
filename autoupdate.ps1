@@ -2,7 +2,8 @@ param(
   [Parameter(Mandatory=$true)][string]$ModsDir,
   [Parameter(Mandatory=$true)][string]$SelfDir,
   [string]$RestoreModName = "",
-  [string]$RestoreBackupFile = ""
+  [string]$RestoreBackupFile = "",
+  [string]$TargetMod = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -77,6 +78,9 @@ if (-not $config) {
 
 $skipSet = @{}
 foreach ($n in $config.skip_folders) { $skipSet[$n] = $true }
+
+# When -TargetMod is provided, only process that single mod folder
+$targetModFilter = $TargetMod.Trim().Trim('"')
 
 $backupRoot = Join-Path $modsDirResolved "_Balatro-Mod-Updater_Backups"
 try { Ensure-Dir $backupRoot } catch { $summary.errors += "Couldn't create backup folder '$backupRoot': $($_.Exception.Message)" }
@@ -457,6 +461,8 @@ try {
   Get-ChildItem -LiteralPath $modsDirResolved -Directory -Force | ForEach-Object {
     $name = $_.Name
     $path = $_.FullName
+    # When targeting a single mod, skip everything else
+    if ($targetModFilter -ne "" -and $name -ne $targetModFilter) { return }
     if ($skipSet.ContainsKey($name)) {
       if ($pinnedSet.ContainsKey($name)) {
         $summary.skipped_mods += "$name (pinned at backup)"
@@ -559,6 +565,7 @@ function Stage-FrameworkUpdate([hashtable]$pending, [string]$type, [string]$src,
 }
 
 function Update-Frameworks() {
+  if ($targetModFilter -ne "") { return }  # skip frameworks when checking a single mod
   if (-not $config.update_frameworks) { return }
   $pendingRoot = Join-Path $selfDirResolved "_pending_framework_updates"
   Ensure-Dir $pendingRoot

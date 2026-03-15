@@ -1,5 +1,5 @@
 return {
-  auto_run = true,
+  auto_run = false,
 
   update_git = true,
   update_updatejson = true,

@@ -407,6 +407,89 @@ local function run_manual_check()
   }))
 end
 
+-- Per-mod check status tracking
+local amu_per_mod_status = {}
+local amu_per_mod_checking = {}
+
+local function run_single_mod_check(folder_name)
+  if amu_per_mod_checking[folder_name] then return end
+  if not is_windows() then
+    amu_per_mod_status[folder_name] = "Windows only"
+    return
+  end
+
+  local save_dir = love.filesystem.getSaveDirectory()
+  local mods_dir = join_path(save_dir, "Mods")
+  local mod_path = (SMODS.current_mod and SMODS.current_mod.path) or join_path(mods_dir, mod_folder_name)
+
+  pcall(write_ps1_config_overlay)
+
+  local ps1 = join_path(mod_path, "autoupdate.ps1")
+  if not file_exists(ps1) then
+    amu_per_mod_status[folder_name] = "Missing script!"
+    return
+  end
+
+  if not (love and love.thread and love.thread.newThread and love.thread.getChannel) then
+    amu_per_mod_status[folder_name] = "No thread support"
+    return
+  end
+
+  amu_per_mod_checking[folder_name] = true
+  amu_per_mod_status[folder_name] = "Checking..."
+
+  local ch_name = "amu_single_check_" .. folder_name
+  local channel = love.thread.getChannel(ch_name)
+  channel:clear()
+
+  local cmd = table.concat({
+    "powershell","-NoProfile","-ExecutionPolicy","Bypass",
+    "-File", safe_quote(winpath(ps1)),
+    "-ModsDir", safe_quote(winpath(mods_dir)),
+    "-SelfDir", safe_quote(winpath(mod_path)),
+    "-TargetMod", safe_quote(folder_name),
+  }, " ")
+
+  local thread_code = string.format([[
+    local cmd = ...
+    local ok = pcall(function() os.execute(cmd) end)
+    local ch = love.thread.getChannel(%q)
+    ch:push(ok and "done" or "error")
+  ]], ch_name)
+  local t = love.thread.newThread(thread_code)
+  t:start(cmd)
+
+  G.E_MANAGER:add_event(Event({
+    blockable = false,
+    blocking = false,
+    func = function()
+      local msg = channel:pop()
+      if msg then
+        amu_per_mod_checking[folder_name] = nil
+        local summary_path = join_path(mod_path, "last_run.json")
+        local data = read_all(summary_path)
+        local summary = data and decode_json(data) or nil
+        if summary then
+          local updated = summary.updated_mods or {}
+          local errors = summary.errors or {}
+          if #updated > 0 then
+            amu_per_mod_status[folder_name] = "Updated!"
+            show_prompt(summary)
+          elseif #errors > 0 then
+            amu_per_mod_status[folder_name] = "Error"
+          else
+            amu_per_mod_status[folder_name] = "Up to date"
+          end
+        else
+          amu_per_mod_status[folder_name] = msg == "done" and "Done" or "Error"
+        end
+        return true
+      end
+      return false
+    end
+  }))
+end
+
 ---------------------------------------------------------------------------
 -- CONFIG TAB helpers
 ---------------------------------------------------------------------------
@@ -469,6 +552,22 @@ local function build_mod_toggles_page(page)
       if config.mod_update_enabled[entry.folder] == nil then
         config.mod_update_enabled[entry.folder] = true
       end
+
+      local row_i = i - start_i + 1
+      local folder = entry.folder
+
+      -- Register per-row check button handler (overwritten each page rebuild)
+      G.FUNCS["amu_check_mod_" .. row_i] = function(e)
+        run_single_mod_check(folder)
+      end
+
+      -- Status text for this mod (shows after a per-mod check)
+      if not amu_per_mod_status[folder] then
+        amu_per_mod_status[folder] = ""
+      end
+
+      local check_colour = amu_per_mod_checking[folder] and RGBA(0.5, 0.5, 0.5, 0.9) or G.C.BLUE
+
       rows[#rows+1] = {
         n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = {
           create_toggle {
@@ -481,6 +580,13 @@ local function build_mod_toggles_page(page)
               write_ps1_config_overlay()
             end
           },
+          { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 0.9, minh = 0.34, r = 0.08,
+            colour = check_colour, button = "amu_check_mod_" .. row_i, hover = true, shadow = true }, nodes = {
+            { n = G.UIT.T, config = { text = "Check", scale = 0.26, colour = G.C.UI.TEXT_LIGHT } }
+          }},
+          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 1.1 }, nodes = {
+            { n = G.UIT.T, config = { ref_table = amu_per_mod_status, ref_value = folder, scale = 0.24, colour = G.C.UI.TEXT_LIGHT } }
+          }},
         }
       }
     end
@@ -685,6 +791,9 @@ SMODS.current_mod.config_tab = function()
         { n = G.UIT.T, config = { text = "General Settings", scale = 0.45, colour = purple, shadow = true } }
       }},
       -- Toggles
+      { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
+        create_toggle { label = "Auto-check at startup", ref_table = config, ref_value = "auto_run", w = 0, scale = 0.75 },
+      }},
       { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
         create_toggle { label = "Update Git repos", ref_table = config, ref_value = "cfg_update_git", w = 0, scale = 0.75,
           callback = function() write_ps1_config_overlay() end },
