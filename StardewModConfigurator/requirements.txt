@@ -1,0 +1,5 @@
+# Runtime dependencies (stdlib only — no extra packages needed at runtime)
+# tkinter is part of the Python standard library
+
+# Build dependency (create standalone .exe)
+pyinstaller>=6.0
