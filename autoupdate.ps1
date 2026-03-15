@@ -80,9 +80,7 @@ $skipSet = @{}
 foreach ($n in $config.skip_folders) { $skipSet[$n] = $true }
 
 # When -TargetMod is provided, only process that single mod folder
-$TargetMod = $TargetMod.Trim().Trim('"')
-$targetModFilter = ""
-if ($TargetMod -ne "") { $targetModFilter = $TargetMod }
+$targetModFilter = $TargetMod.Trim().Trim('"')
 
 $backupRoot = Join-Path $modsDirResolved "_Balatro-Mod-Updater_Backups"
 try { Ensure-Dir $backupRoot } catch { $summary.errors += "Couldn't create backup folder '$backupRoot': $($_.Exception.Message)" }
