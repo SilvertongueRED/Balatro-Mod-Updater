@@ -6,6 +6,7 @@
 local mod = SMODS.current_mod
 local config = mod and mod.config or {}
 
+-- modicon info
 SMODS.Atlas {
   key = 'modicon',
   path = 'modicon.png',
