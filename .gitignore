@@ -5,6 +5,7 @@ autoupdater_config.json
 last_run.json
 
 # Backup and staging directories
+_Balatro-Mod-Updater_Backups/
 _Balatro-Automatic-Mod-Updater_Backups/
 _pending_framework_updates/
 _framework_backups/

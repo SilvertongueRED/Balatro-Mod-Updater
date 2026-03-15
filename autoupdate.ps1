@@ -53,7 +53,7 @@ $defaults = [ordered]@{
   update_git = $true
   update_updatejson = $true
   make_backups = $true
-  skip_folders = @("smods", "_Balatro-Automatic-Mod-Updater_Backups")
+  skip_folders = @("smods", "_Balatro-Mod-Updater_Backups")
   nexus_api_key = ""
   nexus_game_domain = "balatro"
   git_pull_mode = "ff-only"  # "ff-only" (default) or "rebase"
@@ -78,7 +78,7 @@ if (-not $config) {
 $skipSet = @{}
 foreach ($n in $config.skip_folders) { $skipSet[$n] = $true }
 
-$backupRoot = Join-Path $modsDirResolved "_Balatro-Automatic-Mod-Updater_Backups"
+$backupRoot = Join-Path $modsDirResolved "_Balatro-Mod-Updater_Backups"
 try { Ensure-Dir $backupRoot } catch { $summary.errors += "Couldn't create backup folder '$backupRoot': $($_.Exception.Message)" }
 
 function Backup-Folder([string]$folderPath, [string]$folderName) {
@@ -301,7 +301,7 @@ function Update-GitHubReleaseMod([string]$folderPath, [string]$folderName, $uj) 
 
   $repo = [string]$uj.repo
   $api = "https://api.github.com/repos/$repo/releases/latest"
-  $rel = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent"="AutoModUpdater"; "Accept"="application/vnd.github+json" }
+  $rel = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent"="BalatroModUpdater"; "Accept"="application/vnd.github+json" }
   $tag = [string]$rel.tag_name
   if (-not $tag) { throw "GitHub release missing tag_name" }
   if ($installedTag -eq $tag) { return $true }
@@ -322,7 +322,7 @@ function Update-GitHubReleaseMod([string]$folderPath, [string]$folderName, $uj) 
   $extractPath = Join-Path $tmpRoot "extract"
   Ensure-Dir $extractPath
 
-  Invoke-WebRequest -Uri $dl -OutFile $zipPath -Headers @{ "User-Agent"="AutoModUpdater" } | Out-Null
+  Invoke-WebRequest -Uri $dl -OutFile $zipPath -Headers @{ "User-Agent"="BalatroModUpdater" } | Out-Null
   Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
 
   $children = Get-ChildItem -LiteralPath $extractPath -Force
@@ -361,7 +361,7 @@ function Invoke-Nexus([string]$url) {
   if (-not $config.nexus_api_key -or $config.nexus_api_key.Trim() -eq "") {
     throw "Nexus API key not set in autoupdater_config.json (nexus_api_key)."
   }
-  return Invoke-RestMethod -Uri $url -Headers @{ "apikey"=$config.nexus_api_key; "accept"="application/json"; "User-Agent"="AutoModUpdater" }
+  return Invoke-RestMethod -Uri $url -Headers @{ "apikey"=$config.nexus_api_key; "accept"="application/json"; "User-Agent"="BalatroModUpdater" }
 }
 
 function Update-NexusMod([string]$folderPath, [string]$folderName, $uj) {
@@ -397,7 +397,7 @@ function Update-NexusMod([string]$folderPath, [string]$folderName, $uj) {
   $extractPath = Join-Path $tmpRoot "extract"
   Ensure-Dir $extractPath
 
-  Invoke-WebRequest -Uri $uri -OutFile $zipPath -Headers @{ "User-Agent"="AutoModUpdater" } | Out-Null
+  Invoke-WebRequest -Uri $uri -OutFile $zipPath -Headers @{ "User-Agent"="BalatroModUpdater" } | Out-Null
   Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
 
   $children = Get-ChildItem -LiteralPath $extractPath -Force
@@ -465,6 +465,7 @@ try {
       }
       return
     }
+    if ($name -eq "_Balatro-Mod-Updater_Backups") { return }
     if ($name -eq "_Balatro-Automatic-Mod-Updater_Backups") { return }
     if ($name -eq "_AutoModUpdater_Backups") { return }
 
@@ -522,7 +523,7 @@ function Get-BalatroGameDir() {
 
 function Github-LatestRelease([string]$repo) {
   $api = "https://api.github.com/repos/$repo/releases/latest"
-  return Invoke-RestMethod -Uri $api -Headers @{ "User-Agent"="AutoModUpdater"; "Accept"="application/vnd.github+json" }
+  return Invoke-RestMethod -Uri $api -Headers @{ "User-Agent"="BalatroModUpdater"; "Accept"="application/vnd.github+json" }
 }
 
 
@@ -616,11 +617,11 @@ function Update-Frameworks() {
         Ensure-Dir $extract
 
         if ($asset) {
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers @{ "User-Agent"="AutoModUpdater" } | Out-Null
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers @{ "User-Agent"="BalatroModUpdater" } | Out-Null
         } else {
           # Prefer the stable GitHub tag archive (more reliable than api.zipball_url under rate-limit/HTML error conditions)
           $zipUrl = "https://github.com/Steamodded/smods/archive/refs/tags/$tag.zip"
-          $headers = @{ "User-Agent"="AutoModUpdater"; "Accept"="application/octet-stream" }
+          $headers = @{ "User-Agent"="BalatroModUpdater"; "Accept"="application/octet-stream" }
 
           try {
             Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -Headers $headers | Out-Null
@@ -708,7 +709,7 @@ function Update-Frameworks() {
       $extract = Join-Path $tmpRoot "extract"
       Ensure-Dir $extract
 
-      Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers @{ "User-Agent"="AutoModUpdater" } | Out-Null
+      Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers @{ "User-Agent"="BalatroModUpdater" } | Out-Null
       Expand-Archive -LiteralPath $zipPath -DestinationPath $extract -Force
 
       $dll = Get-ChildItem -LiteralPath $extract -Recurse -File -Filter "version.dll" | Select-Object -First 1

@@ -1,4 +1,4 @@
--- Auto Mod Updater (Steamodded) v0.6.6
+-- Mod Updater (Steamodded) v0.6.6
 -- In-game config with two tabs: Settings (general + Nexus key + check now) and Mod Toggles (paginated).
 -- Uses Steamodded's DynamicUIManager for proper pagination.
 -- Git pull mode: rebase (default and recommended).
@@ -25,7 +25,7 @@ SMODS.Atlas {
 
 -- Derive the actual folder name of this mod dynamically so it works
 -- regardless of what the user names the mod folder (e.g. after cloning the repo).
-local mod_folder_name = "AutoModUpdater"
+local mod_folder_name = "Balatro-Mod-Updater"
 if mod and mod.path then
   local name = mod.path:match("([^/\\]+)[/\\]*$")
   if name and name ~= "" then
@@ -158,14 +158,14 @@ G.FUNCS = G.FUNCS or {}
 local always_skip = {
   ["smods"] = true,
   [mod_folder_name] = true,
-  ["_Balatro-Automatic-Mod-Updater_Backups"] = true,
+  ["_Balatro-Mod-Updater_Backups"] = true,
 }
 
 -- Subset of always_skip that should appear in skip_folders in the generated config.
 -- The updater's own folder is excluded so it can self-update via git/GitHub releases.
 local config_always_skip = {
   ["smods"] = true,
-  ["_Balatro-Automatic-Mod-Updater_Backups"] = true,
+  ["_Balatro-Mod-Updater_Backups"] = true,
 }
 
 -- Legacy folder names from older versions that should never appear in the
@@ -174,6 +174,7 @@ local config_always_skip = {
 local legacy_skip_deny = {
   ["AutoModUpdater"] = true,
   ["_AutoModUpdater_Backups"] = true,
+  ["_Balatro-Automatic-Mod-Updater_Backups"] = true,
 }
 
 local function scan_mods_and_init_config()
@@ -557,7 +558,7 @@ end
 -- Return a sorted list (newest first) of backup zip files for a given mod folder.
 local function list_backups_for_mod(folder_name)
   local backups = {}
-  local items = love.filesystem.getDirectoryItems("Mods/_Balatro-Automatic-Mod-Updater_Backups")
+  local items = love.filesystem.getDirectoryItems("Mods/_Balatro-Mod-Updater_Backups")
   if not items then return backups end
   local prefix = folder_name .. "-"
   for _, name in ipairs(items) do
@@ -1117,7 +1118,7 @@ build_backup_mods_page = function(page)
   }
 end
 
-local AMU_PROMPT = { title = "Auto Mod Updater", lines = {}, has_updates = false }
+local AMU_PROMPT = { title = "Mod Updater", lines = {}, has_updates = false }
 
 local function sanitize_line(s)
   s = tostring(s or "")
@@ -1191,7 +1192,7 @@ function show_prompt(summary)
   local should = (#updated > 0) or ((config.prompt_on_errors ~= false) and (#errors > 0))
   if not should then return end
 
-  AMU_PROMPT.title = "Auto Mod Updater"
+  AMU_PROMPT.title = "Mod Updater"
   AMU_PROMPT.lines = build_prompt_lines(summary)
   AMU_PROMPT.has_updates = (#updated > 0)
 
@@ -1265,7 +1266,7 @@ G.UIDEF.amu_restart_prompt = function(ref)
     config = { align = "cm", minw = w, minh = h, padding = 0.24, r = 0.2, colour = bg, shadow = true, hover = true },
     nodes = {
       { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
-        { n = G.UIT.T, config = { text = ref.title or "Auto Mod Updater", scale = 0.72, colour = purple, shadow = true } }
+        { n = G.UIT.T, config = { text = ref.title or "Mod Updater", scale = 0.72, colour = purple, shadow = true } }
       }},
       { n = G.UIT.B, config = { h = 0.18, w = 0.1 } },
       { n = G.UIT.R, config = { align = "cm", padding = 0.10 }, nodes = {
@@ -1321,7 +1322,7 @@ local function run_update_async(mods_dir, mod_path)
 
   local ps1 = join_path(mod_path, "autoupdate.ps1")
   if not file_exists(ps1) then
-    show_msg("Auto Mod Updater", "Missing autoupdate.ps1 in:\n" .. tostring(mod_path), {"OK"}, "error")
+    show_msg("Mod Updater", "Missing autoupdate.ps1 in:\n" .. tostring(mod_path), {"OK"}, "error")
     return
   end
 
@@ -1412,7 +1413,7 @@ local function run_update_async(mods_dir, mod_path)
 
       if love.timer and love.timer.getTime and (love.timer.getTime() - start_time) > (tonumber(config.ui_timeout_seconds) or 300) then
         close_overlay()
-        show_msg("Auto Mod Updater", "Updater timed out waiting for PowerShell.\nYou can still play.", {"OK"}, "warning")
+        show_msg("Mod Updater", "Updater timed out waiting for PowerShell.\nYou can still play.", {"OK"}, "warning")
         return true
       end
       return false
