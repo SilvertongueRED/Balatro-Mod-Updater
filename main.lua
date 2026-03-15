@@ -569,28 +569,36 @@ local function build_mod_toggles_page(page)
 
       local check_colour = amu_per_mod_checking[folder] and RGBA(0.5, 0.5, 0.5, 0.9) or G.C.BLUE
 
-      rows[#rows+1] = {
-        n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = {
-          { n = G.UIT.C, config = { align = "cl", padding = 0, minw = 3.5 }, nodes = {
-            create_toggle {
-              label = entry.display,
-              ref_table = config.mod_update_enabled,
-              ref_value = entry.folder,
-              scale = 0.3,
-              callback = function()
-                write_ps1_config_overlay()
-              end
-            },
-          }},
-          { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 0.9, minh = 0.34, r = 0.08,
-            colour = check_colour, button = "amu_check_mod_" .. row_i, hover = true, shadow = true }, nodes = {
-            { n = G.UIT.T, config = { text = "Check", scale = 0.26, colour = G.C.UI.TEXT_LIGHT } }
-          }},
-          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 1.0 }, nodes = {
-            { n = G.UIT.T, config = { ref_table = amu_per_mod_status, ref_value = folder, scale = 0.24, colour = G.C.UI.TEXT_LIGHT } }
-          }},
-        }
+      local row_nodes = {
+        -- Mod name as plain text on the left (matching Backups page layout)
+        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 3.2 }, nodes = {
+          { n = G.UIT.T, config = { text = entry.display, scale = 0.34, colour = G.C.UI.TEXT_LIGHT } }
+        }},
+        { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
+        -- Toggle (no label) for consistent sizing and controller navigation
+        { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = {
+          create_toggle {
+            label = "",
+            ref_table = config.mod_update_enabled,
+            ref_value = entry.folder,
+            scale = 0.3,
+            callback = function()
+              write_ps1_config_overlay()
+            end
+          },
+        }},
+        { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
+        -- Check button
+        { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 0.9, minh = 0.34, r = 0.08,
+          colour = check_colour, button = "amu_check_mod_" .. row_i, hover = true, shadow = true }, nodes = {
+          { n = G.UIT.T, config = { text = "Check", scale = 0.26, colour = G.C.UI.TEXT_LIGHT } }
+        }},
+        -- Status text
+        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 1.0 }, nodes = {
+          { n = G.UIT.T, config = { ref_table = amu_per_mod_status, ref_value = folder, scale = 0.24, colour = G.C.UI.TEXT_LIGHT } }
+        }},
       }
+      rows[#rows+1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = row_nodes }
     end
   end
 
@@ -598,7 +606,7 @@ local function build_mod_toggles_page(page)
   local shown = end_i - start_i + 1
   for _ = shown + 1, MODS_PER_PAGE do
     rows[#rows+1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = {
-      { n = G.UIT.B, config = { h = 0.38, w = 4 } }
+      { n = G.UIT.B, config = { h = 0.38, w = 5.5 } }
     }}
   end
 
