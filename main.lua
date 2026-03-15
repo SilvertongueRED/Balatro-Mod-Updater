@@ -572,7 +572,7 @@ local function build_mod_toggles_page(page)
       local row_nodes = {
         -- Mod name as plain text on the left (matching Backups page layout)
         { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 3.2 }, nodes = {
-          { n = G.UIT.T, config = { text = entry.display, scale = 0.45, colour = G.C.UI.TEXT_LIGHT } }
+          { n = G.UIT.T, config = { text = entry.display, scale = 0.34, colour = G.C.UI.TEXT_LIGHT } }
         }},
         { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
         -- Toggle (no label) for consistent sizing and controller navigation
@@ -581,6 +581,7 @@ local function build_mod_toggles_page(page)
             label = "",
             ref_table = config.mod_update_enabled,
             ref_value = entry.folder,
+            w = 0,
             scale = 0.3,
             callback = function()
               write_ps1_config_overlay()
