@@ -893,7 +893,7 @@ SMODS.current_mod.extra_tabs = function()
           nodes = {
             { n = G.UIT.C, config = { align = "tm", padding = 0.05, minw = 6 }, nodes = {
               -- Header
-              { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
+              { n = G.UIT.R, config = { align = "cm", padding = 0.09 }, nodes = {
                 { n = G.UIT.T, config = { text = "Mod Update Toggles", scale = 0.5, colour = purple, shadow = true } }
               }},
               -- Dynamic placeholder for mod toggles
