@@ -575,7 +575,7 @@ local function build_mod_toggles_page(page)
             ref_table = config.mod_update_enabled,
             ref_value = entry.folder,
             w = 0,
-            scale = 0.7,
+            scale = 0.35,
             callback = function()
               write_ps1_config_overlay()
             end
@@ -792,26 +792,26 @@ SMODS.current_mod.config_tab = function()
       }},
       -- Toggles
       { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        create_toggle { label = "Auto-check at startup", ref_table = config, ref_value = "auto_run", w = 0, scale = 0.75 },
+        create_toggle { label = "Auto-check at startup", ref_table = config, ref_value = "auto_run", w = 0, scale = 0.4 },
       }},
       { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        create_toggle { label = "Update Git repos", ref_table = config, ref_value = "cfg_update_git", w = 0, scale = 0.75,
+        create_toggle { label = "Update Git repos", ref_table = config, ref_value = "cfg_update_git", w = 0, scale = 0.4,
           callback = function() write_ps1_config_overlay() end },
       }},
       { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        create_toggle { label = "Update via update.json", ref_table = config, ref_value = "cfg_update_updatejson", w = 0, scale = 0.75,
+        create_toggle { label = "Update via update.json", ref_table = config, ref_value = "cfg_update_updatejson", w = 0, scale = 0.4,
           callback = function() write_ps1_config_overlay() end },
       }},
       { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        create_toggle { label = "Make backups", ref_table = config, ref_value = "cfg_make_backups", w = 0, scale = 0.75,
+        create_toggle { label = "Make backups", ref_table = config, ref_value = "cfg_make_backups", w = 0, scale = 0.4,
           callback = function() write_ps1_config_overlay() end },
       }},
       { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        create_toggle { label = "Update Steamodded", ref_table = config, ref_value = "cfg_update_steamodded", w = 0, scale = 0.75,
+        create_toggle { label = "Update Steamodded", ref_table = config, ref_value = "cfg_update_steamodded", w = 0, scale = 0.4,
           callback = function() write_ps1_config_overlay() end },
       }},
       { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        create_toggle { label = "Update Lovely Injector", ref_table = config, ref_value = "cfg_update_lovely", w = 0, scale = 0.75,
+        create_toggle { label = "Update Lovely Injector", ref_table = config, ref_value = "cfg_update_lovely", w = 0, scale = 0.4,
           callback = function() write_ps1_config_overlay() end },
       }},
       -- Divider
