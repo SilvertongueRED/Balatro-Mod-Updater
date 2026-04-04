@@ -600,7 +600,15 @@ function Check-Forks() {
         if (-not $ownerRepo) { return }
 
         # Fetch original repo metadata
-        $origInfo      = Invoke-RestMethod -Uri "https://api.github.com/repos/$ownerRepo" -Headers $ghHeaders
+        $origInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/$ownerRepo" -Headers $ghHeaders
+
+        # If this repo is itself a fork, walk up to the true source repo so we
+        # scan forks of the original (where the full fork network lives)
+        if ($origInfo.fork -and $origInfo.source -and $origInfo.source.full_name) {
+          $ownerRepo = [string]$origInfo.source.full_name
+          $origInfo  = Invoke-RestMethod -Uri "https://api.github.com/repos/$ownerRepo" -Headers $ghHeaders
+        }
+
         $origPushedAt  = [datetime]$origInfo.pushed_at
         $defaultBranch = if ($origInfo.default_branch) { [string]$origInfo.default_branch } else { "main" }
 
