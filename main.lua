@@ -1825,7 +1825,6 @@ build_fork_mods_page = function(page)
           label_parts[#label_parts+1] = fork_count == 1 and "1 fork" or (fork_count .. " forks")
         end
         local fork_label = table.concat(label_parts, " + ")
-        if fork_label == "" then fork_label = #entry.forks == 1 and "1 entry" or (#entry.forks .. " entries") end
         local label_colour = has_upstream and orange or (is_switched and G.C.GREEN or G.C.UI.TEXT_LIGHT)
 
         local action_btn
