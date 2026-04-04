@@ -76,6 +76,9 @@ $defaults = [ordered]@{
   balatro_game_dir = ""  # optional override
 }
 
+# Forks not pushed within this many months are considered stale and skipped during fork scanning
+$ForkStalenessMonths = 12
+
 $configPath = Join-Path $selfDirResolved "autoupdater_config.json"
 $config = Read-JsonIfExists $configPath
 if (-not $config) {
@@ -599,6 +602,9 @@ function Check-Forks() {
         $ownerRepo = Get-GitHubRepoForMod $path
         if (-not $ownerRepo) { return }
 
+        # Remember the repo the user currently has installed so we can exclude it from suggestions
+        $installedRepo = $ownerRepo
+
         # Fetch original repo metadata
         $origInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/$ownerRepo" -Headers $ghHeaders
 
@@ -609,8 +615,8 @@ function Check-Forks() {
           $origInfo  = Invoke-RestMethod -Uri "https://api.github.com/repos/$ownerRepo" -Headers $ghHeaders
         }
 
-        $origPushedAt  = [datetime]$origInfo.pushed_at
         $defaultBranch = if ($origInfo.default_branch) { [string]$origInfo.default_branch } else { "main" }
+        $staleThreshold = (Get-Date).AddMonths(-$ForkStalenessMonths)
 
         # Fetch forks sorted by most recently pushed
         $forks = Invoke-RestMethod -Uri "https://api.github.com/repos/$ownerRepo/forks?sort=pushed&per_page=10" -Headers $ghHeaders
@@ -621,9 +627,13 @@ function Check-Forks() {
             $forkOwner    = [string]$fork.owner.login
             $forkPushedAt = [datetime]$fork.pushed_at
             $forkBranch   = if ($fork.default_branch) { [string]$fork.default_branch } else { $defaultBranch }
+            $forkFullName = "$forkOwner/$($fork.name)"
 
-            # Only consider forks pushed more recently than the original
-            if ($forkPushedAt -le $origPushedAt) { continue }
+            # Skip the repo the user already has installed
+            if ($forkFullName -eq $installedRepo) { continue }
+
+            # Skip forks that haven't been pushed in over a year (truly abandoned)
+            if ($forkPushedAt -lt $staleThreshold) { continue }
 
             # Get commit comparison
             $compareUrl = "https://api.github.com/repos/$ownerRepo/compare/${defaultBranch}...${forkOwner}:${forkBranch}"
@@ -658,7 +668,7 @@ function Check-Forks() {
             } catch {}
 
             $activeForks += @{
-              repo                 = "$forkOwner/$($fork.name)"
+              repo                 = $forkFullName
               owner                = $forkOwner
               pushed_at            = $fork.pushed_at
               stars                = [int]$fork.stargazers_count
@@ -670,7 +680,8 @@ function Check-Forks() {
               html_url             = [string]$fork.html_url
             }
           } catch {
-            # Skip individual fork errors silently (rate limits, network errors, etc.)
+            # Log individual fork errors so the user can see what went wrong
+            $summary.errors += "Fork scan: error checking fork of $ownerRepo ($forkOwner): $($_.Exception.Message)"
           }
         }
 
@@ -681,7 +692,7 @@ function Check-Forks() {
           }
         }
       } catch {
-        # Skip per-mod errors silently so one failure doesn't abort the whole scan
+        $summary.errors += "Fork scan: error processing mod '$name': $($_.Exception.Message)"
       }
     }
   } catch {
@@ -1174,13 +1185,14 @@ function Update-Frameworks() {
 }
 
 
-Update-Frameworks
-
 # ---- Fork scan mode (-CheckForks) ----
+# Skip framework updates when we only need to discover forks (saves API quota).
 if ($CheckForks) {
   Check-Forks
   try { Save-JsonNoBom $summaryPath $summary } catch {}
   exit 0
 }
+
+Update-Frameworks
 
 try { Save-JsonNoBom $summaryPath $summary } catch {}
