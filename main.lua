@@ -514,7 +514,9 @@ local AMU_FORK_PAGE = 1
 local amu_fork_status = { text = "" }
 local amu_fork_scanning = false
 local amu_fork_suggestions = nil
-local build_fork_mods_page  -- forward declaration; assigned after close_overlay is defined
+local load_fork_suggestions  -- forward declaration; assigned after open_overlay/close_overlay
+local get_fork_mod_entries   -- forward declaration; assigned after open_overlay/close_overlay
+local build_fork_mods_page   -- forward declaration; assigned after close_overlay is defined
 
 local function get_display_name(folder_name)
   local display = folder_name
@@ -1345,7 +1347,7 @@ end
 -- (defined here, after open_overlay/close_overlay are in scope)
 ---------------------------------------------------------------------------
 
-local function load_fork_suggestions()
+load_fork_suggestions = function()
   local mod_path = (SMODS.current_mod and SMODS.current_mod.path) or ""
   if mod_path == "" then return nil end
   local data = read_all(join_path(mod_path, "fork_suggestions.json"))
@@ -1353,7 +1355,7 @@ local function load_fork_suggestions()
   return decode_json(data)
 end
 
-local function get_fork_mod_entries()
+get_fork_mod_entries = function()
   if not amu_fork_suggestions or not amu_fork_suggestions.suggestions then return {} end
   local entries = {}
   for folder_name, data in pairs(amu_fork_suggestions.suggestions) do
