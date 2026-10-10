@@ -93,6 +93,19 @@ foreach ($t in $tasks) {
       Ensure-Dir ([IO.Path]::GetDirectoryName($dst))
       Copy-Item -LiteralPath $src -Destination $dst -Force
       $log.results += "copied: $src -> $dst" + ($(if($bak){" (backup: $bak)"}else{""}))
+    } elseif ($t.type -eq "disable_file") {
+      # Rename (not delete) an old file, e.g. Lovely's version.dll after switching to winmm.dll.
+      $dst = [string]$t.dst
+      # Never remove the old Lovely if installing the new one failed - you'd have no Lovely at all.
+      if ($log.errors.Count -gt 0) { throw "skipped renaming $dst because an earlier step failed" }
+      if (Test-Path -LiteralPath $dst) {
+        $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $newPath = "$dst.old_$stamp"
+        Move-Item -LiteralPath $dst -Destination $newPath -Force
+        $log.results += "renamed old file: $dst -> $newPath"
+      } else {
+        $log.results += "skipped (already gone): $dst"
+      }
     } elseif ($t.type -eq "replace_dir") {
       $src = [string]$t.src
       $dst = [string]$t.dst

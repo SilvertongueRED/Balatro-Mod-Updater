@@ -1435,9 +1435,7 @@ function Update-Frameworks() {
     }
   }
 
-  # 2) Lovely version.dll in game folder
-# version.dll in game folder
-# 2) Lovely version.dll in game folder
+  # 2) Lovely (winmm.dll since v0.10.0, version.dll before) in game folder
   if ($config.update_lovely) {
     try {
       $gameDir = Get-BalatroGameDir
@@ -1447,18 +1445,24 @@ function Update-Frameworks() {
       $tag = [string]$rel.tag_name
       if (-not $tag) { throw "Missing tag_name from GitHub latest release." }
 
-      # Fast path: same tag as last time and the installed dll still has the hash we recorded.
-      $dstDllFast = Join-Path $gameDir "version.dll"
-      if ($state.lovely_tag -eq $tag -and $state.lovely_hash -and (Test-Path -LiteralPath $dstDllFast)) {
+      # Lovely's Windows file was renamed in v0.10.0: version.dll -> winmm.dll.
+      # Exactly ONE of them may be in the game folder (two would load Lovely twice).
+      $lovelyNames = @("winmm.dll", "version.dll")
+      $presentDlls = @($lovelyNames | Where-Object { Test-Path -LiteralPath (Join-Path $gameDir $_) })
+
+      # Fast path: same tag as last time, the recorded file is the only Lovely dll present,
+      # and its hash still matches.
+      $stateFile = if ($state.lovely_file) { [string]$state.lovely_file } else { "version.dll" }
+      if ($state.lovely_tag -eq $tag -and $state.lovely_hash -and $presentDlls.Count -eq 1 -and $presentDlls[0] -eq $stateFile) {
         $curHash = $null
-        try { $curHash = (Get-FileHash -LiteralPath $dstDllFast -Algorithm SHA256).Hash } catch {}
+        try { $curHash = (Get-FileHash -LiteralPath (Join-Path $gameDir $stateFile) -Algorithm SHA256).Hash } catch {}
         if ($curHash -eq $state.lovely_hash) {
           $summary.skipped_mods += "[Framework] Lovely already current ($tag)"
           throw [System.OperationCanceledException]::new("lovely-current")
         }
       }
 
-      # Pick the Windows MSVC zip asset (contains version.dll)
+      # Pick the Windows MSVC zip asset
       $assetRegex = "lovely-x86_64-pc-windows-msvc\.zip$"
       $asset = $null
       foreach ($a in $rel.assets) { if ($a.name -match $assetRegex) { $asset = $a; break } }
@@ -1470,38 +1474,50 @@ function Update-Frameworks() {
       $extract = Join-Path $tmpRoot "extract"
       Ensure-Dir $extract
 
-      Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers @{ "User-Agent"="BalatroModUpdater" } | Out-Null
+      Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers @{ "User-Agent"="BalatroModUpdater" } -UseBasicParsing | Out-Null
       Expand-Archive -LiteralPath $zipPath -DestinationPath $extract -Force
 
-      $dll = Get-ChildItem -LiteralPath $extract -Recurse -File -Filter "version.dll" | Select-Object -First 1
-      if (-not $dll) { throw "version.dll not found inside Lovely archive." }
+      $dll = $null
+      foreach ($n in $lovelyNames) {
+        $dll = Get-ChildItem -LiteralPath $extract -Recurse -File -Filter $n | Select-Object -First 1
+        if ($dll) { break }
+      }
+      if (-not $dll) { throw "Neither winmm.dll nor version.dll found inside the Lovely archive." }
+      $newName = $dll.Name.ToLower()
+      $dstDll = Join-Path $gameDir $newName
+      $oldDlls = @($presentDlls | Where-Object { $_ -ne $newName })
 
-      $dstDll = Join-Path $gameDir "version.dll"
-
-      # Compare hashes: if the existing version.dll matches the latest release dll, don't stage anything.
       $newHash = (Get-FileHash -LiteralPath $dll.FullName -Algorithm SHA256).Hash
       $oldHash = $null
       if (Test-Path -LiteralPath $dstDll) {
         try { $oldHash = (Get-FileHash -LiteralPath $dstDll -Algorithm SHA256).Hash } catch { $oldHash = $null }
       }
 
-      if ($oldHash -and $newHash -and ($newHash -eq $oldHash)) {
-        # Already current; update state so we stop re-staging on every run.
+      if ($oldHash -and $newHash -and ($newHash -eq $oldHash) -and $oldDlls.Count -eq 0) {
         $state.lovely_tag = $tag
         $state.lovely_hash = $newHash
+        $state.lovely_file = $newName
         try { Save-JsonNoBom $statePath $state } catch {}
         $summary.skipped_mods += "[Framework] Lovely already current ($tag)"
         Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
       } else {
-        $stageDll = Join-Path $pendingRoot "version.dll"
+        $stageDll = Join-Path $pendingRoot $newName
         Copy-Item -LiteralPath $dll.FullName -Destination $stageDll -Force
+        if (-not ($oldHash -and $newHash -eq $oldHash)) {
+          Stage-FrameworkUpdate $pending "copy_file" $stageDll $dstDll "lovely" $tag
+        }
+        # Old-named Lovely dll (e.g. version.dll after the switch to winmm.dll) gets renamed
+        # out of the way when the update is applied, so Lovely isn't loaded twice.
+        foreach ($old in $oldDlls) {
+          $pending.tasks += @{ type="disable_file"; dst=(Join-Path $gameDir $old); label="lovely-old"; version=$tag }
+          $pending.notes += "Old Lovely $old will be renamed to $old.old_<date>"
+        }
 
-        Stage-FrameworkUpdate $pending "copy_file" $stageDll $dstDll "lovely" $tag
-
-        $pending.notes += "Lovely staged: $tag"
-        $summary.skipped_mods += "[Framework staged] Lovely ($tag)"
+        $pending.notes += "Lovely staged: $tag ($newName)"
+        $summary.skipped_mods += "[Framework staged] Lovely ($tag, $newName)"
         $state.lovely_tag = $tag
         $state.lovely_hash = $newHash
+        $state.lovely_file = $newName
         try { Save-JsonNoBom $statePath $state } catch {}
 
         Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue

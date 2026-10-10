@@ -2022,87 +2022,100 @@ function show_prompt(summary)
   AMU_PROMPT.lines = build_prompt_lines(summary)
   AMU_PROMPT.has_updates = (#updated > 0) or fw
 
+  AMU_PROMPT.page = 1
   open_overlay(G.UIDEF.amu_restart_prompt(AMU_PROMPT))
 end
+
+-- The results window shows a fixed number of lines per page so it always fits on
+-- screen, with the Restart/Later buttons right under the title (they used to sit at
+-- the bottom and get pushed off-screen by long results).
+local AMU_PROMPT_PAGE_SIZE = 12
 
 G.UIDEF.amu_restart_prompt = function(ref)
   local purple = (G.C and (G.C.PURPLE or (G.C.UI and G.C.UI.PURPLE))) or RGBA(0.62, 0.33, 0.92, 1)
   local bg    = RGBA(0.08, 0.08, 0.08, 0.96)
   local panel = RGBA(0.12, 0.12, 0.12, 0.96)
 
-  local max_show = 40
-  local show_n = math.min(#ref.lines, max_show)
+  local lines = ref.lines or {}
+  local page_size = AMU_PROMPT_PAGE_SIZE
+  local pages = math.max(1, math.ceil(#lines / page_size))
+  ref.page = math.max(1, math.min(tonumber(ref.page) or 1, pages))
+  local first = (ref.page - 1) * page_size + 1
+  local last = math.min(#lines, first + page_size - 1)
 
   local max_len = 0
-  for i = 1, show_n do
-    local s = tostring(ref.lines[i] or "")
-    if #s > max_len then max_len = #s end
-  end
-  if #ref.lines > max_show then
-    local s = "(more in " .. mod_folder_name .. "/last_run.json)"
+  for i = 1, #lines do
+    local s = tostring(lines[i] or "")
     if #s > max_len then max_len = #s end
   end
 
   local w = math.min(15.5, math.max(10.0, 6.4 + max_len * 0.11))
-  local line_h = 0.34
-  local content_h = math.min(8.8, math.max(1.9, show_n * line_h + 0.45))
-  local h = math.min(11.5, math.max(5.6, content_h + 2.7))
+  local line_h = 0.42
+  -- same height on every page so the window doesn't jump around
+  local content_h = math.max(1.9, math.min(#lines, page_size) * line_h + 0.3)
 
   local text_rows = {}
-  for i = 1, show_n do
+  for i = first, last do
     text_rows[#text_rows+1] = {
       n = G.UIT.R,
       config = { align = "cl", padding = 0.01 },
       nodes = {
-        { n = G.UIT.T, config = { text = tostring(ref.lines[i]), scale = 0.45, colour = purple } }
-      }
-    }
-  end
-  if #ref.lines > max_show then
-    text_rows[#text_rows+1] = {
-      n = G.UIT.R,
-      config = { align = "cl", padding = 0.01 },
-      nodes = {
-        { n = G.UIT.T, config = { text = "(more in " .. mod_folder_name .. "/last_run.json)", scale = 0.41, colour = purple } }
+        { n = G.UIT.T, config = { text = tostring(lines[i]), scale = 0.4, colour = purple } }
       }
     }
   end
 
-  local buttons_row = { n = G.UIT.R, config = { align = "cm", padding = 0.12 }, nodes = {} }
+  local function btn(label, func, colour, minw)
+    return { n = G.UIT.C, config = { align = "cm", padding = 0.1, minw = minw or 3.0, minh = 0.75, r = 0.15, colour = colour, button = func, hover = true, shadow = true }, nodes = {
+      { n = G.UIT.T, config = { text = label, scale = 0.5, colour = purple } }
+    }}
+  end
+  local gap = { n = G.UIT.B, config = { h = 0.1, w = 0.3 } }
+
+  local buttons_row = { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {} }
   if ref.has_updates and (config.prompt_restart ~= false) then
-    buttons_row.nodes = {
-      { n = G.UIT.C, config = { align = "cm", padding = 0.1, minw = 4.0, minh = 0.9, r = 0.15, colour = G.C.GREEN, button = "amu_restart_now" }, nodes = {
-        { n = G.UIT.T, config = { text = "Restart now", scale = 0.55, colour = purple } }
-      }},
-      { n = G.UIT.B, config = { h = 0.1, w = 0.35 } },
-      { n = G.UIT.C, config = { align = "cm", padding = 0.1, minw = 3.0, minh = 0.9, r = 0.15, colour = panel, button = "amu_close_prompt" }, nodes = {
-        { n = G.UIT.T, config = { text = "Later", scale = 0.55, colour = purple } }
-      }},
-    }
+    buttons_row.nodes = { btn("Restart now", "amu_restart_now", G.C.GREEN, 3.6), gap, btn("Later", "amu_close_prompt", panel, 2.6) }
   else
-    buttons_row.nodes = {
-      { n = G.UIT.C, config = { align = "cm", padding = 0.1, minw = 3.5, minh = 0.9, r = 0.15, colour = panel, button = "amu_close_prompt" }, nodes = {
-        { n = G.UIT.T, config = { text = "OK", scale = 0.55, colour = purple } }
-      }},
-    }
+    buttons_row.nodes = { btn("OK", "amu_close_prompt", panel, 3.0) }
+  end
+
+  local nodes = {
+    { n = G.UIT.R, config = { align = "cm", padding = 0.06 }, nodes = {
+      { n = G.UIT.T, config = { text = ref.title or "Mod Updater", scale = 0.65, colour = purple, shadow = true } }
+    }},
+    buttons_row,
+    { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
+      { n = G.UIT.C, config = { align = "tl", padding = 0.10, minw = w - 1.0, minh = content_h, r = 0.16, colour = panel }, nodes = text_rows }
+    }},
+  }
+
+  if pages > 1 then
+    nodes[#nodes+1] = { n = G.UIT.R, config = { align = "cm", padding = 0.06 }, nodes = {
+      btn("< Prev", "amu_prompt_prev", ref.page > 1 and panel or bg, 2.2), gap,
+      { n = G.UIT.C, config = { align = "cm", minw = 2.4 }, nodes = {
+        { n = G.UIT.T, config = { text = "Page " .. ref.page .. " / " .. pages, scale = 0.45, colour = purple } }
+      }}, gap,
+      btn("Next >", "amu_prompt_next", ref.page < pages and panel or bg, 2.2),
+    }}
   end
 
   return {
     n = G.UIT.ROOT,
-    config = { align = "cm", minw = w, minh = h, padding = 0.24, r = 0.2, colour = bg, shadow = true, hover = true },
-    nodes = {
-      { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
-        { n = G.UIT.T, config = { text = ref.title or "Mod Updater", scale = 0.72, colour = purple, shadow = true } }
-      }},
-      { n = G.UIT.B, config = { h = 0.18, w = 0.1 } },
-      { n = G.UIT.R, config = { align = "cm", padding = 0.10 }, nodes = {
-        { n = G.UIT.C, config = { align = "cl", padding = 0.10, minw = w - 1.0, minh = content_h, r = 0.16, colour = panel }, nodes = text_rows }
-      }},
-      { n = G.UIT.B, config = { h = 0.18, w = 0.1 } },
-      buttons_row
-    }
+    config = { align = "cm", minw = w, padding = 0.2, r = 0.2, colour = bg, shadow = true, hover = true },
+    nodes = nodes
   }
 end
+
+local function amu_prompt_goto(delta)
+  local pages = math.max(1, math.ceil(#(AMU_PROMPT.lines or {}) / AMU_PROMPT_PAGE_SIZE))
+  local target = math.max(1, math.min(pages, (AMU_PROMPT.page or 1) + delta))
+  if target == AMU_PROMPT.page then return end
+  AMU_PROMPT.page = target
+  close_overlay()
+  open_overlay(G.UIDEF.amu_restart_prompt(AMU_PROMPT))
+end
+function G.FUNCS.amu_prompt_next(e) amu_prompt_goto(1) end
+function G.FUNCS.amu_prompt_prev(e) amu_prompt_goto(-1) end
 
 function G.FUNCS.amu_close_prompt(e) close_overlay() end
 function G.FUNCS.amu_restart_now(e)
@@ -2222,6 +2235,7 @@ local function on_full_update_done(mod_path)
     end
     AMU_PROMPT.title    = "Mod Updater - Crash Detected"
     AMU_PROMPT.lines    = wrap_lines(lines, 46)
+    AMU_PROMPT.page = 1
     AMU_PROMPT.has_updates = (summary ~= nil and (#(summary.updated_mods or {}) > 0 or summary.framework_staged == true))
     open_overlay(G.UIDEF.amu_restart_prompt(AMU_PROMPT))
   elseif summary then
