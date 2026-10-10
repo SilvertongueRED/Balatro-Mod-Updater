@@ -7,7 +7,8 @@ param(
   [switch]$CheckForks,
   [string]$SwitchModName = "",
   [string]$SwitchToForkRepo = "",
-  [string]$SwitchBackModName = ""
+  [string]$SwitchBackModName = "",
+  [switch]$RollbackRecent
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,6 +31,8 @@ function Save-JsonNoBom([string]$path, $obj) {
 }
 
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+# Windows PowerShell 5.1's progress bar makes Invoke-WebRequest downloads many times slower.
+$ProgressPreference = "SilentlyContinue"
 
 $ModsDir = $ModsDir.Trim().Trim('"')
 $SelfDir = $SelfDir.Trim().Trim('"')
@@ -39,6 +42,9 @@ $summary = @{
   updated_mods = @()
   skipped_mods = @()
   errors = @()
+  available_updates = @()   # updates found that need a manual download (e.g. Nexus without Premium)
+  untracked_mods = @()      # mods with no git repo and no update.json (never checked)
+  framework_staged = $false # true when Steamodded/Lovely updates are waiting for a restart
 }
 
 # Tracks mods updated this run so crash detection can roll them back if needed
@@ -74,6 +80,9 @@ $defaults = [ordered]@{
   update_lovely = $false
   pinned_mods = [PSCustomObject]@{}
   balatro_game_dir = ""  # optional override
+  github_token = ""      # optional: a GitHub token raises the API limit from 60 to 5000 requests/hour
+  git_reset_on_diverge = $false  # if true, a mod whose history was force-pushed upstream is reset to upstream (after backup)
+  report_untracked = $true       # list mods that have no git repo and no update.json, so you know they're never checked
 }
 
 # Forks not pushed within this many months are considered stale and skipped during fork scanning
@@ -92,6 +101,21 @@ if (-not $config) {
 
 $skipSet = @{}
 foreach ($n in $config.skip_folders) { $skipSet[$n] = $true }
+
+# Headers for GitHub API calls. Adds the optional token so we don't hit the 60/hour anonymous limit.
+function Get-GhHeaders() {
+  $h = @{ "User-Agent"="BalatroModUpdater"; "Accept"="application/vnd.github+json" }
+  if ($config.github_token -and ([string]$config.github_token).Trim() -ne "") {
+    $h["Authorization"] = "Bearer " + ([string]$config.github_token).Trim()
+  }
+  return $h
+}
+
+# Returns the HTTP status code from a failed Invoke-RestMethod/Invoke-WebRequest, or 0 if unknown.
+function Get-HttpStatus($err) {
+  try { if ($err.Exception.Response) { return [int]$err.Exception.Response.StatusCode } } catch {}
+  return 0
+}
 
 # When -TargetMod is provided, only process that single mod folder
 $targetModFilter = $TargetMod.Trim().Trim('"')
@@ -185,16 +209,42 @@ if ($config.pinned_mods) {
 
 # ---- Sentinel-based crash detection ----
 # Only active in normal update mode (not restore-only and not single-mod target).
+#
+# How it works (fixed in 0.7.0 - previously the sentinel was written right after the
+# update ran, in the same session, so a crash on the NEXT launch was never detected):
+#   * PS1 writes _recently_updated.json after updating, and deletes the old sentinel/flags.
+#   * main.lua writes _launch_attempt very early while the game is loading, and
+#     _launch_sentinel once the main menu is reached.
+#   * If main.lua starts and finds _launch_attempt but no _launch_sentinel, the previous
+#     launch never reached the menu, so it writes _crash_flag.
+#   * Next PS1 run: _crash_flag present -> roll back + pin the recently updated mods.
+#                   sentinel present    -> the update was fine, clean up.
+#   * -RollbackRecent (used by "Undo last update.bat") forces the rollback from outside
+#     the game, for when Balatro won't start at all.
+$launchAttemptPath = Join-Path $selfDirResolved "_launch_attempt"
+$crashFlagPath     = Join-Path $selfDirResolved "_crash_flag"
+
+function Clear-LaunchMarkers() {
+  foreach ($p in @($launchSentinelPath, $launchAttemptPath, $crashFlagPath)) {
+    Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+  }
+}
+
 if ($RestoreModName -eq "" -and $TargetMod -eq "") {
   $sentinelExists    = Test-Path -LiteralPath $launchSentinelPath
   $recentlyUpdExists = Test-Path -LiteralPath $recentlyUpdatedPath
+  $crashFlagExists   = (Test-Path -LiteralPath $crashFlagPath) -or $RollbackRecent
 
-  if ($recentlyUpdExists -and $sentinelExists) {
-    # Both exist: game started fine after the last update. Clean up.
+  if ($RollbackRecent -and -not $recentlyUpdExists) {
+    $summary.errors += "Undo last update: nothing to undo (_recently_updated.json not found)."
+  }
+
+  if ($recentlyUpdExists -and -not $crashFlagExists -and $sentinelExists) {
+    # Game reached the main menu after the last update. Clean up.
     Remove-Item -LiteralPath $recentlyUpdatedPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $launchSentinelPath  -Force -ErrorAction SilentlyContinue
-  } elseif ($recentlyUpdExists -and -not $sentinelExists) {
-    # _recently_updated.json exists but no sentinel: game crashed after the last update.
+    Clear-LaunchMarkers
+  } elseif ($recentlyUpdExists -and $crashFlagExists) {
+    # A launch after the last update never reached the main menu (or the user asked to undo).
     $recentlyUpdated = Read-JsonIfExists $recentlyUpdatedPath
     if ($recentlyUpdated) {
       if (-not $config.pinned_mods) { $config.pinned_mods = [PSCustomObject]@{} }
@@ -248,11 +298,17 @@ if ($RestoreModName -eq "" -and $TargetMod -eq "") {
       }
     }
     Remove-Item -LiteralPath $recentlyUpdatedPath -Force -ErrorAction SilentlyContinue
-  } elseif ($sentinelExists) {
-    # Sentinel exists but no recently_updated.json: stale sentinel from a run with no updates.
-    Remove-Item -LiteralPath $launchSentinelPath -Force -ErrorAction SilentlyContinue
+    Clear-LaunchMarkers
+  } elseif (-not $recentlyUpdExists) {
+    # No pending update to judge: stale markers from a run with no updates.
+    Clear-LaunchMarkers
   }
-  # else: neither file exists — first run or already cleaned up. Nothing to do.
+  # else: update applied but the game hasn't been relaunched yet. Keep waiting.
+}
+
+if ($RollbackRecent) {
+  try { Save-JsonNoBom $summaryPath $summary } catch {}
+  exit 0
 }
 
 # Restore-only mode: when called with -RestoreModName and -RestoreBackupFile, just restore and exit.
@@ -286,6 +342,22 @@ function Short-Out($out) {
   return ($s -replace "\s+", " ").Trim()
 }
 
+function Get-UnmergedFiles([string]$folderPath) {
+  $r = Run-Git $folderPath @("diff","--name-only","--diff-filter=U")
+  if ($r.code -ne 0 -or -not $r.out) { return @() }
+  return @($r.out | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() -ne "" })
+}
+
+# Reads an optional update.json inside a git mod. Supported keys for git mods:
+#   "provider": "git"            (optional, just documents intent)
+#   "branch":   "stable"         follow this branch instead of whatever is checked out
+# If update.json says provider "github" or "nexus", that wins over git (see Update-OneMod).
+function Get-ModUpdateJson([string]$folderPath) {
+  $p = Join-Path $folderPath "update.json"
+  if (-not (Test-Path -LiteralPath $p)) { return $null }
+  return (Read-JsonIfExists $p)
+}
+
 function Update-GitMod([string]$folderPath, [string]$folderName) {
   if (-not $config.update_git) { return $false }
   $gitDir = Join-Path $folderPath ".git"
@@ -293,6 +365,9 @@ function Update-GitMod([string]$folderPath, [string]$folderName) {
 
   $git = Get-Command git -ErrorAction SilentlyContinue
   if (-not $git) { $summary.skipped_mods += "$folderName (git: no git in PATH)"; return $true }
+
+  $uj = Get-ModUpdateJson $folderPath
+  $wantBranch = if ($uj -and $uj.branch) { ([string]$uj.branch).Trim() } else { "" }
 
   # If a backup was restored while the mod was pinned, reset the working tree
   # to match HEAD so the updater can properly compare and pull new changes.
@@ -309,6 +384,16 @@ function Update-GitMod([string]$folderPath, [string]$folderName) {
   }
 
   try {
+    # Repair a mod left half-merged by an earlier run (conflict markers like <<<<<<< break mods).
+    $leftover = Get-UnmergedFiles $folderPath
+    if ($leftover.Count -gt 0) {
+      [void](Backup-Folder $folderPath "$folderName-conflicted")
+      Run-Git $folderPath @("rebase","--abort") | Out-Null
+      Run-Git $folderPath @("merge","--abort") | Out-Null
+      Run-Git $folderPath @("reset","--hard","HEAD") | Out-Null
+      $summary.skipped_mods += "$folderName (git: repaired leftover merge conflict in $($leftover -join ', '); your old edits are still in 'git stash list')"
+    }
+
     $fetch = Run-Git $folderPath @("fetch","--all","--prune")
     if ($fetch.code -ne 0) {
       $summary.errors += "ERROR updating (git) ${folderName}: fetch failed ($($fetch.code)) " + (Short-Out $fetch.out)
@@ -322,54 +407,109 @@ function Update-GitMod([string]$folderPath, [string]$folderName) {
     }
     $local = ($localRes.out | Select-Object -First 1).Trim()
 
+    # Branch override from update.json (e.g. JokerDisplay must follow "stable", not "main").
+    $switchedBranch = $false
+    if ($wantBranch -ne "") {
+      $curRes = Run-Git $folderPath @("rev-parse","--abbrev-ref","HEAD")
+      $cur = if ($curRes.code -eq 0) { ($curRes.out | Select-Object -First 1).Trim() } else { "" }
+      if ($cur -ne $wantBranch) {
+        $exists = Run-Git $folderPath @("rev-parse","--verify","--quiet","refs/remotes/origin/$wantBranch")
+        if ($exists.code -ne 0) {
+          $summary.errors += "ERROR updating (git) ${folderName}: update.json asks for branch '$wantBranch' but origin has no such branch"
+          return $true
+        }
+        $bk = Backup-Folder $folderPath $folderName
+        $co = Run-Git $folderPath @("checkout","-f","-B",$wantBranch,"--track","origin/$wantBranch")
+        if ($co.code -ne 0) {
+          $summary.errors += "ERROR updating (git) ${folderName}: couldn't switch to branch '$wantBranch' " + (Short-Out $co.out)
+          return $true
+        }
+        $switchedBranch = $true
+        $newHead = ((Run-Git $folderPath @("rev-parse","HEAD")).out | Select-Object -First 1).Trim()
+        $summary.updated_mods += "$folderName (switched to branch $wantBranch)"
+        $recentlyUpdatedEntries.Add(@{ mod_name = $folderName; backup_file = if ($bk) { $bk } else { "" }; updated_to_version = $newHead; updated_at = (Get-Date).ToString("o") })
+        return $true
+      }
+    }
+
     $upRes = Run-Git $folderPath @("rev-parse","@{u}")
     if ($upRes.code -ne 0) {
-      $summary.skipped_mods += "$folderName (git: no upstream tracking branch)"
-      return $true
+      # No tracking branch (e.g. detached HEAD or a manual clone). Track origin's default branch.
+      $def = Get-GitDefaultBranch $folderPath
+      $hasDef = Run-Git $folderPath @("rev-parse","--verify","--quiet","refs/remotes/origin/$def")
+      if ($hasDef.code -ne 0) {
+        $summary.skipped_mods += "$folderName (git: no upstream tracking branch)"
+        return $true
+      }
+      $cur = ((Run-Git $folderPath @("rev-parse","--abbrev-ref","HEAD")).out | Select-Object -First 1).Trim()
+      if ($cur -eq "HEAD") {
+        $summary.skipped_mods += "$folderName (git: detached HEAD - add update.json with `"branch`" to follow a branch)"
+        return $true
+      }
+      Run-Git $folderPath @("branch","--set-upstream-to=origin/$def") | Out-Null
+      $upRes = Run-Git $folderPath @("rev-parse","@{u}")
+      if ($upRes.code -ne 0) {
+        $summary.skipped_mods += "$folderName (git: no upstream tracking branch)"
+        return $true
+      }
     }
     $upstream = ($upRes.out | Select-Object -First 1).Trim()
 
     if ($local -eq $upstream) {
-      # If working tree was just restored from backup, report as updated since
-      # the checkout/clean above already brought it back to HEAD (latest).
       if ($wasRestored) { $summary.updated_mods += $folderName }
+      return $true
+    }
+
+    # Already contains upstream (local is ahead, e.g. your own unpushed commits): nothing to pull.
+    $isAhead = Run-Git $folderPath @("merge-base","--is-ancestor",$upstream,"HEAD")
+    if ($isAhead.code -eq 0) {
+      $summary.skipped_mods += "$folderName (git: local is ahead of upstream, nothing to pull)"
       return $true
     }
 
     $bkFile = Backup-Folder $folderPath $folderName
     $oldHead = $local
 
-    # Stash any local changes to prevent "Your local changes would be
-    # overwritten" errors (e.g. runtime-generated config files that were
-    # previously tracked before being added to .gitignore).
-    $didStash = $false
-    $dirtyCheck = Run-Git $folderPath @("diff-index","--quiet","HEAD","--")
-    if ($dirtyCheck.code -ne 0) {
-      $stashRes = Run-Git $folderPath @("stash","push","-q")
-      if ($stashRes.code -eq 0) { $didStash = $true }
-    }
-
-    $pullArgs = @("pull")
+    # Local edits: git's --autostash handles both modes. If re-applying them conflicts we
+    # throw the edits back into the stash (never leave <<<<<<< markers in a mod).
+    $pullArgs = @("pull","--autostash")
     if ($config.git_pull_mode -and [string]$config.git_pull_mode -eq "rebase") {
-      $pullArgs += @("--rebase","--autostash")
+      $pullArgs += @("--rebase")
     } else {
       $pullArgs += @("--ff-only")
     }
     $pull = Run-Git $folderPath $pullArgs
 
-    # Restore stashed local changes (best-effort).
-    if ($didStash) {
-      Run-Git $folderPath @("stash","pop","-q") | Out-Null
+    $conflicts = Get-UnmergedFiles $folderPath
+    if ($conflicts.Count -gt 0) {
+      Run-Git $folderPath @("rebase","--abort") | Out-Null
+      # After --abort the tree is back to the old commit; move to upstream cleanly.
+      Run-Git $folderPath @("stash","push","-q","-m","amu: local edits that conflicted with update") | Out-Null
+      Run-Git $folderPath @("reset","--hard",$upstream) | Out-Null
+      $summary.skipped_mods += "$folderName (git: your local edits conflicted with the update; update applied, edits saved in 'git stash list')"
+      $pull = @{ code = 0; out = $null }
     }
 
     if ($pull.code -ne 0) {
-      $summary.errors += "ERROR updating (git) ${folderName}: pull failed ($($pull.code)) [mode=$($config.git_pull_mode)] " + (Short-Out $pull.out)
-      return $true
+      # Most common cause: the author force-pushed / rewrote history.
+      $diverged = Run-Git $folderPath @("merge-base","--is-ancestor","HEAD",$upstream)
+      if ($diverged.code -ne 0 -and $config.git_reset_on_diverge) {
+        Run-Git $folderPath @("stash","push","-q","-m","amu: local edits before diverge reset") | Out-Null
+        $rs = Run-Git $folderPath @("reset","--hard",$upstream)
+        if ($rs.code -eq 0) {
+          $summary.skipped_mods += "$folderName (git: upstream history was rewritten; reset to upstream, backup $bkFile)"
+          $pull = @{ code = 0; out = $null }
+        }
+      }
+      if ($pull.code -ne 0) {
+        $hint = if ($diverged.code -ne 0) { " (history diverged from upstream - set git_reset_on_diverge=true in autoupdater_config.json to auto-fix)" } else { "" }
+        $summary.errors += "ERROR updating (git) ${folderName}: pull failed ($($pull.code)) [mode=$($config.git_pull_mode)]$hint " + (Short-Out $pull.out)
+        return $true
+      }
     }
 
     $newHeadRes = Run-Git $folderPath @("rev-parse","HEAD")
     if ($newHeadRes.code -ne 0) {
-      # Can't verify; report as updated conservatively
       $summary.updated_mods += $folderName
       $recentlyUpdatedEntries.Add(@{ mod_name = $folderName; backup_file = if ($bkFile) { $bkFile } else { "" }; updated_to_version = ""; updated_at = (Get-Date).ToString("o") })
       return $true
@@ -388,67 +528,141 @@ function Update-GitMod([string]$folderPath, [string]$folderName) {
   return $true
 }
 
+# Downloads a zip and replaces the mod folder's contents with it.
+# update.json and .autoupdater_state.json are kept. If copying fails, the backup is restored.
+function Install-ZipIntoMod([string]$folderPath, [string]$folderName, [string]$url, [hashtable]$headers, [bool]$stripTop, [string]$bkFile) {
+  $tmpRoot = Join-Path ([IO.Path]::GetTempPath()) ("balatro_modupd_" + [Guid]::NewGuid().ToString("N"))
+  Ensure-Dir $tmpRoot
+  try {
+    $zipPath = Join-Path $tmpRoot "download.zip"
+    $extractPath = Join-Path $tmpRoot "extract"
+    Ensure-Dir $extractPath
+
+    Invoke-WebRequest -Uri $url -OutFile $zipPath -Headers $headers -UseBasicParsing | Out-Null
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
+
+    $children = @(Get-ChildItem -LiteralPath $extractPath -Force)
+    if ($children.Count -eq 0) { throw "Downloaded archive was empty." }
+    $srcRoot = $extractPath
+    if ($stripTop) {
+      $dirs = @($children | Where-Object { $_.PSIsContainer })
+      if ($dirs.Count -eq 1 -and $children.Count -eq 1) { $srcRoot = $dirs[0].FullName }
+    }
+
+    $preserve = @("update.json", ".autoupdater_state.json")
+    $preserveTemp = Join-Path $tmpRoot "preserve"
+    Ensure-Dir $preserveTemp
+    foreach ($p in $preserve) {
+      $pp = Join-Path $folderPath $p
+      if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $preserveTemp $p) -Force }
+    }
+
+    try {
+      Get-ChildItem -LiteralPath $folderPath -Force | ForEach-Object {
+        if ($preserve -contains $_.Name) { return }
+        Remove-Item -LiteralPath $_.FullName -Recurse -Force
+      }
+      Copy-Item -Path (Join-Path $srcRoot "*") -Destination $folderPath -Recurse -Force
+    } catch {
+      $msg = $_.Exception.Message
+      if ($bkFile) {
+        try {
+          Expand-Archive -LiteralPath (Join-Path $backupRoot $bkFile) -DestinationPath $folderPath -Force
+          throw "Install failed ($msg); restored the previous version from backup."
+        } catch { throw $_ }
+      }
+      throw "Install failed ($msg) and no backup was available."
+    }
+
+    foreach ($p in $preserve) {
+      $pp = Join-Path $preserveTemp $p
+      if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $folderPath $p) -Force }
+    }
+  } finally {
+    Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
+# GitHub provider. update.json keys:
+#   "repo":  "Owner/Repo"                      (required)
+#   "track": "auto" | "release" | "branch"     (default "auto")
+#       auto    = use releases if the repo has any, otherwise follow the newest commit
+#       release = only releases (error if none)
+#       branch  = always follow the newest commit on "branch" (or the default branch)
+#   "branch": "main"                            (branch to follow in branch mode)
+#   "include_prereleases": false                (also accept pre-releases)
+#   "asset_regex": ".*\.zip$"                   (which release asset to use; falls back to the source zip)
+#   "strip_single_top_folder": true
 function Update-GitHubReleaseMod([string]$folderPath, [string]$folderName, $uj) {
   $statePath = Join-Path $folderPath ".autoupdater_state.json"
   $state = Read-JsonIfExists $statePath
-  $installedTag = if ($state -and $state.tag) { [string]$state.tag } else { "" }
+  $repo = ([string]$uj.repo).Trim()
+  $track = if ($uj.track) { ([string]$uj.track).ToLower() } else { "auto" }
+  $gh = Get-GhHeaders
+  $stripTop = ($uj.strip_single_top_folder -ne $false)
 
-  $repo = [string]$uj.repo
-  $api = "https://api.github.com/repos/$repo/releases/latest"
-  $rel = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent"="BalatroModUpdater"; "Accept"="application/vnd.github+json" }
-  $tag = [string]$rel.tag_name
-  if (-not $tag) { throw "GitHub release missing tag_name" }
-  if ($installedTag -eq $tag) { return $true }
+  $rel = $null
+  if ($track -ne "branch") {
+    try {
+      if ($uj.include_prereleases -eq $true) {
+        $list = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=10" -Headers $gh)
+        $rel = $list | Where-Object { -not $_.draft } | Select-Object -First 1
+      } else {
+        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers $gh
+      }
+    } catch {
+      $code = Get-HttpStatus $_
+      if ($code -eq 404) { $rel = $null }      # repo has no (non-pre) releases
+      elseif ($code -eq 403 -or $code -eq 429) { throw "GitHub API rate limit hit. Add a github_token to autoupdater_config.json." }
+      else { throw }
+    }
+    if (-not $rel -and $track -eq "release") { throw "Repo $repo has no releases (set `"track`": `"auto`" to follow commits instead)." }
+  }
 
-  $assetRegex = if ($uj.asset_regex) { [string]$uj.asset_regex } else { ".*\.zip$" }
-  $asset = $null
-  foreach ($a in $rel.assets) { if ($a.name -match $assetRegex) { $asset = $a; break } }
-  if (-not $asset) { throw "No GitHub release asset matched regex '$assetRegex'." }
+  if ($rel) {
+    # ---------- Release mode ----------
+    $tag = [string]$rel.tag_name
+    if (-not $tag) { throw "GitHub release missing tag_name" }
+    $installedTag = if ($state -and $state.tag) { [string]$state.tag } else { "" }
+    if ($installedTag -eq $tag) { return $true }
 
-  $dl = [string]$asset.browser_download_url
-  if (-not $dl) { throw "GitHub asset missing browser_download_url." }
+    $assetRegex = if ($uj.asset_regex) { [string]$uj.asset_regex } else { ".*\.zip$" }
+    $dl = $null
+    foreach ($a in $rel.assets) { if ($a.name -match $assetRegex) { $dl = [string]$a.browser_download_url; break } }
+    if (-not $dl) {
+      # Many mods publish releases with no uploaded zip - use the release's source code zip.
+      $dl = "https://github.com/$repo/archive/refs/tags/$tag.zip"
+    }
+
+    $bkFile = Backup-Folder $folderPath $folderName
+    Install-ZipIntoMod $folderPath $folderName $dl @{ "User-Agent"="BalatroModUpdater" } $stripTop $bkFile
+
+    Save-JsonNoBom $statePath @{ provider="github"; track="release"; tag=$tag; repo=$repo; updated_at=(Get-Date).ToString("o") }
+    $summary.updated_mods += "$folderName ($tag)"
+    $recentlyUpdatedEntries.Add(@{ mod_name = $folderName; backup_file = if ($bkFile) { $bkFile } else { "" }; updated_to_version = $tag; updated_at = (Get-Date).ToString("o") })
+    return $true
+  }
+
+  # ---------- Branch / commit mode ----------
+  $branch = if ($uj.branch) { [string]$uj.branch } else { "" }
+  if ($branch -eq "") {
+    $info = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo" -Headers $gh
+    $branch = [string]$info.default_branch
+    if (-not $branch) { $branch = "main" }
+  }
+  $commit = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/commits/$branch" -Headers $gh
+  $sha = [string]$commit.sha
+  if (-not $sha) { throw "Couldn't read the latest commit of $repo@$branch" }
+  $installedSha = if ($state -and $state.commit) { [string]$state.commit } else { "" }
+  if ($installedSha -eq $sha) { return $true }
 
   $bkFile = Backup-Folder $folderPath $folderName
+  Install-ZipIntoMod $folderPath $folderName "https://github.com/$repo/archive/$sha.zip" @{ "User-Agent"="BalatroModUpdater" } $stripTop $bkFile
 
-  $tmpRoot = Join-Path ([IO.Path]::GetTempPath()) ("balatro_ghupd_" + [Guid]::NewGuid().ToString("N"))
-  Ensure-Dir $tmpRoot
-  $zipPath = Join-Path $tmpRoot $asset.name
-  $extractPath = Join-Path $tmpRoot "extract"
-  Ensure-Dir $extractPath
-
-  Invoke-WebRequest -Uri $dl -OutFile $zipPath -Headers @{ "User-Agent"="BalatroModUpdater" } | Out-Null
-  Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
-
-  $children = Get-ChildItem -LiteralPath $extractPath -Force
-  $srcRoot = $extractPath
-  if ($uj.strip_single_top_folder -ne $false) {
-    $dirs = $children | Where-Object { $_.PSIsContainer }
-    if ($dirs.Count -eq 1 -and ($children.Count -eq 1)) { $srcRoot = $dirs[0].FullName }
-  }
-
-  $preserve = @("update.json", ".autoupdater_state.json")
-  $preserveTemp = Join-Path $tmpRoot "preserve"
-  Ensure-Dir $preserveTemp
-  foreach ($p in $preserve) {
-    $pp = Join-Path $folderPath $p
-    if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $preserveTemp $p) -Force }
-  }
-
-  Get-ChildItem -LiteralPath $folderPath -Force | ForEach-Object {
-    if ($preserve -contains $_.Name) { return }
-    Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-  }
-  Copy-Item -Path (Join-Path $srcRoot "*") -Destination $folderPath -Recurse -Force
-
-  foreach ($p in $preserve) {
-    $pp = Join-Path $preserveTemp $p
-    if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $folderPath $p) -Force }
-  }
-
-  Save-JsonNoBom $statePath @{ provider="github"; tag=$tag; repo=$repo; updated_at=(Get-Date).ToString("o") }
-  $summary.updated_mods += $folderName
-  $recentlyUpdatedEntries.Add(@{ mod_name = $folderName; backup_file = if ($bkFile) { $bkFile } else { "" }; updated_to_version = $tag; updated_at = (Get-Date).ToString("o") })
-  Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+  Save-JsonNoBom $statePath @{ provider="github"; track="branch"; branch=$branch; commit=$sha; repo=$repo; updated_at=(Get-Date).ToString("o") }
+  $short = $sha.Substring(0, [Math]::Min(7, $sha.Length))
+  $summary.updated_mods += "$folderName ($branch@$short)"
+  $recentlyUpdatedEntries.Add(@{ mod_name = $folderName; backup_file = if ($bkFile) { $bkFile } else { "" }; updated_to_version = $sha; updated_at = (Get-Date).ToString("o") })
   return $true
 }
 
@@ -459,6 +673,13 @@ function Invoke-Nexus([string]$url) {
   return Invoke-RestMethod -Uri $url -Headers @{ "apikey"=$config.nexus_api_key; "accept"="application/json"; "User-Agent"="BalatroModUpdater" }
 }
 
+# Nexus provider. update.json keys:
+#   "mod_id": 123                  (required)
+#   "game_domain": "balatro"       (optional)
+#   "file_name_regex": "..."       (optional: pick a specific file when a mod has several MAIN files)
+# Only MAIN files are considered (old/optional/archived files are ignored), newest upload wins.
+# Nexus only lets Premium accounts download through the API. For free accounts we report
+# "update available" with a link instead of failing.
 function Update-NexusMod([string]$folderPath, [string]$folderName, $uj) {
   $domain = if ($uj.game_domain) { [string]$uj.game_domain } elseif ($config.nexus_game_domain) { [string]$config.nexus_game_domain } else { "balatro" }
   $modId = [int]$uj.mod_id
@@ -468,61 +689,45 @@ function Update-NexusMod([string]$folderPath, [string]$folderName, $uj) {
   $state = Read-JsonIfExists $statePath
   $installedFileId = if ($state -and $state.file_id) { [int]$state.file_id } else { 0 }
 
-  $filesUrl = "https://api.nexusmods.com/v1/games/$domain/mods/$modId/files.json"
-  $files = Invoke-Nexus $filesUrl
+  $files = Invoke-Nexus "https://api.nexusmods.com/v1/games/$domain/mods/$modId/files.json"
   if (-not $files -or -not $files.files) { throw "Nexus files.json response missing 'files'." }
 
-  $latest = $null
-  foreach ($f in $files.files) { if (-not $latest -or ([int]$f.file_id -gt [int]$latest.file_id)) { $latest = $f } }
-  if (-not $latest) { throw "No files found on Nexus for $domain/$modId." }
+  $candidates = @($files.files | Where-Object { [string]$_.category_name -eq "MAIN" -or [int]$_.category_id -eq 1 })
+  if ($candidates.Count -eq 0) {
+    $candidates = @($files.files | Where-Object { @("OLD_VERSION","ARCHIVED","DELETED","REMOVED") -notcontains [string]$_.category_name })
+  }
+  if ($uj.file_name_regex) {
+    $rx = [string]$uj.file_name_regex
+    $candidates = @($candidates | Where-Object { ([string]$_.name -match $rx) -or ([string]$_.file_name -match $rx) })
+  }
+  $latest = $candidates | Sort-Object -Property @{ Expression = { [long]$_.uploaded_timestamp } }, @{ Expression = { [long]$_.file_id } } | Select-Object -Last 1
+  if (-not $latest) { throw "No MAIN files found on Nexus for $domain/$modId." }
 
   $latestFileId = [int]$latest.file_id
   if ($installedFileId -eq $latestFileId) { return $true }
+  $verLabel = if ($latest.version) { [string]$latest.version } else { [string]$latestFileId }
 
-  $dlUrl = "https://api.nexusmods.com/v1/games/$domain/mods/$modId/files/$latestFileId/download_link.json"
-  $dl = Invoke-Nexus $dlUrl
+  $dl = $null
+  try {
+    $dl = Invoke-Nexus "https://api.nexusmods.com/v1/games/$domain/mods/$modId/files/$latestFileId/download_link.json"
+  } catch {
+    $code = Get-HttpStatus $_
+    if ($code -eq 403) {
+      $page = "https://www.nexusmods.com/$domain/mods/$modId" + "?tab=files"
+      $summary.available_updates += "$folderName -> $verLabel (Nexus needs Premium for auto-download; get it at $page)"
+      return $true
+    }
+    throw
+  }
   if (-not $dl -or $dl.Count -lt 1 -or -not $dl[0].URI) { throw "Nexus download_link.json returned no usable URI." }
   $uri = [string]$dl[0].URI
 
   $bkFile = Backup-Folder $folderPath $folderName
+  Install-ZipIntoMod $folderPath $folderName $uri @{ "User-Agent"="BalatroModUpdater" } $true $bkFile
 
-  $tmpRoot = Join-Path ([IO.Path]::GetTempPath()) ("balatro_nexusupd_" + [Guid]::NewGuid().ToString("N"))
-  Ensure-Dir $tmpRoot
-  $zipPath = Join-Path $tmpRoot ("nexus_" + $latestFileId + ".zip")
-  $extractPath = Join-Path $tmpRoot "extract"
-  Ensure-Dir $extractPath
-
-  Invoke-WebRequest -Uri $uri -OutFile $zipPath -Headers @{ "User-Agent"="BalatroModUpdater" } | Out-Null
-  Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
-
-  $children = Get-ChildItem -LiteralPath $extractPath -Force
-  $srcRoot = $extractPath
-  $dirs = $children | Where-Object { $_.PSIsContainer }
-  if ($dirs.Count -eq 1 -and ($children.Count -eq 1)) { $srcRoot = $dirs[0].FullName }
-
-  $preserve = @("update.json", ".autoupdater_state.json")
-  $preserveTemp = Join-Path $tmpRoot "preserve"
-  Ensure-Dir $preserveTemp
-  foreach ($p in $preserve) {
-    $pp = Join-Path $folderPath $p
-    if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $preserveTemp $p) -Force }
-  }
-
-  Get-ChildItem -LiteralPath $folderPath -Force | ForEach-Object {
-    if ($preserve -contains $_.Name) { return }
-    Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-  }
-  Copy-Item -Path (Join-Path $srcRoot "*") -Destination $folderPath -Recurse -Force
-
-  foreach ($p in $preserve) {
-    $pp = Join-Path $preserveTemp $p
-    if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $folderPath $p) -Force }
-  }
-
-  Save-JsonNoBom $statePath @{ provider="nexus"; game_domain=$domain; mod_id=$modId; file_id=$latestFileId; updated_at=(Get-Date).ToString("o") }
-  $summary.updated_mods += $folderName
+  Save-JsonNoBom $statePath @{ provider="nexus"; game_domain=$domain; mod_id=$modId; file_id=$latestFileId; version=$verLabel; updated_at=(Get-Date).ToString("o") }
+  $summary.updated_mods += "$folderName ($verLabel)"
   $recentlyUpdatedEntries.Add(@{ mod_name = $folderName; backup_file = if ($bkFile) { $bkFile } else { "" }; updated_to_version = [string]$latestFileId; updated_at = (Get-Date).ToString("o") })
-  Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
   return $true
 }
 
@@ -531,21 +736,45 @@ function Update-UpdateJsonMod([string]$folderPath, [string]$folderName) {
   $updateJsonPath = Join-Path $folderPath "update.json"
   if (-not (Test-Path -LiteralPath $updateJsonPath)) { return $false }
   $uj = Read-JsonIfExists $updateJsonPath
-  if (-not $uj) { $summary.skipped_mods += "$folderName (bad update.json)"; return $true }
+  if (-not $uj) { $summary.skipped_mods += "$folderName (bad update.json - must be plain JSON, no comment text)"; return $true }
 
-  $provider = [string]$uj.provider
+  $provider = ([string]$uj.provider).ToLower()
   try {
     if ($provider -eq "nexus") {
       [void](Update-NexusMod $folderPath $folderName $uj); return $true
     } elseif ($provider -eq "github") {
       if (-not $uj.repo) { throw "update.json provider=github missing repo" }
       [void](Update-GitHubReleaseMod $folderPath $folderName $uj); return $true
+    } elseif ($provider -eq "git" -or $provider -eq "") {
+      return $false
     } else {
       $summary.skipped_mods += "$folderName (unknown provider '$provider')"; return $true
     }
   } catch {
     $summary.errors += "ERROR updating (${provider}) ${folderName}: $($_.Exception.Message)"
     return $true
+  }
+}
+
+# Decides how one mod folder is updated:
+#   1) update.json with provider github/nexus  -> that source (explicit choice wins, even in a git folder)
+#   2) a .git folder                            -> git pull (update.json "branch" can pick the branch)
+#   3) nothing                                  -> reported as untracked
+function Update-OneMod([string]$path, [string]$name) {
+  $uj = Get-ModUpdateJson $path
+  $prov = if ($uj -and $uj.provider) { ([string]$uj.provider).ToLower() } else { "" }
+  if ($prov -eq "github" -or $prov -eq "nexus") {
+    [void](Update-UpdateJsonMod $path $name)
+    return
+  }
+  $handled = (Update-GitMod $path $name)
+  if (-not $handled) { $handled = (Update-UpdateJsonMod $path $name) }
+  if (-not $handled -and $config.report_untracked -ne $false) {
+    $hasLua = @(Get-ChildItem -LiteralPath $path -Filter "*.lua" -File -ErrorAction SilentlyContinue).Count -gt 0
+    $hasToml = (Test-Path -LiteralPath (Join-Path $path "lovely.toml")) -or (Test-Path -LiteralPath (Join-Path $path "lovely"))
+    if ($hasLua -or $hasToml) {
+      $summary.untracked_mods += $name
+    }
   }
 }
 
@@ -588,7 +817,7 @@ function Check-Forks() {
   }
 
   try {
-    $ghHeaders = @{ "User-Agent"="BalatroModUpdater"; "Accept"="application/vnd.github+json" }
+    $ghHeaders = Get-GhHeaders
 
     Get-ChildItem -LiteralPath $modsDirResolved -Directory -Force | ForEach-Object {
       $name = $_.Name
@@ -932,7 +1161,7 @@ try {
             if ($uj2 -and [string]$uj2.provider -eq "github" -and $uj2.repo) {
               try {
                 $api2  = "https://api.github.com/repos/$([string]$uj2.repo)/releases/latest"
-                $rel2  = Invoke-RestMethod -Uri $api2 -Headers @{ "User-Agent"="BalatroModUpdater"; "Accept"="application/vnd.github+json" }
+                $rel2  = Invoke-RestMethod -Uri $api2 -Headers (Get-GhHeaders)
                 $tag2  = [string]$rel2.tag_name
                 if ($tag2 -and $tag2 -ne [string]$pinInfo.crashed_version) {
                   $skippedMsg = "$name (pinned - newer version $tag2 available, consider unpinning)"
@@ -951,8 +1180,7 @@ try {
     if ($name -eq "_Balatro-Automatic-Mod-Updater_Backups") { return }
     if ($name -eq "_AutoModUpdater_Backups") { return }
 
-    $handled = (Update-GitMod $path $name)
-    if (-not $handled) { [void](Update-UpdateJsonMod $path $name) }
+    Update-OneMod $path $name
   }
 } catch {
   $summary.errors += "Top-level scan failed: $($_.Exception.Message)"
@@ -965,6 +1193,8 @@ if ($recentlyUpdatedEntries.Count -gt 0 -and $RestoreModName -eq "" -and $target
   try { Save-JsonNoBom $recentlyUpdatedPath $recentlyUpdatedEntries } catch {
     $summary.errors += "Failed to write _recently_updated.json: $($_.Exception.Message)"
   }
+  # This session already reached the menu; the NEXT launch is the one that tests the update.
+  Clear-LaunchMarkers
 }
 
 
@@ -1014,7 +1244,7 @@ function Get-BalatroGameDir() {
 
 function Github-LatestRelease([string]$repo) {
   $api = "https://api.github.com/repos/$repo/releases/latest"
-  return Invoke-RestMethod -Uri $api -Headers @{ "User-Agent"="BalatroModUpdater"; "Accept"="application/vnd.github+json" }
+  return Invoke-RestMethod -Uri $api -Headers (Get-GhHeaders)
 }
 
 
@@ -1041,11 +1271,30 @@ function Get-DirTreeHash([string]$dir) {
 }
 
 
-function Stage-FrameworkUpdate([hashtable]$pending, [string]$type, [string]$src, [string]$dst, [string]$label) {
+function Normalize-Tag([string]$t) {
+  if (-not $t) { return "" }
+  return ($t.Trim().TrimStart('v','V')).ToLower()
+}
+
+# Reads Steamodded's version.lua ('return "26.1002.0"'). Returns $null if not found.
+function Get-InstalledSteamoddedVersion([string]$dir) {
+  if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { return $null }
+  foreach ($rel in @("version.lua", "release.lua", "src\version.lua")) {
+    $p = Join-Path $dir $rel
+    if (Test-Path -LiteralPath $p) {
+      $txt = Get-Content -LiteralPath $p -Raw -ErrorAction SilentlyContinue
+      $m = [regex]::Match([string]$txt, '"([^"]+)"')
+      if ($m.Success) { return $m.Groups[1].Value }
+    }
+  }
+  return $null
+}
+
+function Stage-FrameworkUpdate([hashtable]$pending, [string]$type, [string]$src, [string]$dst, [string]$label, [string]$version = "") {
   if ($type -eq "copy_file") {
-    $pending.tasks += @{ type="copy_file"; src=$src; dst=$dst }
+    $pending.tasks += @{ type="copy_file"; src=$src; dst=$dst; label=$label; version=$version }
   } elseif ($type -eq "replace_dir") {
-    $pending.tasks += @{ type="replace_dir"; src=$src; dst=$dst; label=$label; backup_root=(Join-Path $selfDirResolved "_framework_backups") }
+    $pending.tasks += @{ type="replace_dir"; src=$src; dst=$dst; label=$label; version=$version; backup_root=(Join-Path $selfDirResolved "_framework_backups") }
   }
 }
 
@@ -1078,7 +1327,7 @@ function Update-Frameworks() {
         $valid = @()
         foreach ($c in $candidates) {
           $loader = Get-ChildItem -LiteralPath $c.FullName -Recurse -File -Filter "loader.lua" -ErrorAction SilentlyContinue |
-            Where-Object { ($_.FullName).ToLower().Contains('\src\') } | Select-Object -First 1
+            Where-Object { $_.FullName -match '[\\/]src[\\/]' } | Select-Object -First 1
           if ($loader) { $valid += $c }
         }
         if ($valid.Count -gt 0) {
@@ -1088,14 +1337,21 @@ function Update-Frameworks() {
       }
 
       $dstDir = Find-InstalledSteamoddedDir
-      $installedHash = Get-DirTreeHash $dstDir
+      $installedVer = Get-InstalledSteamoddedVersion $dstDir
+      $installedHash = $null
 
       if (-not $state.steamodded_hash) { $state.steamodded_hash = "" }
 
-      # Fast path: if tag matches and stored hash matches installed, we're current (no download needed).
-      if ($state.steamodded_tag -eq $tag -and $state.steamodded_hash -and $installedHash -and ($state.steamodded_hash -eq $installedHash)) {
+      # Fast path: Steamodded ships src/../version.lua (return "26.1002.0"). If it equals the
+      # latest tag we're current. This replaces the old folder-hash check, which re-staged the
+      # same version forever whenever any extra file (e.g. an update.json) sat in the smods folder.
+      if ($installedVer -and (Normalize-Tag $installedVer) -eq (Normalize-Tag $tag)) {
+        $summary.skipped_mods += "[Framework] Steamodded already current ($tag)"
+        $state.steamodded_tag = $tag
+      } elseif (-not $installedVer -and ($installedHash = Get-DirTreeHash $dstDir) -and $state.steamodded_tag -eq $tag -and ($state.steamodded_hash -eq $installedHash)) {
         $summary.skipped_mods += "[Framework] Steamodded already current ($tag)"
       } else {
+        if ($installedVer) { $summary.skipped_mods += "[Framework] Steamodded $installedVer installed, $tag available" }
         # Download latest Steamodded to compute hash + optionally stage.
         $asset = $null
         foreach ($a in $rel.assets) {
@@ -1129,7 +1385,7 @@ function Update-Frameworks() {
 
         # Locate the Steamodded root by finding a src\loader.lua (handles extra nesting in the zip)
         $loader = Get-ChildItem -LiteralPath $extract -Recurse -File -Filter "loader.lua" -ErrorAction SilentlyContinue |
-          Where-Object { ($_.FullName).ToLower().Contains('\src\') } | Select-Object -First 1
+          Where-Object { $_.FullName -match '[\\/]src[\\/]' } | Select-Object -First 1
 
         if (-not $loader) {
           # Fallback: find a src directory that contains loader.lua directly
@@ -1141,12 +1397,14 @@ function Update-Frameworks() {
         if (-not $loader) { throw "Could not locate src\\loader.lua inside downloaded Steamodded archive." }
         $full = $loader.FullName
             $summary.skipped_mods += "[Framework debug] Steamodded loader path: $full"
-            $lower = $full.ToLower()
-            $ix = $lower.LastIndexOf('\src\')
-            if ($ix -lt 0) { throw "Found loader.lua but could not determine src root from path: $full" }
-            $srcRoot = $full.Substring(0, $ix)  # everything before \src\ is root
+            # loader.lua lives in <root>/src/ (or deeper, e.g. <root>/src/preflight/); root = parent of that "src"
+            $srcDirItem = $loader.Directory
+            while ($srcDirItem -and $srcDirItem.Name -ine 'src') { $srcDirItem = $srcDirItem.Parent }
+            if (-not $srcDirItem) { throw "Found loader.lua but could not determine src root from path: $full" }
+            $srcRoot = $srcDirItem.Parent.FullName
 
         $newHash = Get-DirTreeHash $srcRoot
+        if (-not $installedHash) { $installedHash = Get-DirTreeHash $dstDir }
 
         if ($installedHash -and $newHash -and ($installedHash -eq $newHash)) {
           $summary.skipped_mods += "[Framework] Steamodded already current ($tag)"
@@ -1161,7 +1419,7 @@ function Update-Frameworks() {
           Ensure-Dir $stageDir
           Copy-Item -Path (Join-Path $srcRoot "*") -Destination $stageDir -Recurse -Force
 
-          Stage-FrameworkUpdate $pending "replace_dir" $stageDir $dstDir "smods"
+          Stage-FrameworkUpdate $pending "replace_dir" $stageDir $dstDir "smods" $tag
 
           $pending.notes += "Steamodded staged: $tag"
           $summary.skipped_mods += "[Framework staged] Steamodded ($tag)"
@@ -1188,6 +1446,17 @@ function Update-Frameworks() {
       $rel = Github-LatestRelease "ethangreen-dev/lovely-injector"
       $tag = [string]$rel.tag_name
       if (-not $tag) { throw "Missing tag_name from GitHub latest release." }
+
+      # Fast path: same tag as last time and the installed dll still has the hash we recorded.
+      $dstDllFast = Join-Path $gameDir "version.dll"
+      if ($state.lovely_tag -eq $tag -and $state.lovely_hash -and (Test-Path -LiteralPath $dstDllFast)) {
+        $curHash = $null
+        try { $curHash = (Get-FileHash -LiteralPath $dstDllFast -Algorithm SHA256).Hash } catch {}
+        if ($curHash -eq $state.lovely_hash) {
+          $summary.skipped_mods += "[Framework] Lovely already current ($tag)"
+          throw [System.OperationCanceledException]::new("lovely-current")
+        }
+      }
 
       # Pick the Windows MSVC zip asset (contains version.dll)
       $assetRegex = "lovely-x86_64-pc-windows-msvc\.zip$"
@@ -1227,7 +1496,7 @@ function Update-Frameworks() {
         $stageDll = Join-Path $pendingRoot "version.dll"
         Copy-Item -LiteralPath $dll.FullName -Destination $stageDll -Force
 
-        Stage-FrameworkUpdate $pending "copy_file" $stageDll $dstDll "lovely"
+        Stage-FrameworkUpdate $pending "copy_file" $stageDll $dstDll "lovely" $tag
 
         $pending.notes += "Lovely staged: $tag"
         $summary.skipped_mods += "[Framework staged] Lovely ($tag)"
@@ -1237,17 +1506,27 @@ function Update-Frameworks() {
 
         Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
       }
+    } catch [System.OperationCanceledException] {
+      # already current (fast path)
     } catch {
       $summary.errors += "ERROR updating (framework) Lovely: $($_.Exception.Message)"
     }
   }
 
+  $pendingPath = Join-Path $selfDirResolved "pending_apply.json"
   if ($pending.tasks.Count -gt 0) {
-    $pendingPath = Join-Path $selfDirResolved "pending_apply.json"
     Save-JsonNoBom $pendingPath $pending
     try { Save-JsonNoBom $statePath $state } catch {}
+    $summary.framework_staged = $true
     $summary.skipped_mods += "Framework updates staged. Click 'Restart now' to apply."
   } else {
+    # Nothing to apply any more: remove a stale pending_apply.json so an old staged
+    # version can never be applied later over a newer one.
+    if (Test-Path -LiteralPath $pendingPath) {
+      Remove-Item -LiteralPath $pendingPath -Force -ErrorAction SilentlyContinue
+      $summary.skipped_mods += "[Framework] Removed stale pending framework update (already current)"
+    }
+    Get-ChildItem -LiteralPath $pendingRoot -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     try { Save-JsonNoBom $statePath $state } catch {}
   }
 }

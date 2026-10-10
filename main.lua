@@ -1,4 +1,4 @@
--- Mod Updater (Steamodded) v0.6.6
+-- Mod Updater (Steamodded) v0.7.0
 -- In-game config with two tabs: Settings (general + Nexus key + check now) and Mod Toggles (paginated).
 -- Uses Steamodded's DynamicUIManager for proper pagination.
 -- Git pull mode: rebase (default and recommended).
@@ -72,6 +72,41 @@ local function join_path(a, b)
 end
 
 local function RGBA(r,g,b,a) return {r,g,b,a} end
+
+---------------------------------------------------------------------------
+-- Launch tracking for crash rollback (fixed in 0.7.0)
+-- _launch_attempt : written now, while the game is still loading mods
+-- _launch_sentinel: written once the main menu is reached
+-- If a previous attempt exists without a sentinel, that launch never reached the
+-- menu (crash/freeze), so _crash_flag tells autoupdate.ps1 to roll back the
+-- mods it updated last time.
+---------------------------------------------------------------------------
+do
+  local mp = mod and mod.path
+  if mp and mp ~= "" then
+    local function touch(name)
+      pcall(function()
+        local f = io.open(join_path(mp, name), "wb")
+        if f then f:write(os.date("!%Y-%m-%dT%H:%M:%SZ")); f:close() end
+      end)
+    end
+    if file_exists(join_path(mp, "_recently_updated.json"))
+      and file_exists(join_path(mp, "_launch_attempt"))
+      and not file_exists(join_path(mp, "_launch_sentinel")) then
+      touch("_crash_flag")
+    end
+    touch("_launch_attempt")
+
+    local wrote = false
+    local orig_main_menu = Game and Game.main_menu
+    if orig_main_menu then
+      function Game:main_menu(...)
+        if not wrote then wrote = true; touch("_launch_sentinel") end
+        return orig_main_menu(self, ...)
+      end
+    end
+  end
+end
 
 -- JSON decoder bundled with mod
 local json = nil
@@ -288,6 +323,17 @@ local function write_ps1_config_overlay()
     check_forks = config.check_forks == true,
     mod_fork_source = config.mod_fork_source or {},
   }
+
+  -- Keep advanced settings that only exist in autoupdater_config.json (no in-game toggle),
+  -- so hand-edited values like github_token aren't wiped every run.
+  do
+    local existing = decode_json(read_all(join_path(mod_path, "autoupdater_config.json")) or "")
+    if type(existing) == "table" then
+      for _, k in ipairs({ "github_token", "git_reset_on_diverge", "report_untracked" }) do
+        if existing[k] ~= nil then merged[k] = existing[k] end
+      end
+    end
+  end
 
   -- Auto-detect Balatro game directory from the running executable location
   if love and love.filesystem and love.filesystem.getSourceBaseDirectory then
@@ -1935,6 +1981,25 @@ local function build_prompt_lines(summary)
     table.insert(lines, "")
   end
 
+  local available = summary.available_updates or {}
+  if #available > 0 then
+    table.insert(lines, "Updates to download yourself (" .. tostring(#available) .. "):")
+    for i = 1, math.min(#available, 10) do table.insert(lines, "    " .. tostring(available[i])) end
+    table.insert(lines, "")
+  end
+
+  if summary.framework_staged then
+    table.insert(lines, "Steamodded/Lovely update ready - click Restart now.")
+    table.insert(lines, "")
+  end
+
+  local untracked = summary.untracked_mods or {}
+  if #untracked > 0 and (#updated > 0 or #errors > 0) then
+    table.insert(lines, tostring(#untracked) .. " mod(s) have no git/update.json and are never")
+    table.insert(lines, "checked (list in last_run.json -> untracked_mods).")
+    table.insert(lines, "")
+  end
+
   if #skipped > 0 and #updated == 0 then
     table.insert(lines, "Skipped (" .. tostring(#skipped) .. "):")
     for i = 1, math.min(#skipped, 20) do table.insert(lines, "    " .. tostring(skipped[i])) end
@@ -1948,12 +2013,14 @@ end
 function show_prompt(summary)
   local updated = summary and summary.updated_mods or {}
   local errors = summary and summary.errors or {}
-  local should = (#updated > 0) or ((config.prompt_on_errors ~= false) and (#errors > 0))
+  local available = summary and summary.available_updates or {}
+  local fw = summary and summary.framework_staged == true
+  local should = (#updated > 0) or fw or (#available > 0) or ((config.prompt_on_errors ~= false) and (#errors > 0))
   if not should then return end
 
   AMU_PROMPT.title = "Mod Updater"
   AMU_PROMPT.lines = build_prompt_lines(summary)
-  AMU_PROMPT.has_updates = (#updated > 0)
+  AMU_PROMPT.has_updates = (#updated > 0) or fw
 
   open_overlay(G.UIDEF.amu_restart_prompt(AMU_PROMPT))
 end
@@ -2094,7 +2161,7 @@ end
 -- Writes the launch sentinel, processes any crash rollback report, and shows
 -- the appropriate in-game notification to the user.
 local function on_full_update_done(mod_path)
-  write_launch_sentinel(mod_path)
+  -- (The sentinel is now written when the main menu is reached, not here.)
 
   -- Process crash rollback report (written by PS1 when it detects a crash)
   local rollback_mods = {}
@@ -2155,7 +2222,7 @@ local function on_full_update_done(mod_path)
     end
     AMU_PROMPT.title    = "Mod Updater - Crash Detected"
     AMU_PROMPT.lines    = wrap_lines(lines, 46)
-    AMU_PROMPT.has_updates = (summary ~= nil and #(summary.updated_mods or {}) > 0)
+    AMU_PROMPT.has_updates = (summary ~= nil and (#(summary.updated_mods or {}) > 0 or summary.framework_staged == true))
     open_overlay(G.UIDEF.amu_restart_prompt(AMU_PROMPT))
   elseif summary then
     show_prompt(summary)

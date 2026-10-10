@@ -22,14 +22,36 @@ if (-not (Test-Path -LiteralPath $pendingPath)) { exit 0 }
 
 # Wait for Balatro to exit so DLL/file locks are gone
 $deadline = (Get-Date).AddMinutes(3)
+$stillRunning = $false
 while ($true) {
   $p = Get-Process -Name $WaitProcessName -ErrorAction SilentlyContinue
   if (-not $p) { break }
-  if ((Get-Date) -gt $deadline) { break }
+  if ((Get-Date) -gt $deadline) { $stillRunning = $true; break }
   Start-Sleep -Milliseconds 400
+}
+# Give Windows a moment to release file handles after the process exits.
+Start-Sleep -Milliseconds 800
+
+if ($stillRunning) {
+  # Applying now would leave Steamodded half-copied / version.dll locked. Keep everything
+  # staged so the next restart can try again.
+  try {
+    Save-JsonNoBom (Join-Path $SelfDir "pending_apply_log.json") @{
+      applied_at = (Get-Date).ToString("o"); results = @()
+      errors = @("Balatro was still running after 3 minutes - nothing applied, update kept for next time.")
+    }
+  } catch {}
+  exit 1
 }
 
 $pending = Read-Json $pendingPath
+
+function Get-SmodsVersion([string]$dir) {
+  $p = Join-Path $dir "version.lua"
+  if (-not (Test-Path -LiteralPath $p)) { return $null }
+  $m = [regex]::Match((Get-Content -LiteralPath $p -Raw), '"([^"]+)"')
+  if ($m.Success) { return $m.Groups[1].Value } else { return $null }
+}
 $tasks = @()
 if ($pending.tasks) { $tasks = $pending.tasks }
 
@@ -63,6 +85,10 @@ foreach ($t in $tasks) {
       $src = [string]$t.src
       $dst = [string]$t.dst
       if (-not (Test-Path -LiteralPath $src)) { throw "missing src '$src'" }
+      if ((Test-Path -LiteralPath $dst) -and ((Get-FileHash -LiteralPath $src).Hash -eq (Get-FileHash -LiteralPath $dst).Hash)) {
+        $log.results += "skipped (already identical): $dst"
+        continue
+      }
       $bak = Backup-File $dst
       Ensure-Dir ([IO.Path]::GetDirectoryName($dst))
       Copy-Item -LiteralPath $src -Destination $dst -Force
@@ -71,6 +97,18 @@ foreach ($t in $tasks) {
       $src = [string]$t.src
       $dst = [string]$t.dst
       if (-not (Test-Path -LiteralPath $src)) { throw "missing src dir '$src'" }
+      # Never replace a Steamodded install with the same version (e.g. you updated it by hand).
+      $stagedVer = Get-SmodsVersion $src
+      $installedVer = Get-SmodsVersion $dst
+      if ($stagedVer -and $installedVer -and ($stagedVer -eq $installedVer)) {
+        $log.results += "skipped (already $installedVer): $dst"
+        continue
+      }
+      $sv = $null; $iv = $null
+      if ([version]::TryParse([string]$stagedVer, [ref]$sv) -and [version]::TryParse([string]$installedVer, [ref]$iv) -and $sv -lt $iv) {
+        $log.results += "skipped (staged $stagedVer is older than installed $installedVer): $dst"
+        continue
+      }
       $backupRoot = if ($t.backup_root) { [string]$t.backup_root } else { Join-Path $SelfDir "_framework_backups" }
       $label = if ($t.label) { [string]$t.label } else { "dirbackup" }
       $zip = Backup-FolderToZip $dst $label $backupRoot
@@ -86,8 +124,11 @@ foreach ($t in $tasks) {
 
 try { Save-JsonNoBom (Join-Path $SelfDir "pending_apply_log.json") $log } catch {}
 
-try { Remove-Item -LiteralPath $pendingPath -Force } catch {}
-try { if ($pending.pending_root -and (Test-Path -LiteralPath $pending.pending_root)) { Remove-Item -LiteralPath $pending.pending_root -Recurse -Force -ErrorAction SilentlyContinue } } catch {}
+# Only clear the staged update when everything worked; otherwise keep it so it can be retried.
+if ($log.errors.Count -eq 0) {
+  try { Remove-Item -LiteralPath $pendingPath -Force } catch {}
+  try { if ($pending.pending_root -and (Test-Path -LiteralPath $pending.pending_root)) { Remove-Item -LiteralPath $pending.pending_root -Recurse -Force -ErrorAction SilentlyContinue } } catch {}
+}
 
 if ($SteamAppId -and $SteamAppId.Trim() -ne "") {
   try { Start-Process ("steam://rungameid/" + $SteamAppId) | Out-Null } catch {}

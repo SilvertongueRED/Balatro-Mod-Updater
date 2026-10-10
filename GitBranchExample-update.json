@@ -1,0 +1,5 @@
+{
+  "_help": "EXAMPLE for mods you installed with git clone. Copy into the mod's folder, rename to update.json. The updater will switch the mod to this branch and keep following it (e.g. JokerDisplay must use 'stable', not 'main').",
+  "provider": "git",
+  "branch": "stable"
+}
