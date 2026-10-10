@@ -2001,9 +2001,24 @@ local function build_prompt_lines(summary)
   end
 
   if #skipped > 0 and #updated == 0 then
-    table.insert(lines, "Skipped (" .. tostring(#skipped) .. "):")
-    for i = 1, math.min(#skipped, 20) do table.insert(lines, "    " .. tostring(skipped[i])) end
-    if #skipped > 20 then table.insert(lines, "    ...") end
+    -- Mods you switched off are just counted; only show skips that tell you something.
+    local shown, off = {}, 0
+    for _, v in ipairs(skipped) do
+      local sv = tostring(v)
+      if sv:find("(updates disabled)", 1, true) or sv:find("[Framework debug]", 1, true) then
+        off = off + 1
+      else
+        shown[#shown+1] = sv
+      end
+    end
+    if #shown > 0 then
+      table.insert(lines, "Notes (" .. tostring(#shown) .. "):")
+      for i = 1, math.min(#shown, 20) do table.insert(lines, "    " .. shown[i]) end
+      if #shown > 20 then table.insert(lines, "    ...") end
+    end
+    if off > 0 then
+      table.insert(lines, tostring(off) .. " mod(s) have updates turned off.")
+    end
   end
 
   if #lines == 0 then table.insert(lines, "No mod updates were applied.") end

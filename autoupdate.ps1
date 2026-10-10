@@ -1309,6 +1309,15 @@ function Update-Frameworks() {
   $statePath = Join-Path $selfDirResolved ".framework_state.json"
   $state = Read-JsonIfExists $statePath
   if (-not $state) { $state = @{ steamodded_tag=""; lovely_tag="" } }
+  # Make sure every field exists. A state object read from JSON can't gain new
+  # properties by plain assignment (that's what broke 'lovely_file' in v0.7.1).
+  foreach ($k in @("steamodded_tag","steamodded_hash","lovely_tag","lovely_hash","lovely_file")) {
+    if ($state -is [System.Collections.IDictionary]) {
+      if (-not $state.Contains($k)) { $state[$k] = "" }
+    } elseif (-not ($state.PSObject.Properties.Name -contains $k)) {
+      $state | Add-Member -NotePropertyName $k -NotePropertyValue ""
+    }
+  }
 
   # 1) Steamodded (Balatro modding framework)
   # Steamodded may be installed as:
