@@ -1173,12 +1173,19 @@ G.UIDEF.amu_loading_box = function(ref)
   local orig_align = text.align_letters
   text.align_letters = function(self)
     orig_align(self)
-    if G.SETTINGS and G.SETTINGS.reduced_motion then return end
-    local amp = math.sqrt(self.scale) * (self.font.FONTSCALE / G.TILESIZE) * 3000
+    local amp = (G.SETTINGS and G.SETTINGS.reduced_motion) and 0
+      or math.sqrt(self.scale) * (self.font.FONTSCALE / G.TILESIZE) * 3000
     local t = G.TIMERS.REAL
     local letters = self.strings[self.focused_string] and self.strings[self.focused_string].letters or {}
+    -- dots count up 1 -> 2 -> 3 -> 1 ... (hidden dots keep their space so nothing shifts)
+    local shown = 1 + math.floor(t * 2.5) % 3
+    local dot_n = 0
     for k, letter in ipairs(letters) do
       letter.offset.y = amp * math.sin(4.2 * t - 0.42 * k)
+      if letter.char == "." then
+        dot_n = dot_n + 1
+        letter.pop_in = (dot_n <= shown) and 1 or 0
+      end
     end
   end
 
@@ -2278,6 +2285,7 @@ end
 ---------------------------------------------------------------------------
 local AMU_LOADING = { box = nil, shift = 0, waiting = false }
 local AMU_MENU_SHIFT = 0.45   -- how far the bottom menus move down (Balatro units)
+local AMU_TEXT_RAISE = 0.05   -- lift the text above the logo/menu midpoint, as a share of screen height
 
 local function amu_shift_menus(dy)
   for _, box in ipairs({ G.MAIN_MENU_UI, G.PROFILE_BUTTON }) do
@@ -2344,7 +2352,8 @@ local function amu_place_loading()
   end
   -- Centre the text halfway between the two. Measure where it really is and nudge,
   -- so this stays right whatever the alignment maths does.
-  local want_centre = (logo_bottom + bar_top) / 2
+  local raise = AMU_TEXT_RAISE * ((G.ROOM and G.ROOM.T and G.ROOM.T.h) or 11.5)
+  local want_centre = (logo_bottom + bar_top) / 2 - raise
   local have_centre = box.T.y + box.T.h / 2
   local err = want_centre - have_centre
   if math.abs(err) > 0.005 then
