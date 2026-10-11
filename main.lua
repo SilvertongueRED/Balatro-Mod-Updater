@@ -1171,7 +1171,10 @@ G.UIDEF.amu_loading_box = function(ref)
     config = { align = "cm", padding = 0.0, r = 0, colour = clear },
     nodes = {
       { n = G.UIT.C, config = { align = "cm", padding = 0.02, colour = clear }, nodes = {
-        { n = G.UIT.T, config = { ref_table = ref, ref_value = "text", scale = 0.72, colour = purple, shadow = true } },
+        -- fixed width so the line doesn't shift sideways as the dots animate
+        { n = G.UIT.C, config = { align = "cl", minw = 5.6, colour = clear }, nodes = {
+          { n = G.UIT.T, config = { ref_table = ref, ref_value = "text", scale = 0.72, colour = purple, shadow = true } },
+        }},
         { n = G.UIT.B, config = { h = 0.15, w = 0.1 } },
         { n = G.UIT.T, config = { ref_table = ref, ref_value = "suits", scale = 0.7, colour = purple, shadow = true } },
       }}
@@ -2258,6 +2261,98 @@ local function on_full_update_done(mod_path)
   end
 end
 
+---------------------------------------------------------------------------
+-- "Shuffling mods..." placement on the main menu
+-- The line sits between the Balatro logo and the main menu buttons. While it's
+-- showing, the main menu bar (with the language box) and the Profile button
+-- slide down a little to make room, then slide back when the check is done.
+---------------------------------------------------------------------------
+local AMU_LOADING = { box = nil, shift = 0, waiting = false }
+local AMU_MENU_SHIFT = 0.45   -- how far the bottom menus move down (Balatro units)
+local AMU_TEXT_GAP   = 0.18   -- space between the text and the top of the menu bar
+
+local function amu_shift_menus(dy)
+  for _, box in ipairs({ G.MAIN_MENU_UI, G.PROFILE_BUTTON }) do
+    if box and box.alignment and box.alignment.offset then
+      box.alignment.offset.y = (box.alignment.offset.y or 0) + dy
+      pcall(function() box:align_to_major() end)
+    end
+  end
+end
+
+local function amu_place_loading()
+  local box, menu, room = AMU_LOADING.box, G.MAIN_MENU_UI, G.ROOM_ATTACH
+  if not (box and menu and room and menu.T and room.T and box.alignment) then return end
+  -- bottom of the text sits AMU_TEXT_GAP above the (shifted) top of the menu bar
+  local target_bottom = menu.T.y - AMU_TEXT_GAP
+  box.alignment.offset.y = target_bottom - (room.T.y + room.T.h)
+  pcall(function() box:align_to_major() end)
+end
+
+local function amu_show_loading(ref)
+  AMU_LOADING.waiting = true
+  G.E_MANAGER:add_event(Event({
+    blockable = false, blocking = false, no_delete = true,
+    func = function()
+      if not AMU_LOADING.waiting then return true end
+      -- wait until the main menu has slid in (it appears a few seconds after start-up)
+      if not (G.MAIN_MENU_UI and G.ROOM_ATTACH and G.STAGE == G.STAGES.MAIN_MENU) then return false end
+      local ok = pcall(function()
+        AMU_LOADING.box = UIBox{
+          definition = G.UIDEF.amu_loading_box(ref),
+          config = { align = "bmi", offset = { x = 0, y = 0 }, major = G.ROOM_ATTACH, bond = "Weak" }
+        }
+      end)
+      if not ok then AMU_LOADING.box = nil; return true end
+      amu_shift_menus(AMU_MENU_SHIFT)
+      AMU_LOADING.shift = AMU_MENU_SHIFT
+      amu_place_loading()
+      return true
+    end
+  }))
+  -- keep the text glued above the menu while it settles (Profile button arrives a frame later)
+  G.E_MANAGER:add_event(Event({
+    blockable = false, blocking = false, no_delete = true,
+    func = function()
+      if not AMU_LOADING.waiting then return true end
+      if AMU_LOADING.box then
+        if G.PROFILE_BUTTON and not AMU_LOADING.profile_shifted and AMU_LOADING.shift ~= 0 then
+          -- Profile button is created one frame after the menu; give it the same shift
+          if (G.PROFILE_BUTTON.alignment.offset.y or 0) < AMU_LOADING.shift then
+            G.PROFILE_BUTTON.alignment.offset.y = (G.PROFILE_BUTTON.alignment.offset.y or 0) + AMU_LOADING.shift
+            pcall(function() G.PROFILE_BUTTON:align_to_major() end)
+          end
+          AMU_LOADING.profile_shifted = true
+        end
+        amu_place_loading()
+      end
+      return false
+    end
+  }))
+end
+
+local function amu_hide_loading()
+  AMU_LOADING.waiting = false
+  if AMU_LOADING.box then
+    pcall(function() AMU_LOADING.box:remove() end)
+    AMU_LOADING.box = nil
+  end
+  if AMU_LOADING.shift ~= 0 then
+    if G.STAGE == G.STAGES.MAIN_MENU then
+      if G.MAIN_MENU_UI and G.MAIN_MENU_UI.alignment then
+        G.MAIN_MENU_UI.alignment.offset.y = (G.MAIN_MENU_UI.alignment.offset.y or 0) - AMU_LOADING.shift
+        pcall(function() G.MAIN_MENU_UI:align_to_major() end)
+      end
+      if G.PROFILE_BUTTON and G.PROFILE_BUTTON.alignment and AMU_LOADING.profile_shifted then
+        G.PROFILE_BUTTON.alignment.offset.y = (G.PROFILE_BUTTON.alignment.offset.y or 0) - AMU_LOADING.shift
+        pcall(function() G.PROFILE_BUTTON:align_to_major() end)
+      end
+    end
+    AMU_LOADING.shift = 0
+    AMU_LOADING.profile_shifted = false
+  end
+end
+
 local function run_update_async(mods_dir, mod_path)
   pcall(write_ps1_config_overlay)
 
@@ -2328,9 +2423,7 @@ local function run_update_async(mods_dir, mod_path)
   t:start(cmd)
 
   if config.show_loading_overlay ~= false then
-    local align = config.loading_align or "tm"
-    local off = config.loading_offset or {x = 0, y = 2.2}
-    open_overlay(G.UIDEF.amu_loading_box(ref), { no_esc = true, align = align, offset = off })
+    amu_show_loading(ref)
   end
 
   local start_time = love.timer and love.timer.getTime and love.timer.getTime() or 0
@@ -2339,19 +2432,20 @@ local function run_update_async(mods_dir, mod_path)
   G.E_MANAGER:add_event(Event({
     blockable = false,
     blocking = false,
+    no_delete = true, -- survive the event-queue wipe when you start a run mid-check
     func = function()
       dots = (dots + 1) % 30
       ref.text = "Shuffling mods" .. string.rep(".", math.floor(dots / 10))
 
       local msg = channel:pop()
       if msg then
-        close_overlay()
+        amu_hide_loading()
         on_full_update_done(mod_path)
         return true
       end
 
       if love.timer and love.timer.getTime and (love.timer.getTime() - start_time) > (tonumber(config.ui_timeout_seconds) or 300) then
-        close_overlay()
+        amu_hide_loading()
         show_msg("Mod Updater", "Updater timed out waiting for PowerShell.\nYou can still play.", {"OK"}, "warning")
         return true
       end
