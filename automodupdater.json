@@ -6,13 +6,13 @@
     "SilvertongueRED+ChatGPT+Claude"
   ],
   "icon": "modicon.png",
-  "description": "Can automatically or manually check for and applies mod updates from Git, GitHub Releases, and Nexus. Features an in-game config with per-mod toggles, Nexus API key input, and a manual update check button. (v0.7.0)",
+  "description": "Can automatically or manually check for and applies mod updates from Git, GitHub Releases, and Nexus. Features an in-game config with per-mod toggles, Nexus API key input, and a manual update check button.",
   "prefix": "amu",
   "main_file": "main.lua",
   "priority": -1000,
   "badge_colour": "2F9E44",
   "badge_text_colour": "FFFFFF",
-  "version": "0.7.0",
+  "version": "0.7.5",
   "dependencies": [
     "Steamodded (>=1.*~)"
   ]

@@ -1,4 +1,4 @@
--- Mod Updater (Steamodded) v0.7.0
+-- Mod Updater (Steamodded) v0.7.5
 -- In-game config with two tabs: Settings (general + Nexus key + check now) and Mod Toggles (paginated).
 -- Uses Steamodded's DynamicUIManager for proper pagination.
 -- Git pull mode: rebase (default and recommended).

@@ -9,8 +9,12 @@ _Balatro-Mod-Updater_Backups/
 _Balatro-Automatic-Mod-Updater_Backups/
 _pending_framework_updates/
 _framework_backups/
+_nexus_release/
 
 # Per-mod updater state
 .autoupdater_state.json
 .framework_state.json
 .amu_restored_backup
+launcher_debug.json
+pending_apply_log.json 
+fork_suggestions.json
