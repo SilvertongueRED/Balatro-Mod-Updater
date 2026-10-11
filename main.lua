@@ -2285,7 +2285,7 @@ end
 ---------------------------------------------------------------------------
 local AMU_LOADING = { box = nil, shift = 0, waiting = false }
 local AMU_MENU_SHIFT = 0.45   -- how far the bottom menus move down (Balatro units)
-local AMU_TEXT_RAISE = 0.03   -- lift the text above the logo/menu midpoint, as a share of screen height
+local AMU_TEXT_RAISE = 0.015   -- lift the text above the logo/menu midpoint, as a share of screen height
 
 local function amu_shift_menus(dy)
   for _, box in ipairs({ G.MAIN_MENU_UI, G.PROFILE_BUTTON }) do
