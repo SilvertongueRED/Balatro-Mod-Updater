@@ -1161,23 +1161,32 @@ pcall(write_ps1_config_overlay)
 ---------------------------------------------------------------------------
 
 G.UIDEF.amu_loading_box = function(ref)
-  ref = ref or { text = "Shuffling mods...", suits = "♠  ♥  ♦  ♣" }
-
+  ref = ref or {}
   local purple = (G.C and (G.C.PURPLE or (G.C.UI and G.C.UI.PURPLE))) or RGBA(0.62, 0.33, 0.92, 1)
   local clear  = (G.C and (G.C.CLEAR or (G.C.UI and G.C.UI.TRANSPARENT_LIGHT))) or RGBA(0,0,0,0)
+
+  -- One line of text where every letter (dots and suits too) rides a travelling wave.
+  local label = ref.label or "Shuffling mods...   ♠  ♥  ♦  ♣"
+  local text = DynaText({
+    string = { label }, colours = { purple }, scale = 0.72, shadow = true, silent = true,
+  })
+  local orig_align = text.align_letters
+  text.align_letters = function(self)
+    orig_align(self)
+    if G.SETTINGS and G.SETTINGS.reduced_motion then return end
+    local amp = math.sqrt(self.scale) * (self.font.FONTSCALE / G.TILESIZE) * 3000
+    local t = G.TIMERS.REAL
+    local letters = self.strings[self.focused_string] and self.strings[self.focused_string].letters or {}
+    for k, letter in ipairs(letters) do
+      letter.offset.y = amp * math.sin(4.2 * t - 0.42 * k)
+    end
+  end
 
   return {
     n = G.UIT.ROOT,
     config = { align = "cm", padding = 0.0, r = 0, colour = clear },
     nodes = {
-      { n = G.UIT.C, config = { align = "cm", padding = 0.02, colour = clear }, nodes = {
-        -- fixed width so the line doesn't shift sideways as the dots animate
-        { n = G.UIT.C, config = { align = "cl", minw = 5.6, colour = clear }, nodes = {
-          { n = G.UIT.T, config = { ref_table = ref, ref_value = "text", scale = 0.72, colour = purple, shadow = true } },
-        }},
-        { n = G.UIT.B, config = { h = 0.15, w = 0.1 } },
-        { n = G.UIT.T, config = { ref_table = ref, ref_value = "suits", scale = 0.7, colour = purple, shadow = true } },
-      }}
+      { n = G.UIT.O, config = { object = text } },
     }
   }
 end
@@ -2269,7 +2278,6 @@ end
 ---------------------------------------------------------------------------
 local AMU_LOADING = { box = nil, shift = 0, waiting = false }
 local AMU_MENU_SHIFT = 0.45   -- how far the bottom menus move down (Balatro units)
-local AMU_TEXT_GAP   = 0.18   -- space between the text and the top of the menu bar
 
 local function amu_shift_menus(dy)
   for _, box in ipairs({ G.MAIN_MENU_UI, G.PROFILE_BUTTON }) do
@@ -2280,13 +2288,70 @@ local function amu_shift_menus(dy)
   end
 end
 
+-- Fraction (0..1) of the logo sprite's height where its lowest visible pixel is.
+-- Logos from texture packs often have empty space at the bottom, so we look at the
+-- actual pixels instead of the sprite's box. Cached per atlas image.
+local amu_logo_frac_cache = {}
+local function amu_logo_visible_frac()
+  local atlas = G.ASSET_ATLAS and G.ASSET_ATLAS["balatro"]
+  if not atlas then return 1 end
+  local key = tostring(atlas.image or atlas)
+  if amu_logo_frac_cache[key] then return amu_logo_frac_cache[key] end
+  local frac = 1
+  pcall(function()
+    local data = atlas.image_data
+    if not data and atlas.full_path then data = love.image.newImageData(atlas.full_path) end
+    if not data and atlas.path then data = love.image.newImageData(atlas.path) end
+    if not data then return end
+    local w, h = data:getWidth(), data:getHeight()
+    local step = math.max(1, math.floor(w / 200))
+    for y = h - 1, 0, -1 do
+      for x = 0, w - 1, step do
+        local _, _, _, a = data:getPixel(x, y)
+        if a > 0.25 then frac = (y + 1) / h; return end
+      end
+    end
+  end)
+  amu_logo_frac_cache[key] = frac
+  return frac
+end
+
+-- Top edge of the actual Play/Collection/Options bar (not the whole menu block,
+-- whose top is set by the taller Discord/X + language column on the right).
+local function amu_menu_bar_top()
+  local menu = G.MAIN_MENU_UI
+  if not menu then return nil end
+  local play = menu.get_UIE_by_ID and menu:get_UIE_by_ID('main_menu_play')
+  local node = play
+  while node do
+    if node.config and node.config.mid then return node.T.y end
+    node = node.parent
+  end
+  if play and play.T then return play.T.y - 0.2 end
+  return menu.T.y
+end
+
 local function amu_place_loading()
-  local box, menu, room = AMU_LOADING.box, G.MAIN_MENU_UI, G.ROOM_ATTACH
-  if not (box and menu and room and menu.T and room.T and box.alignment) then return end
-  -- bottom of the text sits AMU_TEXT_GAP above the (shifted) top of the menu bar
-  local target_bottom = menu.T.y - AMU_TEXT_GAP
-  box.alignment.offset.y = target_bottom - (room.T.y + room.T.h)
-  pcall(function() box:align_to_major() end)
+  local box, room = AMU_LOADING.box, G.ROOM_ATTACH
+  if not (box and room and box.T and box.alignment) then return end
+  local bar_top = amu_menu_bar_top()
+  if not bar_top then return end
+  local logo_bottom
+  if G.SPLASH_LOGO and G.SPLASH_LOGO.T then
+    logo_bottom = G.SPLASH_LOGO.T.y + G.SPLASH_LOGO.T.h * amu_logo_visible_frac()
+  else
+    logo_bottom = bar_top - 2
+  end
+  -- Centre the text halfway between the two. Measure where it really is and nudge,
+  -- so this stays right whatever the alignment maths does.
+  local want_centre = (logo_bottom + bar_top) / 2
+  local have_centre = box.T.y + box.T.h / 2
+  local err = want_centre - have_centre
+  if math.abs(err) > 0.005 then
+    -- half-steps: converges smoothly even if the box's position updates a frame late
+    box.alignment.offset.y = (box.alignment.offset.y or 0) + err * 0.5
+    pcall(function() box:align_to_major() end)
+  end
 end
 
 local function amu_show_loading(ref)
@@ -2434,8 +2499,6 @@ local function run_update_async(mods_dir, mod_path)
     blocking = false,
     no_delete = true, -- survive the event-queue wipe when you start a run mid-check
     func = function()
-      dots = (dots + 1) % 30
-      ref.text = "Shuffling mods" .. string.rep(".", math.floor(dots / 10))
 
       local msg = channel:pop()
       if msg then
