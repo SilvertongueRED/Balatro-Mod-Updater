@@ -1,0 +1,10 @@
+{
+    "applied_at":  "2026-10-10T18:21:58.4070542-04:00",
+    "errors":  [
+
+               ],
+    "results":  [
+                    "copied: C:\\Users\\rolan\\AppData\\Roaming\\Balatro\\Mods\\Balatro-Mod-Updater\\_pending_framework_updates\\winmm.dll -\u003e C:\\Program Files (x86)\\Steam\\steamapps\\common\\Balatro\\winmm.dll",
+                    "renamed old file: C:\\Program Files (x86)\\Steam\\steamapps\\common\\Balatro\\version.dll -\u003e C:\\Program Files (x86)\\Steam\\steamapps\\common\\Balatro\\version.dll.old_20261010_182158"
+                ]
+}

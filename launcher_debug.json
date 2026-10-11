@@ -1,0 +1,8 @@
+{
+  "cmd": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\Users\\rolan\\AppData\\Roaming\\Balatro\\Mods\\Balatro-Mod-Updater\\apply_pending.ps1\" -SelfDir \"C:\\Users\\rolan\\AppData\\Roaming\\Balatro\\Mods\\Balatro-Mod-Updater\" -SteamAppId \"2379780\" -WaitProcessName \"Balatro\"",
+  "config_path": "C:/Users/rolan/AppData/Roaming/Balatro/Mods/Balatro-Mod-Updater/autoupdater_config.json",
+  "mod_path": "C:/Users/rolan/AppData/Roaming/Balatro/Mods/Balatro-Mod-Updater",
+  "mods_dir": "C:/Users/rolan/AppData/Roaming/Balatro/Mods",
+  "ps1": "C:/Users/rolan/AppData/Roaming/Balatro/Mods/Balatro-Mod-Updater/autoupdate.ps1",
+  "started_at": "2026-10-10T22:18:43Z"
+}
