@@ -87,6 +87,8 @@ $defaults = [ordered]@{
 
 # Forks not pushed within this many months are considered stale and skipped during fork scanning
 $ForkStalenessMonths = 12
+# Max forks compared per mod during a fork scan (keeps a scan inside GitHub's API limit)
+$ForkMaxComparesPerMod = 8
 
 $configPath = Join-Path $selfDirResolved "autoupdater_config.json"
 $config = Read-JsonIfExists $configPath
@@ -815,13 +817,28 @@ function Check-Forks() {
     checked_at  = (Get-Date).ToString("o")
     suggestions = @{}
   }
+  $script:forkRateLimited = $false
+  $script:forkBadToken    = $false
+  $hasToken = [bool]($config.github_token -and ([string]$config.github_token).Trim() -ne "")
 
   try {
     $ghHeaders = Get-GhHeaders
 
+    # Validate the token up front (/rate_limit does not count against the limit)
+    if ($hasToken) {
+      try {
+        Invoke-RestMethod -Uri "https://api.github.com/rate_limit" -Headers $ghHeaders -TimeoutSec 20 | Out-Null
+      } catch {
+        $st = 0
+        try { $st = [int]$_.Exception.Response.StatusCode } catch {}
+        if ($st -eq 401) { $script:forkBadToken = $true }
+      }
+    }
+
     Get-ChildItem -LiteralPath $modsDirResolved -Directory -Force | ForEach-Object {
       $name = $_.Name
       $path = $_.FullName
+      if ($script:forkRateLimited -or $script:forkBadToken) { return }
       if ($skipSet.ContainsKey($name)) { return }
       if ($name -eq "_Balatro-Mod-Updater_Backups") { return }
       if ($name -eq "_Balatro-Automatic-Mod-Updater_Backups") { return }
@@ -912,10 +929,18 @@ function Check-Forks() {
         }
 
         # ── Scan forks of the source repo for ones with unique commits ──
-        # Fetch forks sorted by most recently pushed (up to 100)
-        $forks = Invoke-RestMethod -Uri "https://api.github.com/repos/$ownerRepo/forks?sort=pushed&per_page=100" -Headers $ghHeaders
+        # The forks endpoint only accepts sort = newest | oldest | stargazers | watchers
+        # (sort=pushed returns "400 Bad Request"). Fetch up to 100, then rank by last push here.
+        $forks = Invoke-RestMethod -Uri "https://api.github.com/repos/$ownerRepo/forks?sort=newest&per_page=100" -Headers $ghHeaders
+
+        # Drop abandoned forks, newest push first, and only compare the top few so a scan
+        # stays inside the GitHub API limit (60/hour without a token).
+        $forks = @($forks | Where-Object { $_.pushed_at -and ([datetime]$_.pushed_at) -ge $staleThreshold } |
+                            Sort-Object { [datetime]$_.pushed_at } -Descending |
+                            Select-Object -First $ForkMaxComparesPerMod)
 
         foreach ($fork in $forks) {
+          if ($script:forkRateLimited -or $script:forkBadToken) { break }
           try {
             $forkOwner    = [string]$fork.owner.login
             $forkPushedAt = [datetime]$fork.pushed_at
@@ -977,7 +1002,10 @@ function Check-Forks() {
             }
           } catch {
             # Log individual fork errors so the user can see what went wrong
-            $summary.errors += "Fork scan: error checking fork of $ownerRepo ($forkOwner): $($_.Exception.Message)"
+            $st = Get-HttpStatus $_
+            if ($st -eq 403 -or $st -eq 429) { $script:forkRateLimited = $true }
+            elseif ($st -eq 401) { $script:forkBadToken = $true }
+            else { $summary.errors += "Fork scan: error checking fork of $ownerRepo ($forkOwner): $($_.Exception.Message)" }
           }
         }
 
@@ -989,12 +1017,31 @@ function Check-Forks() {
           }
         }
       } catch {
-        $summary.errors += "Fork scan: error processing mod '$name': $($_.Exception.Message)"
+        $st = Get-HttpStatus $_
+        if ($st -eq 403 -or $st -eq 429) { $script:forkRateLimited = $true }
+        elseif ($st -eq 401) { $script:forkBadToken = $true }
+        else { $summary.errors += "Fork scan: error processing mod '$name': $($_.Exception.Message)" }
       }
     }
   } catch {
     $summary.errors += "Fork scan failed: $($_.Exception.Message)"
   }
+
+  if ($script:forkRateLimited) {
+    if ($config.github_token -and ([string]$config.github_token).Trim() -ne "") {
+      $summary.errors += "Fork scan stopped early: GitHub API limit reached even with your token. Try again in an hour."
+    } else {
+      $summary.errors += "Fork scan stopped early: GitHub allows only 60 requests/hour without a token. In the Fork Finder tab click 'GitHub token' to make a free one (takes 1 minute), then scan again."
+    }
+  }
+  if ($script:forkBadToken) {
+    $summary.errors += "Fork scan stopped: GitHub rejected your token (expired or mistyped). In the Fork Finder tab click 'GitHub token' to make a new one."
+  }
+
+  if ($script:forkBadToken) { $suggestions.token_status = "bad" }
+  elseif ($script:forkRateLimited) { $suggestions.token_status = "rate_limited" }
+  elseif ($hasToken) { $suggestions.token_status = "ok" }
+  else { $suggestions.token_status = "none" }
 
   try { Save-JsonNoBom $forkSuggestionsPath $suggestions } catch {
     $summary.errors += "Failed to write fork_suggestions.json: $($_.Exception.Message)"

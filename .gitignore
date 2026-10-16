@@ -16,5 +16,6 @@ _nexus_release/
 .framework_state.json
 .amu_restored_backup
 launcher_debug.json
-pending_apply_log.json 
+pending_apply_log.json
 fork_suggestions.json
+_recently_updated.json

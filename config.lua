@@ -52,6 +52,13 @@ return {
   -- Nexus API key (stored here so SMODS persists it; written to autoupdater_config.json)
   nexus_api_key = "",
 
+  -- Mod Toggles / Backups tab sort: "az" (alphabetical) or "recent" (recently updated)
+  sort_toggles = "az",
+  sort_backups = "az",
+
+  -- Show the "N mod(s) have no git/update.json" note on the results screen (ON by default)
+  show_untracked_note = true,
+
   -- Fork discovery (manual trigger only; never runs automatically on startup)
   check_forks = false,
 

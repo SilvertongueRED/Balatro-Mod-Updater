@@ -50,5 +50,22 @@ Auto-checking at startup is off by default. Turn it on in the mod's config tab.
 - **By hand:** close Balatro and double-click **`Undo last update.bat`** in this folder.
 
 ## Optional settings (`autoupdater_config.json`)
-- `github_token`: raises GitHub's limit from 60 to 5000 checks per hour.
+- `github_token`: raises GitHub's limit from 60 to 5000 checks per hour. You don't need to edit this file: in the **Fork Finder** tab click **GitHub token** and follow the steps (free, read-only, takes about a minute).
 - `report_untracked`: `false` stops listing untracked mods.
+
+## Fork Finder and the GitHub token
+Fork Finder looks for forks of your mods that have newer work. Each scan makes many GitHub requests, and GitHub only allows 60 per hour without a token, so a scan of a big mod list will stop early.
+
+Fix (one time, about a minute):
+1. Open the **Fork Finder** tab and click **GitHub token**, then **Open GitHub page**.
+2. Name: `Balatro Mod Updater`. Expiration: `90 days`. Repository access: **Public repositories (read-only)**. Leave all permissions untouched.
+3. Click **Generate token** and copy it (starts with `github_pat_`).
+4. Back in the game click **Paste token**.
+
+The token only reads public data. When it expires (after 90 days) the next scan shows a prompt: click **Yes, replace it** and you are taken straight to the token screen. After pasting, click **Scan Now** to scan right away.
+
+## In-game settings tabs
+- **Mod Toggles**: **All on / All off** buttons, a sort button (A-Z or Recently updated), larger names and checkboxes, and a per-mod **Check** button. Rows line up in fixed columns so the controller d-pad / stick moves straight up and down.
+- **Backups**: sort button (A-Z or Recently updated). Each mod shows the version in use and when it was last updated (pinned mods show "Pinned to backup <date>"). **Back** in a mod's backup list returns to this page.
+- **No Source**: lists mods with no git clone or `update.json`. Copy the mod's GitHub or Nexus page link and click **Paste link** to create its `update.json`. This tab also has the switch for the "N mod(s) have no git/update.json" note on the results screen (on by default).
+- **Close all** appears on every screen and leaves the mods menu completely.
