@@ -9,6 +9,22 @@ It notices changes to a mod you installed from its Git page, its GitHub Releases
 
 Auto-checking at startup is off by default. Turn it on in the mod's config tab.
 
+## What's new in 0.7.9
+- **Hold B now works.** A quick tap of B is still "Back" (it happens when you let go); holding B for about 0.7 seconds closes all menus. Regular B presses keep working afterwards.
+- **Mod Toggles:** the mod name is on the left, the on/off box and **Check** are together on the far right, and the status text sits in the gap between. Rows no longer overlap the buttons above or the "Saved on/off list" line below; the page selector sits a little lower.
+- **Backups:** the list is lowered away from the Sort button, and the space above and below the page selector is equal.
+- **Controller:** LB / RB no longer switch tabs on screens without pages (Config); only LT / RT switch tabs. D-pad / left-stick left and right now move to the next button in the same row (e.g. Paste from clipboard -> Clear).
+
+## What's new in 0.7.8
+- **Menus always fit.** Every list is a fixed size, so nothing runs out of its box, overlaps the tab buttons, or jumps around when you change page.
+- **Close All Menus** (red button on every screen). On a controller **hold B** for about a second; on a keyboard press **Esc**. Hold-B works in every menu in the game, not only this mod's.
+- **Controller:** LT / RT switch tabs, LB / RB switch pages, and D-pad / left-stick up and down walk through every row in order.
+- **Mod Toggles:** **Save list** keeps the current on/off list, **Restore list** puts it back. The first time you press **All on** / **All off** the list is saved automatically (unless you saved one yourself).
+- **Backups:** wider rows with bigger version / date text. Hover a row (or focus its **Backups** button) to see a short summary of the newest changes. The notes live in `changelogs.json` and are rewritten after every update and every restore.
+- **Fork Finder:** shows only forks newer than your installed copy by default (button switches to all forks). Each fork has an **Open fork page** button (opens GitHub in your browser) and a hover summary of what changed.
+- Fixed a crash on the "Check for updates now" result screen (`on_full_update_done` was used before it was defined).
+
+
 ## How each mod is updated
 1. **The mod folder has an `update.json` with `"provider": "github"` or `"nexus"`.** That source is used, even if the folder is also a git clone.
 2. **The mod folder is a git clone.** It gets `git pull`. An `update.json` with `"branch": "stable"` makes it switch to and follow that branch.

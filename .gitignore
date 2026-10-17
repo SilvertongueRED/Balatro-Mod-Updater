@@ -19,3 +19,8 @@ launcher_debug.json
 pending_apply_log.json
 fork_suggestions.json
 _recently_updated.json
+
+# Per-user data (written by the mod while you use it)
+changelogs.json
+toggle_snapshot.json
+update.json.off

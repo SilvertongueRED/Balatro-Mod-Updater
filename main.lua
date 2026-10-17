@@ -1,4 +1,4 @@
--- Mod Updater (Steamodded) v0.7.7
+-- Mod Updater (Steamodded) v0.7.9
 -- In-game config with two tabs: Settings (general + Nexus key + check now) and Mod Toggles (paginated).
 -- Uses Steamodded's DynamicUIManager for proper pagination.
 -- Git pull mode: rebase (default and recommended).
@@ -193,6 +193,82 @@ local function show_msg(title, msg, buttons, mtype)
   if love and love.window and love.window.showMessageBox then
     love.window.showMessageBox(title, msg, buttons or {"OK"}, mtype or "info")
   end
+end
+
+---------------------------------------------------------------------------
+-- TEXT FITTING: measure text with the game's own font so nothing ever runs out of a box
+---------------------------------------------------------------------------
+
+local function amu_text_w(text, scale)
+  text = tostring(text or "")
+  local ok, w = pcall(function()
+    local f = G.LANG.font
+    return f.FONT:getWidth(text) * (f.squish or 1) * scale * G.TILESCALE * f.FONTSCALE / (G.TILESIZE * G.TILESCALE)
+  end)
+  if ok and type(w) == "number" then return w end
+  return #text * scale * 0.5
+end
+
+-- Remove the last character (UTF-8 safe).
+local function amu_cut_last_char(s)
+  s = s:sub(1, -2)
+  while #s > 0 do
+    local b = s:byte(-1)
+    if b >= 0x80 and b < 0xC0 then
+      s = s:sub(1, -2)
+    elseif b >= 0xC0 then
+      s = s:sub(1, -2)
+      break
+    else
+      break
+    end
+  end
+  return s
+end
+
+-- Shorten `text` with ".." until it is no wider than `maxw` (in UI units) at `scale`.
+local function amu_fit(text, scale, maxw)
+  text = tostring(text or "")
+  text = text:gsub("[\r\n\t]+", " ")
+  if amu_text_w(text, scale) <= maxw then return text end
+  local s = text
+  while #s > 0 do
+    s = amu_cut_last_char(s)
+    local trimmed = s:gsub("%s+$", "")
+    if amu_text_w(trimmed .. "..", scale) <= maxw then return trimmed .. ".." end
+  end
+  return ".."
+end
+
+-- A {text=...} table whose text is always clamped to fit a box of width `maxw`.
+local function amu_status_tbl(scale, maxw, initial)
+  local raw = { text = "" }
+  local t = setmetatable({}, {
+    __index = function(_, k) return raw[k] end,
+    __newindex = function(_, k, v)
+      if k == "text" then raw.text = amu_fit(v or "", scale, maxw) else raw[k] = v end
+    end,
+  })
+  t.text = initial or ""
+  return t
+end
+
+---------------------------------------------------------------------------
+-- changelogs.json reader (cached; reloads itself when autoupdate.ps1 rewrites the file)
+---------------------------------------------------------------------------
+local amu_cl_cache = { stamp = nil, data = nil }
+
+local function amu_changelogs()
+  local rel = "Mods/" .. mod_folder_name .. "/changelogs.json"
+  local info = love.filesystem.getInfo(rel)
+  local stamp = info and ((info.modtime or 0) .. ":" .. (info.size or 0)) or "none"
+  if amu_cl_cache.data and amu_cl_cache.stamp == stamp then return amu_cl_cache.data end
+  local data
+  local s = read_all(join_path(amu_mod_path(), "changelogs.json"))
+  if s then data = decode_json(s) end
+  amu_cl_cache.stamp = stamp
+  amu_cl_cache.data = (type(data) == "table" and type(data.mods) == "table") and data.mods or {}
+  return amu_cl_cache.data
 end
 
 G.UIDEF = G.UIDEF or {}
@@ -415,7 +491,8 @@ local amu_gh_msg = { text = "" }
 -- CHECK FOR UPDATES NOW (manual trigger)
 ---------------------------------------------------------------------------
 
-local amu_check_status = { text = "" }
+local on_full_update_done  -- forward declaration (assigned further down)
+local amu_check_status = amu_status_tbl(0.28, 4.6, "")
 local amu_is_checking = false
 
 local function run_manual_check()
@@ -582,26 +659,34 @@ end
 -- CONFIG TAB helpers
 ---------------------------------------------------------------------------
 
-local MODS_PER_PAGE = 8
+local MODS_PER_PAGE = 7
 local AMU_CONFIG_PAGE = 1
 local amu_sort_label = { toggles = "Sort: A-Z", backups = "Sort: A-Z" }
-local amu_nosrc_msg = { text = "" }
+local amu_nosrc_msg = amu_status_tbl(0.27, 9.4, "")
 local AMU_NOSRC_PAGE = 1
 
 -- Backup browser state (forward-declared; build_backup_mods_page defined after open_overlay)
 local AMU_BACKUP_PAGE = 1
-local amu_backup_status = { text = "" }
+local amu_backup_status = amu_status_tbl(0.3, 11.6, "")
 local amu_restore_in_progress = false
 local build_backup_mods_page  -- forward declaration; assigned after close_overlay is defined
 
 -- Fork Finder state (forward-declared; build_fork_mods_page defined after open_overlay)
 local AMU_FORK_PAGE = 1
-local amu_fork_status = { text = "" }
+local amu_fork_status = amu_status_tbl(0.3, 9.8, "")
 local amu_fork_scanning = false
 local amu_fork_suggestions = nil
 local load_fork_suggestions  -- forward declaration; assigned after open_overlay/close_overlay
 local get_fork_mod_entries   -- forward declaration; assigned after open_overlay/close_overlay
 local build_fork_mods_page   -- forward declaration; assigned after close_overlay is defined
+-- Fixed list sizes: every page of a list is exactly this big, so tabs never grow, shrink or overflow.
+local AMU_BK_PER, AMU_BK_ROW_H, AMU_BK_W, AMU_BK_H = 6, 0.72, 11.9, 4.32
+local AMU_FORK_PER, AMU_FORK_ROW_H, AMU_FORK_W, AMU_FORK_H = 6, 0.5, 9.8, 3.24
+local AMU_NS_PER, AMU_NS_W, AMU_NS_H = 7, 9.6, 3.9
+local amu_fork_filter_label = { text = "" }
+local amu_fork_filter_text    -- assigned with the Fork Finder code
+local amu_fork_summary        -- assigned with the Fork Finder code
+local amu_restore_folder = nil
 
 ---------------------------------------------------------------------------
 -- Shared menu helpers: mod lookup, versions, update times, navigation buttons
@@ -701,6 +786,11 @@ local function mod_version_line(folder)
     parts[#parts + 1] = "v" .. (ver:gsub("^[vV]", ""))
   end
   local h = git_short_hash(folder)
+  local pin = config.mod_pinned and config.mod_pinned[folder]
+  if type(pin) == "table" and pin.pinned then
+    local ci = amu_changelogs()[folder]
+    if type(ci) == "table" and ci.restored and ci.head and ci.head ~= "" then h = tostring(ci.head):sub(1, 7) end
+  end
   if h then parts[#parts + 1] = "#" .. h end
   if #parts == 0 then return "version unknown" end
   return table.concat(parts, " ")
@@ -732,9 +822,25 @@ local function amu_sort_text(mode)
   return (mode == "recent") and "Sort: Recent" or "Sort: A-Z"
 end
 
--- Navigation: these only touch G.FUNCS, so they can be used by every screen.
+---------------------------------------------------------------------------
+-- NAVIGATION + CONTROLLER SUPPORT (shared by every Mod Updater screen)
+--   * "Close All Menus": button, hold-B on a controller, Esc on a keyboard
+--   * LT / RT (triggers) switch tabs, LB / RB (bumpers) switch pages
+--   * D-pad / left-stick up & down walk through EVERY row, top to bottom
+---------------------------------------------------------------------------
+
+local AMU_HOLD_B_SECS = 0.7
+
+-- Closes whatever menu is open (and saves mod settings first when we're in the Mods menu).
+local function amu_close_everything()
+  if G.ACTIVE_MOD_UI or (SMODS and SMODS.IN_MODS_TAB) then
+    if G.FUNCS.exit_mods then pcall(G.FUNCS.exit_mods) end
+  end
+  if G.FUNCS.exit_overlay_menu then pcall(G.FUNCS.exit_overlay_menu) end
+end
+
 G.FUNCS.amu_close_all = function(e)
-  if G and G.FUNCS and G.FUNCS.exit_overlay_menu then pcall(G.FUNCS.exit_overlay_menu) end
+  amu_close_everything()
 end
 
 -- Re-open this mod's menu on the tab the player was last on (Backups, Fork Finder, ...).
@@ -743,29 +849,403 @@ G.FUNCS.amu_back_to_menu = function(e)
   local f = G.FUNCS["openModUI_" .. id]
   local ok = false
   if f then ok = pcall(f, { config = {} }) end
-  if not ok then G.FUNCS.amu_close_all() end
+  if not ok then amu_close_everything() end
 end
 
+-- Rebuild the whole tab (pager included) when it is on screen. Used when the NUMBER of rows changes.
+local function amu_reopen_if_open(area_id)
+  local om = G and G.OVERLAY_MENU
+  if om and om.get_UIE_by_ID and om:get_UIE_by_ID(area_id) then G.FUNCS.amu_back_to_menu() end
+end
+
+-- Is one of OUR screens the open overlay? (cached for a moment: it walks the node tree)
+local amu_open_cache = { om = nil, t = -10, v = false }
+local function amu_screen_open()
+  local om = G and G.OVERLAY_MENU
+  if not om or not om.get_UIE_by_ID then return false end
+  local now = (G.TIMERS and G.TIMERS.REAL) or 0
+  if amu_open_cache.om == om and (now - amu_open_cache.t) < 0.25 then return amu_open_cache.v end
+  local ok, found = pcall(function()
+    return om:get_UIE_by_ID('amu_marker') or om:get_UIE_by_ID('tab_but_Mod Toggles')
+  end)
+  amu_open_cache.om, amu_open_cache.t, amu_open_cache.v = om, now, (ok and found) and true or false
+  return amu_open_cache.v
+end
+
+-- Switch the tab strip by dir (+1 / -1), wrapping around. Same logic the game uses for LB/RB.
+local function amu_cycle_tab(dir)
+  local om = G and G.OVERLAY_MENU
+  local strip = om and om.get_UIE_by_ID and om:get_UIE_by_ID('tab_shoulders')
+  if not strip then return false end
+  local ok, done = pcall(function()
+    local proto = strip.UIBox:get_group(nil, strip.children[1].children[1].config.group)
+    local choices = {}
+    for _, v in ipairs(proto) do
+      if v.config.choice and v.config.button then choices[#choices + 1] = v end
+    end
+    for k, v in ipairs(choices) do
+      if v.config.chosen then
+        local nxt = k + dir
+        if nxt < 1 then nxt = #choices elseif nxt > #choices then nxt = 1 end
+        choices[nxt]:click()
+        G.CONTROLLER:snap_to({ node = choices[nxt] })
+        G.CONTROLLER:update_cursor()
+        return true
+      end
+    end
+    return false
+  end)
+  return ok and done and true or false
+end
+
+-- Up / down on a controller: go row by row (so no button is ever skipped), picking the
+-- button in the next row that is closest sideways to where you are now.
+local function amu_row_nav(ctrl, dir)
+  local cur = ctrl.focused.target
+  if not cur or not cur.T then return false end
+  local cur_g = cur
+  local cfa = cur.config and cur.config.focus_args
+  if cfa and type(cfa.funnel_to) == "table" then cur_g = cfa.funnel_to end
+  local cx, cy = cur_g.T.x + cur_g.T.w / 2, cur_g.T.y + cur_g.T.h / 2
+
+  local items = {}
+  for _, v in pairs(G.MOVEABLES) do
+    v.states.focus.can = false
+    v.states.focus.is = false
+    if ctrl:is_node_focusable(v) then
+      v.states.focus.can = true
+      local g = v
+      local fa = v.config and v.config.focus_args
+      if fa and type(fa.funnel_to) == "table" then g = fa.funnel_to end
+      items[#items + 1] = { node = v, x = g.T.x + g.T.w / 2, y = g.T.y + g.T.h / 2 }
+    end
+  end
+  if #items < 2 then
+    cur.states.focus.is = true
+    return true
+  end
+  table.sort(items, function(a, b) return a.y < b.y end)
+
+  -- group into rows (buttons whose centres are within 0.22 of each other sit in one row)
+  local rows = {}
+  for _, it in ipairs(items) do
+    local last = rows[#rows]
+    if last and (it.y - last.y0) < 0.22 then
+      last[#last + 1] = it
+    else
+      rows[#rows + 1] = { it, y0 = it.y }
+    end
+  end
+
+  -- which row are we in now?
+  local cur_row, best = 1, math.huge
+  for i, r in ipairs(rows) do
+    local d = math.abs(r.y0 - cy)
+    if d < best then best, cur_row = d, i end
+  end
+
+  if dir == "L" or dir == "R" then
+    -- sideways: only to the next button in the SAME row (e.g. Paste -> Clear); nothing there = let the game decide
+    local pick_h, pick_hd = nil, math.huge
+    for _, it in ipairs(rows[cur_row]) do
+      local dx = it.x - cx
+      if (dir == "R" and dx > 0.05) or (dir == "L" and dx < -0.05) then
+        if math.abs(dx) < pick_hd then pick_h, pick_hd = it, math.abs(dx) end
+      end
+    end
+    if not pick_h then return false end
+    ctrl.focused.prev_target = cur
+    ctrl.focused.target = pick_h.node
+    pick_h.node.states.focus.is = true
+    if G.VIBRATION then G.VIBRATION = G.VIBRATION + 0.7 end
+    return true
+  end
+
+  local target_row = cur_row + (dir == "D" and 1 or -1)
+  if target_row < 1 or target_row > #rows then
+    cur.states.focus.is = true      -- already at the top / bottom
+    return true
+  end
+
+  local pick, pick_d = nil, math.huge
+  for _, it in ipairs(rows[target_row]) do
+    local d = math.abs(it.x - cx)
+    if d < pick_d then pick, pick_d = it, d end
+  end
+  if not pick then return false end
+
+  ctrl.focused.prev_target = cur
+  ctrl.focused.target = pick.node
+  pick.node.states.focus.is = true
+  if G.VIBRATION then G.VIBRATION = G.VIBRATION + 0.7 end
+  return true
+end
+
+local amu_holdb = { pending = false, fired = false, t = 0 }
+
+if Controller and not Controller._amu_hooked then
+  Controller._amu_hooked = true
+
+  local orig_press = Controller.button_press_update
+  function Controller:button_press_update(button, dt)
+    if (button == "triggerleft" or button == "triggerright") and not self.locks.frame and amu_screen_open() then
+      if amu_cycle_tab(button == "triggerright" and 1 or -1) then
+        self.held_button_times[button] = 0
+        self.interrupt.focus = false
+        return
+      end
+    end
+    -- LB / RB only turn pages. On a screen without pages (Config) they do nothing - they must never switch tabs.
+    if (button == "leftshoulder" or button == "rightshoulder") and not self.locks.frame and amu_screen_open() then
+      local om = G.OVERLAY_MENU
+      if om and om.get_UIE_by_ID and not om:get_UIE_by_ID('cycle_shoulders') then
+        self.held_button_times[button] = 0
+        return
+      end
+    end
+    -- B: a quick tap is the normal Back button (done when you let go), holding it closes ALL menus.
+    -- (The game acts on the very first press, which is why holding used to never get that far.)
+    if button == "b" and not self.locks.frame and G.OVERLAY_MENU and not self.text_input_hook and amu_screen_open() then
+      amu_holdb.pending, amu_holdb.fired, amu_holdb.t = true, false, 0
+      self.held_button_times["b"] = 0
+      self.interrupt.focus = false
+      return
+    end
+    return orig_press(self, button, dt)
+  end
+
+  local orig_hold = Controller.button_hold_update
+  function Controller:button_hold_update(button, dt)
+    local r = orig_hold(self, button, dt)
+    if button == "b" and amu_holdb.pending then
+      amu_holdb.t = amu_holdb.t + (dt or 0)
+      if amu_holdb.t >= AMU_HOLD_B_SECS then
+        amu_holdb.pending, amu_holdb.fired = false, true
+        amu_close_everything()
+      end
+    end
+    return r
+  end
+
+  local orig_release = Controller.button_release_update
+  function Controller:button_release_update(button, dt)
+    if button == "b" and (amu_holdb.pending or amu_holdb.fired) then
+      local was_tap = amu_holdb.pending
+      amu_holdb.pending, amu_holdb.fired, amu_holdb.t = false, false, 0
+      if was_tap and G.OVERLAY_MENU then
+        self.frame_buttonpress = false
+        orig_press(self, "b", dt) -- the normal Back action
+      end
+    end
+    return orig_release(self, button, dt)
+  end
+
+  local orig_focus = Controller.update_focus
+  function Controller:update_focus(dir)
+    if (dir == "U" or dir == "D" or dir == "L" or dir == "R") and self.focused and self.focused.target
+       and self.HID and self.HID.controller and not self.interrupt.focus
+       and not (self.locked and not G.SETTINGS.paused) and amu_screen_open() then
+      local ok, handled = pcall(amu_row_nav, self, dir)
+      if ok and handled then return end
+    end
+    return orig_focus(self, dir)
+  end
+end
+
+-- In the tab strip, show the trigger glyphs (LT / RT) instead of the bumper glyphs.
+do
+  local orig_pip = G.FUNCS.set_button_pip
+  if orig_pip and not G.FUNCS._amu_pip_hooked then
+    G.FUNCS._amu_pip_hooked = true
+    G.FUNCS.set_button_pip = function(e)
+      local fa = e and e.config and e.config.focus_args
+      if fa and e.children and not e.children.button_pip
+         and (fa.button == "leftshoulder" or fa.button == "rightshoulder")
+         and G.CONTROLLER and G.CONTROLLER.HID and G.CONTROLLER.HID.controller then
+        local ok, swap = pcall(function()
+          if not amu_screen_open() then return false end
+          local par = e.parent
+          if not par or not par.children then return false end
+          for _, ch in pairs(par.children) do
+            if type(ch) == "table" and ch.config and ch.config.id == "tab_shoulders" then return true end
+          end
+          return false
+        end)
+        if ok and swap then
+          fa.button = (fa.button == "leftshoulder") and "triggerleft" or "triggerright"
+        end
+      end
+      return orig_pip(e)
+    end
+  end
+end
+
+-- The red "Close All Menus" button, with the shortcut hint underneath it.
 local function amu_close_all_node(minw)
-  return { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = minw or 1.7, minh = 0.42, r = 0.09,
-    colour = G.C.RED, button = "amu_close_all", hover = true, shadow = true }, nodes = {
-    { n = G.UIT.T, config = { text = "Close all", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } }
+  local dim = RGBA(0.78, 0.8, 0.88, 1)
+  local using_pad = G.CONTROLLER and G.CONTROLLER.HID and G.CONTROLLER.HID.controller
+  local hint
+  if using_pad then
+    hint = {
+      { n = G.UIT.T, config = { text = "Hold ", scale = 0.21, colour = dim } },
+      { n = G.UIT.C, config = { minw = 0.34, minh = 0.3, align = "cm", func = "set_button_pip",
+          focus_args = { button = "b", type = "none", orientation = "cm", scale = 0.32, offset = { x = 0, y = 0 } } }, nodes = {} },
+      { n = G.UIT.T, config = { text = " or press Esc", scale = 0.21, colour = dim } },
+    }
+  else
+    hint = { { n = G.UIT.T, config = { text = "Hold B or press Esc", scale = 0.21, colour = dim } } }
+  end
+  return { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = {
+    { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = {
+      { n = G.UIT.B, config = { id = "amu_marker", w = 0, h = 0 } },
+      { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = minw or 2.6, minh = 0.42, r = 0.09,
+          colour = G.C.RED, button = "amu_close_all", hover = true, shadow = true }, nodes = {
+        { n = G.UIT.T, config = { text = "Close All Menus", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
+    }},
+    { n = G.UIT.R, config = { align = "cm", padding = 0.01 }, nodes = hint },
   }}
 end
 
 local function amu_header_row(title, scale)
   local purple = (G.C and G.C.PURPLE) or RGBA(0.62, 0.33, 0.92, 1)
-  return { n = G.UIT.R, config = { align = "cm", padding = 0.06 }, nodes = {
+  return { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
     { n = G.UIT.T, config = { text = title, scale = scale or 0.5, colour = purple, shadow = true } },
     { n = G.UIT.B, config = { w = 0.5, h = 0.1 } },
-    amu_close_all_node(1.7),
+    amu_close_all_node(2.6),
   }}
+end
+
+local function amu_update_area(id, def)
+  local om = G and G.OVERLAY_MENU
+  if not om or not om.get_UIE_by_ID then return end
+  local area = om:get_UIE_by_ID(id)
+  if area and area.config.object then
+    area.config.object:remove()
+    area.config.object = UIBox {
+      definition = def,
+      config = { offset = { x = 0, y = 0 }, align = "cm", parent = area },
+    }
+  end
+end
+
+local function amu_update_areas(defs)
+  for id, def in pairs(defs) do amu_update_area(id, def) end
+end
+
+-- Shared page geometry (kept in one place so every list is the same size on every page)
+local AMU_ROW_H = 0.5
+
+local function amu_list_root(rows, w, h)
+  return {
+    n = G.UIT.ROOT,
+    config = { align = "tm", colour = G.C.CLEAR, padding = 0, minw = w, minh = h },
+    nodes = { { n = G.UIT.C, config = { align = "tl", padding = 0 }, nodes = rows } },
+  }
+end
+
+local function amu_blank_row(w, h)
+  h = h or AMU_ROW_H
+  return { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = h }, nodes = {
+    { n = G.UIT.B, config = { h = h - 0.04, w = w or 5.5 } } } }
+end
+
+---------------------------------------------------------------------------
+-- ON/OFF LIST SNAPSHOT (so you can go back after trying "All on" / "All off")
+---------------------------------------------------------------------------
+
+local AMU_SNAP_FILE = "toggle_snapshot.json"
+local amu_snap_info = amu_status_tbl(0.27, 9.6, "")
+local amu_snap_autosaved = false
+
+local function amu_snap_path()
+  return join_path(amu_mod_path(), AMU_SNAP_FILE)
+end
+
+local function amu_read_snapshot()
+  local s = read_all(amu_snap_path())
+  local d = s and decode_json(s) or nil
+  if type(d) == "table" and type(d.enabled) == "table" then return d end
+  return nil
+end
+
+local function amu_snap_label()
+  local d = amu_read_snapshot()
+  if not d then return "No saved on/off list yet. 'Save list' keeps one." end
+  return "Saved on/off list: " .. tostring(d.saved_at or "?") .. "  -  'Restore list' puts it back"
+end
+
+local function amu_save_snapshot(source, keep)
+  local enabled = {}
+  for k, v in pairs(config.mod_update_enabled or {}) do enabled[k] = v and true or false end
+  local data = {
+    saved_at = os.date("%Y-%m-%d %H:%M"),
+    source = source,
+    keep = keep and true or false,
+    enabled = enabled,
+  }
+  local f = io.open(amu_snap_path(), "wb")
+  if not f then return false end
+  f:write(encode_json(data))
+  f:close()
+  return true
+end
+
+local build_mod_toggles_page
+
+local function amu_refresh_toggles()
+  pcall(amu_update_areas, {
+    ["amu_mod_toggle_list"] = build_mod_toggles_page(AMU_CONFIG_PAGE)
+  })
+end
+
+G.FUNCS.amu_snap_save = function(e)
+  if amu_save_snapshot("saved by you in the Mod Toggles tab", true) then
+    amu_snap_info.text = "Saved. " .. amu_snap_label()
+  else
+    amu_snap_info.text = "Couldn't write toggle_snapshot.json"
+  end
+end
+
+G.FUNCS.amu_snap_restore = function(e)
+  local d = amu_read_snapshot()
+  if not d then amu_snap_info.text = "Nothing saved yet - press 'Save list' first."; return end
+  local n = 0
+  for folder, val in pairs(d.enabled) do
+    if config.mod_update_enabled and config.mod_update_enabled[folder] ~= nil then
+      local pin = config.mod_pinned and config.mod_pinned[folder]
+      if type(pin) == "table" and pin.pinned then
+        config.mod_update_enabled[folder] = false
+      else
+        config.mod_update_enabled[folder] = val and true or false
+      end
+      n = n + 1
+    end
+  end
+  pcall(write_ps1_config_overlay)
+  amu_snap_info.text = "Restored " .. n .. " mods to the list saved " .. tostring(d.saved_at or "?")
+  amu_refresh_toggles()
 end
 
 -- Builds the dynamic mod-toggle list content for a given page.
 -- Every row uses the SAME fixed column widths so the toggles and Check buttons sit in
 -- straight vertical lines (this is what makes controller up/down land on the next row).
-local function build_mod_toggles_page(page)
+-- NOTE: the game's real text is ~20% taller than the plain font metrics, so a row with a toggle is ~0.65 high.
+-- Every row therefore gets a fixed, generous minimum height and the list area is exactly rows x that height.
+-- A check box without the game's roomy padding / empty label, so a row stays slim.
+local function amu_tight_toggle(args)
+  args.label = ""
+  args.label_scale = 0.1
+  args.w = 0
+  args.scale = 0.42
+  local t = create_toggle(args)
+  if type(t) == "table" and type(t.config) == "table" then t.config.padding = 0.03 end
+  return t
+end
+
+local AMU_TOG_ROW_H = 0.60
+local AMU_TOG_W, AMU_TOG_H = 10.1, 7 * 0.60
+
+build_mod_toggles_page = function(page)
   local entries = get_sorted_mod_entries(config.sort_toggles)
   local total_pages = math.max(1, math.ceil(#entries / MODS_PER_PAGE))
   page = math.max(1, math.min(page or 1, total_pages))
@@ -795,48 +1275,36 @@ local function build_mod_toggles_page(page)
 
       local check_colour = amu_per_mod_checking[folder] and RGBA(0.5, 0.5, 0.5, 0.9) or G.C.BLUE
 
+      -- name on the left, the update status in the middle, toggle + Check together on the far right
       local row_nodes = {
-        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 4.4 }, nodes = {
-          { n = G.UIT.T, config = { text = fit_name(entry.display, 21), scale = 0.46, colour = G.C.UI.TEXT_LIGHT } }
+        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 4.3 }, nodes = {
+          { n = G.UIT.T, config = { text = amu_fit(entry.display, 0.44, 4.2), scale = 0.44, colour = G.C.UI.TEXT_LIGHT } }
         }},
-        { n = G.UIT.C, config = { align = "cm", padding = 0, minw = 0.95 }, nodes = {
-          create_toggle {
-            label = "",
+        { n = G.UIT.C, config = { align = "cl", padding = 0.04, minw = 3.3 }, nodes = {
+          { n = G.UIT.T, config = { ref_table = amu_per_mod_status, ref_value = folder, scale = 0.26, colour = G.C.UI.TEXT_LIGHT } }
+        }},
+        { n = G.UIT.C, config = { align = "cm", padding = 0, minw = 0.9 }, nodes = {
+          amu_tight_toggle {
             ref_table = config.mod_update_enabled,
             ref_value = entry.folder,
-            w = 0,
-            scale = 0.42,
             callback = function()
               write_ps1_config_overlay()
             end
           },
         }},
-        { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 1.35, minh = 0.48, r = 0.09,
+        { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 1.5, minh = 0.44, r = 0.09,
           colour = check_colour, button = "amu_check_mod_" .. row_i, hover = true, shadow = true }, nodes = {
           { n = G.UIT.T, config = { text = "Check", scale = 0.34, colour = G.C.UI.TEXT_LIGHT } }
         }},
-        { n = G.UIT.C, config = { align = "cl", padding = 0.04, minw = 1.7 }, nodes = {
-          { n = G.UIT.T, config = { ref_table = amu_per_mod_status, ref_value = folder, scale = 0.26, colour = G.C.UI.TEXT_LIGHT } }
-        }},
       }
-      rows[#rows+1] = { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = row_nodes }
+      rows[#rows+1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_TOG_ROW_H }, nodes = row_nodes }
     end
   end
 
-  local shown = end_i - start_i + 1
-  for _ = shown + 1, MODS_PER_PAGE do
-    rows[#rows+1] = { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = {
-      { n = G.UIT.B, config = { h = 0.54, w = 5.5 } }
-    }}
-  end
+  local shown = math.max(0, end_i - start_i + 1)
+  for _ = shown + 1, MODS_PER_PAGE do rows[#rows+1] = amu_blank_row(AMU_TOG_W - 0.5, AMU_TOG_ROW_H) end
 
-  return {
-    n = G.UIT.ROOT,
-    config = { align = "cm", colour = G.C.CLEAR, padding = 0.02 },
-    nodes = {
-      { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = rows }
-    }
-  }
+  return amu_list_root(rows, AMU_TOG_W, AMU_TOG_H)
 end
 
 -- Callback for the mod toggles page cycle
@@ -844,22 +1312,34 @@ G.FUNCS.amu_mod_toggles_page = function(args)
   if not args or not args.cycle_config then return end
   local page = args.cycle_config.current_option or 1
   AMU_CONFIG_PAGE = page
-  SMODS.GUI.DynamicUIManager.updateDynamicAreas({
-    ["amu_mod_toggle_list"] = build_mod_toggles_page(page)
-  })
+  amu_refresh_toggles()
 end
 
 -- Sort button on the Mod Toggles screen (A-Z <-> Recently updated)
 G.FUNCS.amu_sort_toggles = function(e)
   config.sort_toggles = (config.sort_toggles == "recent") and "az" or "recent"
   amu_sort_label.toggles = amu_sort_text(config.sort_toggles)
-  pcall(SMODS.GUI.DynamicUIManager.updateDynamicAreas, {
-    ["amu_mod_toggle_list"] = build_mod_toggles_page(AMU_CONFIG_PAGE)
-  })
+  amu_refresh_toggles()
 end
 
 -- Turn updates on/off for EVERY mod at once (pinned mods always stay off).
+-- The first time, the current on/off list is saved automatically so it can be restored.
 local function amu_set_all_updates(val)
+  local on, off = 0, 0
+  for folder, v in pairs(config.mod_update_enabled or {}) do
+    local pin = config.mod_pinned and config.mod_pinned[folder]
+    if not (type(pin) == "table" and pin.pinned) then
+      if v then on = on + 1 else off = off + 1 end
+    end
+  end
+  local existing = amu_read_snapshot()
+  local mixed = on > 0 and off > 0
+  if mixed and not amu_snap_autosaved and not (existing and existing.keep) then
+    if amu_save_snapshot("saved automatically just before All on / All off", false) then
+      amu_snap_autosaved = true
+    end
+  end
+
   for folder, _ in pairs(config.mod_update_enabled or {}) do
     local pin = config.mod_pinned and config.mod_pinned[folder]
     if type(pin) == "table" and pin.pinned then
@@ -869,9 +1349,8 @@ local function amu_set_all_updates(val)
     end
   end
   pcall(write_ps1_config_overlay)
-  pcall(SMODS.GUI.DynamicUIManager.updateDynamicAreas, {
-    ["amu_mod_toggle_list"] = build_mod_toggles_page(AMU_CONFIG_PAGE)
-  })
+  amu_snap_info.text = amu_snap_label()
+  amu_refresh_toggles()
 end
 G.FUNCS.amu_toggles_all_on  = function(e) amu_set_all_updates(true) end
 G.FUNCS.amu_toggles_all_off = function(e) amu_set_all_updates(false) end
@@ -909,7 +1388,7 @@ G.FUNCS.amu_backup_mods_page = function(args)
   if not args or not args.cycle_config then return end
   local page = args.cycle_config.current_option or 1
   AMU_BACKUP_PAGE = page
-  SMODS.GUI.DynamicUIManager.updateDynamicAreas({
+  amu_update_areas({
     ["amu_backup_mod_list"] = build_backup_mods_page(page)
   })
 end
@@ -919,7 +1398,7 @@ G.FUNCS.amu_fork_mods_page = function(args)
   if not args or not args.cycle_config then return end
   local page = args.cycle_config.current_option or 1
   AMU_FORK_PAGE = page
-  SMODS.GUI.DynamicUIManager.updateDynamicAreas({
+  amu_update_areas({
     ["amu_fork_mod_list"] = build_fork_mods_page(page)
   })
 end
@@ -997,6 +1476,7 @@ local function revert_and_pin_mod(folder_name, backup_file)
   }, " ")
 
   amu_restore_in_progress = true
+  amu_restore_folder = folder_name
   amu_backup_status.text = "Restoring " .. folder_name .. "..."
 
   if love and love.thread and love.thread.newThread and love.thread.getChannel then
@@ -1016,7 +1496,7 @@ local function revert_and_pin_mod(folder_name, backup_file)
       func = function()
         local msg = channel:pop()
         if msg then
-          amu_restore_in_progress = false
+          amu_restore_in_progress = false; amu_restore_folder = nil
           amu_backup_status.text = folder_name ..
             (msg == "done" and " restored. Restart to apply." or " restore error. See last_run.json.")
           return true
@@ -1026,7 +1506,7 @@ local function revert_and_pin_mod(folder_name, backup_file)
     }))
   else
     os.execute(cmd)
-    amu_restore_in_progress = false
+    amu_restore_in_progress = false; amu_restore_folder = nil
     amu_backup_status.text = folder_name .. " restored. Restart to apply."
   end
 end
@@ -1049,70 +1529,58 @@ SMODS.current_mod.config_tab = function()
 
   amu_nexus_display.text = mask_nexus_key(config.nexus_api_key)
 
+  local function trow(label, key, with_cb)
+    return { n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = {
+      create_toggle { label = label, ref_table = config, ref_value = key, w = 0, scale = 0.4,
+        callback = with_cb and function() write_ps1_config_overlay() end or nil },
+    }}
+  end
+
+  -- LEFT: general settings
+  local left = { n = G.UIT.C, config = { align = "tm", padding = 0.06, minw = 5.0 }, nodes = {
+    { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+      { n = G.UIT.T, config = { text = "General Settings", scale = 0.45, colour = purple, shadow = true } } } },
+    trow("Auto-check at startup", "auto_run", false),
+    trow("Update Git repos", "cfg_update_git", true),
+    trow("Update via update.json", "cfg_update_updatejson", true),
+    trow("Make backups", "cfg_make_backups", true),
+    trow("Update Steamodded", "cfg_update_steamodded", true),
+    trow("Update Lovely Injector", "cfg_update_lovely", true),
+  }}
+
+  -- RIGHT: Nexus key, then the "check now" button with clear space above it
+  local right = { n = G.UIT.C, config = { align = "tm", padding = 0.06, minw = 5.0 }, nodes = {
+    { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+      { n = G.UIT.T, config = { text = "Nexus API Key", scale = 0.45, colour = purple, shadow = true } } } },
+    { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+      { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = 4.6, minh = 0.5, r = 0.1, colour = panel }, nodes = {
+        { n = G.UIT.T, config = { ref_table = amu_nexus_display, ref_value = "text", scale = 0.35, colour = G.C.UI.TEXT_LIGHT } } } } } },
+    { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+      { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = 2.7, minh = 0.52, r = 0.1, colour = G.C.BLUE,
+          button = "amu_paste_nexus_key", hover = true, shadow = true }, nodes = {
+        { n = G.UIT.T, config = { text = "Paste from clipboard", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
+      { n = G.UIT.B, config = { h = 0.1, w = 0.12 } },
+      { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = 1.5, minh = 0.52, r = 0.1, colour = G.C.RED,
+          button = "amu_clear_nexus_key", hover = true, shadow = true }, nodes = {
+        { n = G.UIT.T, config = { text = "Clear", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
+    }},
+    -- space below the Nexus section
+    { n = G.UIT.B, config = { h = 0.45, w = 0.1 } },
+    { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+      { n = G.UIT.C, config = { align = "cm", padding = 0.08, minw = 4.4, minh = 0.7, r = 0.12, colour = G.C.GREEN,
+          button = "amu_check_updates_now", hover = true, shadow = true }, nodes = {
+        { n = G.UIT.T, config = { text = "Check for updates now", scale = 0.4, colour = purple } } } },
+    }},
+    { n = G.UIT.R, config = { align = "cm", padding = 0.02, minh = 0.32 }, nodes = {
+      { n = G.UIT.T, config = { ref_table = amu_check_status, ref_value = "text", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } },
+  }}
+
   return {
     n = G.UIT.ROOT,
-    config = { align = "cm", padding = 0.05, colour = G.C.BLACK, r = 0.1, emboss = 0.05, minh = 6, minw = 6 },
+    config = { align = "cm", padding = 0.08, colour = G.C.BLACK, r = 0.1, emboss = 0.05, minh = 5.6, minw = 10.6 },
     nodes = {
-      -- General settings header
-      amu_header_row("General Settings", 0.45),
-      -- Toggles
-      { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        create_toggle { label = "Auto-check at startup", ref_table = config, ref_value = "auto_run", w = 0, scale = 0.4 },
-      }},
-      { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        create_toggle { label = "Update Git repos", ref_table = config, ref_value = "cfg_update_git", w = 0, scale = 0.4,
-          callback = function() write_ps1_config_overlay() end },
-      }},
-      { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        create_toggle { label = "Update via update.json", ref_table = config, ref_value = "cfg_update_updatejson", w = 0, scale = 0.4,
-          callback = function() write_ps1_config_overlay() end },
-      }},
-      { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        create_toggle { label = "Make backups", ref_table = config, ref_value = "cfg_make_backups", w = 0, scale = 0.4,
-          callback = function() write_ps1_config_overlay() end },
-      }},
-      { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        create_toggle { label = "Update Steamodded", ref_table = config, ref_value = "cfg_update_steamodded", w = 0, scale = 0.4,
-          callback = function() write_ps1_config_overlay() end },
-      }},
-      { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        create_toggle { label = "Update Lovely Injector", ref_table = config, ref_value = "cfg_update_lovely", w = 0, scale = 0.4,
-          callback = function() write_ps1_config_overlay() end },
-      }},
-      -- Divider
-      { n = G.UIT.B, config = { h = 0.08, w = 0.1 } },
-      -- Nexus API Key section
-      { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
-        { n = G.UIT.T, config = { text = "Nexus API Key", scale = 0.4, colour = purple, shadow = true } }
-      }},
-      -- Key status display
-      { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = 5.0, minh = 0.45, r = 0.1, colour = panel }, nodes = {
-          { n = G.UIT.T, config = { ref_table = amu_nexus_display, ref_value = "text", scale = 0.35, colour = G.C.UI.TEXT_LIGHT } }
-        }}
-      }},
-      -- Paste + Clear buttons row
-      { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
-        { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = 2.6, minh = 0.55, r = 0.1, colour = G.C.BLUE, button = "amu_paste_nexus_key", hover = true, shadow = true }, nodes = {
-          { n = G.UIT.T, config = { text = "Paste from clipboard", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } }
-        }},
-        { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
-        { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = 1.4, minh = 0.55, r = 0.1, colour = G.C.RED, button = "amu_clear_nexus_key", hover = true, shadow = true }, nodes = {
-          { n = G.UIT.T, config = { text = "Clear", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } }
-        }},
-      }},
-      -- Divider
-      { n = G.UIT.B, config = { h = 0.08, w = 0.1 } },
-      -- Check for updates now
-      { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
-        { n = G.UIT.C, config = { align = "cm", padding = 0.08, minw = 3.8, minh = 0.7, r = 0.12, colour = G.C.GREEN, button = "amu_check_updates_now", hover = true, shadow = true }, nodes = {
-          { n = G.UIT.T, config = { text = "Check for updates now", scale = 0.4, colour = purple } }
-        }},
-      }},
-      -- Status text
-      { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        { n = G.UIT.T, config = { ref_table = amu_check_status, ref_value = "text", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } }
-      }},
+      amu_header_row("Mod Updater", 0.45),
+      { n = G.UIT.R, config = { align = "tm", padding = 0.02 }, nodes = { left, right } },
     }
   }
 end
@@ -1174,19 +1642,19 @@ end
 
 local function build_nosrc_page(page)
   local entries = read_untracked_list()
-  local total_pages = math.max(1, math.ceil(#entries / MODS_PER_PAGE))
+  local total_pages = math.max(1, math.ceil(#entries / AMU_NS_PER))
   page = math.max(1, math.min(page or 1, total_pages))
   AMU_NOSRC_PAGE = page
   local purple = (G.C and G.C.PURPLE) or RGBA(0.62, 0.33, 0.92, 1)
 
   local rows = {}
-  local start_i = (page - 1) * MODS_PER_PAGE + 1
-  local end_i = math.min(#entries, page * MODS_PER_PAGE)
+  local start_i = (page - 1) * AMU_NS_PER + 1
+  local end_i = math.min(#entries, page * AMU_NS_PER)
 
   if #entries == 0 then
-    rows[1] = { n = G.UIT.R, config = { align = "cm", padding = 0.1 }, nodes = {
+    rows[1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_ROW_H }, nodes = {
       { n = G.UIT.T, config = { text = "Every checked mod has an update source.", scale = 0.36, colour = purple } } } }
-    rows[2] = { n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
+    rows[2] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_ROW_H }, nodes = {
       { n = G.UIT.T, config = { text = "(Run 'Check for updates now' to refresh this list.)", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } }
   end
 
@@ -1201,87 +1669,96 @@ local function build_nosrc_page(page)
         pcall(function() clip = love.system.getClipboardText() or "" end)
         local kind, val = parse_source_link(clip)
         if not kind then
-          amu_nosrc_msg.text = "Copy the mod's GitHub or Nexus page link first, then click again."
+          amu_nosrc_msg.text = "Copy the mod's GitHub or Nexus page link first, then press again."
           return
         end
         if write_update_json(folder, kind, val) then
-          amu_nosrc_msg.text = display .. ": saved (" .. kind .. " " .. tostring(val) .. "). It is checked from the next update run."
+          amu_nosrc_msg.text = display .. ": saved (" .. kind .. " " .. tostring(val) .. "). Checked from the next update run."
         else
           amu_nosrc_msg.text = "Couldn't write update.json for " .. display
         end
-        pcall(SMODS.GUI.DynamicUIManager.updateDynamicAreas, {
-          ["amu_nosrc_list"] = build_nosrc_page(AMU_NOSRC_PAGE)
-        })
+        amu_update_area("amu_nosrc_list", build_nosrc_page(AMU_NOSRC_PAGE))
       end
-      rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = {
-        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 4.4 }, nodes = {
-          { n = G.UIT.T, config = { text = fit_name(display, 21), scale = 0.44, colour = G.C.UI.TEXT_LIGHT } } } },
-        { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.6, minh = 0.46, r = 0.09,
+      rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_ROW_H }, nodes = {
+        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 5.2 }, nodes = {
+          { n = G.UIT.T, config = { text = amu_fit(display, 0.44, 5.1), scale = 0.44, colour = G.C.UI.TEXT_LIGHT } } } },
+        { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.8, minh = 0.44, r = 0.09,
           colour = G.C.BLUE, button = "amu_nosrc_paste_" .. row_i, hover = true, shadow = true }, nodes = {
           { n = G.UIT.T, config = { text = "Paste link", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
       }}
     end
   end
 
-  local shown = math.max(0, end_i - start_i + 1)
-  for _ = math.max(shown, #entries == 0 and 2 or 0) + 1, MODS_PER_PAGE do
-    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = {
-      { n = G.UIT.B, config = { h = 0.54, w = 5.5 } } } }
+  local filled = (#entries == 0) and 2 or math.max(0, end_i - start_i + 1)
+  for _ = filled + 1, AMU_NS_PER do
+    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_ROW_H }, nodes = {
+      { n = G.UIT.B, config = { h = AMU_ROW_H - 0.04, w = AMU_NS_W - 0.5 } } } }
   end
 
-  return { n = G.UIT.ROOT, config = { align = "cm", colour = G.C.CLEAR, padding = 0.02 }, nodes = {
-    { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = rows } } }
+  return amu_list_root(rows, AMU_NS_W, AMU_NS_H)
 end
 
 G.FUNCS.amu_nosrc_page = function(args)
   if not args or not args.cycle_config then return end
   AMU_NOSRC_PAGE = args.cycle_config.current_option or 1
-  SMODS.GUI.DynamicUIManager.updateDynamicAreas({ ["amu_nosrc_list"] = build_nosrc_page(AMU_NOSRC_PAGE) })
+  amu_update_areas({ ["amu_nosrc_list"] = build_nosrc_page(AMU_NOSRC_PAGE) })
 end
 
 ---------------------------------------------------------------------------
 -- Tab builder shared by Mod Toggles / Backups / Fork Finder / No Source
+--   * the list area has a FIXED size, so the tab never grows or shrinks
+--   * the list is drawn centred in that area (no offset hack) so it can't overlap anything
 ---------------------------------------------------------------------------
 
 local function amu_make_tab(o)
-  local total_pages = math.max(1, math.ceil(o.count / MODS_PER_PAGE))
+  local per_page = o.per_page or MODS_PER_PAGE
+  local total_pages = math.max(1, math.ceil(o.count / per_page))
   local page = math.max(1, math.min(o.get_page(), total_pages))
   o.set_page(page)
   local page_options = {}
   for p = 1, total_pages do page_options[p] = "Page " .. p .. "/" .. total_pages end
 
+  local function spacer(h) return { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = { { n = G.UIT.B, config = { w = 0.1, h = h } } } } end
+  local gap_pager = 0.05
+  -- the empty space ABOVE the page selector (below the last mod) and BELOW it (above the window edge) are kept equal
+  local n_after = #(o.after or {})
+  local above = 0.08 + n_after * 0.43 + gap_pager
+  local bottom_gap = math.max(0.02, above - 0.23)
+
   local col = {}
   for _, n in ipairs(o.top) do col[#col + 1] = n end
-  col[#col + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.04, minh = o.list_minh, minw = 5.5 }, nodes = {
-    { n = G.UIT.O, config = { align = "cm", id = o.id, object = Moveable() } } } }
+  col[#col + 1] = spacer(o.gap_top or 0.1)
+  col[#col + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = {
+    { n = G.UIT.O, config = { id = o.id, w = o.list_w, h = o.list_h, object = Moveable() } } } }
   for _, n in ipairs(o.after or {}) do col[#col + 1] = n end
-  if total_pages > 1 then
-    -- padding above AND below the page selector, but it sits close to the bottom edge
-    col[#col + 1] = { n = G.UIT.R, config = { align = "cm", padding = o.nav_pad or 0.15 }, nodes = {
-      create_option_cycle {
-        w = 4.5, scale = 0.7, label = "", options = page_options, current_option = page,
-        opt_callback = o.cb, cycle_shoulders = true, no_pips = true,
-      } } }
-  end
+  col[#col + 1] = spacer(gap_pager)
+  col[#col + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+    create_option_cycle {
+      w = 3.8, scale = 0.55, options = page_options, current_option = page,
+      opt_callback = o.cb, cycle_shoulders = true, no_pips = true,
+    } } }
+  col[#col + 1] = spacer(bottom_gap)
 
-  local static_def = { n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
-    { n = G.UIT.C, config = { align = "tm", padding = 0.05, minw = 6 }, nodes = col } } }
+  local static_def = { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
+    { n = G.UIT.C, config = { align = "tm", padding = 0.03, minw = o.panel_w - 0.3 }, nodes = col } } }
 
-  return SMODS.GUI.DynamicUIManager.initTab({
-    updateFunctions = {
-      [o.id] = function(args)
-        local p = (args and args.cycle_config and args.cycle_config.current_option) or o.get_page() or 1
-        SMODS.GUI.DynamicUIManager.updateDynamicAreas({ [o.id] = o.build(p) })
-      end,
-    },
-    staticPageDefinition = static_def,
-  })
+  -- fill the list on the next frame (the overlay has to exist first)
+  G.E_MANAGER:add_event(Event({ func = function()
+    amu_update_area(o.id, o.build(page))
+    return true
+  end }))
+
+  return {
+    n = G.UIT.ROOT,
+    config = { emboss = 0.05, r = 0.1, minw = o.panel_w, minh = 0, align = "cm", colour = G.C.BLACK, padding = 0.04 },
+    nodes = { static_def },
+  }
 end
 
 local function amu_btn(label, func, colour, minw, scale)
-  return { n = G.UIT.C, config = { align = "cm", padding = 0.05, minw = minw, minh = 0.48, r = 0.1,
+  return { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = minw, minh = 0.44, r = 0.1,
     colour = colour, button = func, hover = true, shadow = true }, nodes = {
-    { n = G.UIT.T, config = { text = label, scale = scale or 0.34, colour = G.C.UI.TEXT_LIGHT } } } }
+    { n = G.UIT.T, config = { text = label, scale = scale or 0.32, colour = G.C.UI.TEXT_LIGHT } } } }
 end
 
 local function amu_gap(w) return { n = G.UIT.B, config = { w = w or 0.2, h = 0.1 } } end
@@ -1293,22 +1770,31 @@ SMODS.current_mod.extra_tabs = function()
       label = "Mod Toggles",
       tab_definition_function = function()
         amu_sort_label.toggles = amu_sort_text(config.sort_toggles)
+        amu_snap_info.text = amu_snap_label()
         return amu_make_tab({
           id = "amu_mod_toggle_list", cb = "amu_mod_toggles_page", build = build_mod_toggles_page,
-          count = #get_sorted_mod_entries(config.sort_toggles),
+          count = #get_sorted_mod_entries(config.sort_toggles), per_page = MODS_PER_PAGE,
           get_page = function() return AMU_CONFIG_PAGE end, set_page = function(p) AMU_CONFIG_PAGE = p end,
-          list_minh = 4.4, nav_pad = 0.2,
+          panel_w = 10.6, list_w = AMU_TOG_W, list_h = AMU_TOG_H, gap_top = 0.15,
           top = {
             amu_header_row("Mod Update Toggles", 0.5),
-            { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
-              { n = G.UIT.C, config = { align = "cm", padding = 0.05, minw = 2.9, minh = 0.48, r = 0.1,
+            { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
+              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.3, minh = 0.44, r = 0.1,
                 colour = G.C.BLUE, button = "amu_sort_toggles", hover = true, shadow = true }, nodes = {
-                { n = G.UIT.T, config = { ref_table = amu_sort_label, ref_value = "toggles", scale = 0.34, colour = G.C.UI.TEXT_LIGHT } } } },
-              amu_gap(0.3),
-              amu_btn("All on", "amu_toggles_all_on", G.C.GREEN, 1.8),
-              amu_gap(0.2),
-              amu_btn("All off", "amu_toggles_all_off", G.C.RED, 1.8),
+                { n = G.UIT.T, config = { ref_table = amu_sort_label, ref_value = "toggles", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
+              amu_gap(0.15),
+              amu_btn("All on", "amu_toggles_all_on", G.C.GREEN, 1.3),
+              amu_gap(0.1),
+              amu_btn("All off", "amu_toggles_all_off", G.C.RED, 1.3),
+              amu_gap(0.25),
+              amu_btn("Save list", "amu_snap_save", G.C.PURPLE or purple, 1.7),
+              amu_gap(0.1),
+              amu_btn("Restore list", "amu_snap_restore", G.C.ORANGE or RGBA(0.85, 0.5, 0.05, 1), 2.0),
             }},
+          },
+          after = {
+            { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.4 }, nodes = {
+              { n = G.UIT.T, config = { ref_table = amu_snap_info, ref_value = "text", scale = 0.27, colour = G.C.UI.TEXT_LIGHT } } } },
           },
         })
       end
@@ -1319,19 +1805,19 @@ SMODS.current_mod.extra_tabs = function()
         amu_sort_label.backups = amu_sort_text(config.sort_backups)
         return amu_make_tab({
           id = "amu_backup_mod_list", cb = "amu_backup_mods_page", build = build_backup_mods_page,
-          count = #get_sorted_mod_entries(config.sort_backups),
+          count = #get_sorted_mod_entries(config.sort_backups), per_page = AMU_BK_PER,
           get_page = function() return AMU_BACKUP_PAGE end, set_page = function(p) AMU_BACKUP_PAGE = p end,
-          list_minh = 4.3, nav_pad = 0.18,
+          panel_w = 12.6, list_w = AMU_BK_W, list_h = AMU_BK_H, gap_top = 0.25,
           top = {
             amu_header_row("Mod Backups & Pinning", 0.5),
-            { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
-              { n = G.UIT.C, config = { align = "cm", padding = 0.05, minw = 2.9, minh = 0.48, r = 0.1,
+            { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
+              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.3, minh = 0.44, r = 0.1,
                 colour = G.C.BLUE, button = "amu_sort_backups", hover = true, shadow = true }, nodes = {
-                { n = G.UIT.T, config = { ref_table = amu_sort_label, ref_value = "backups", scale = 0.34, colour = G.C.UI.TEXT_LIGHT } } } },
+                { n = G.UIT.T, config = { ref_table = amu_sort_label, ref_value = "backups", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
             }},
           },
           after = {
-            { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
+            { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.4 }, nodes = {
               { n = G.UIT.T, config = { ref_table = amu_backup_status, ref_value = "text", scale = 0.3, colour = purple } } } },
           },
         })
@@ -1341,28 +1827,32 @@ SMODS.current_mod.extra_tabs = function()
       label = "Fork Finder",
       tab_definition_function = function()
         if not amu_fork_suggestions then amu_fork_suggestions = load_fork_suggestions() end
+        amu_fork_filter_label.text = amu_fork_filter_text()
         return amu_make_tab({
           id = "amu_fork_mod_list", cb = "amu_fork_mods_page", build = build_fork_mods_page,
-          count = #get_fork_mod_entries(),
+          count = #get_fork_mod_entries(), per_page = AMU_FORK_PER,
           get_page = function() return AMU_FORK_PAGE end, set_page = function(p) AMU_FORK_PAGE = p end,
-          list_minh = 3.3, nav_pad = 0.1,
+          panel_w = 10.6, list_w = AMU_FORK_W, list_h = AMU_FORK_H,
           top = {
             amu_header_row("Fork Finder", 0.5),
-            { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
-              { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = 3.4, minh = 0.55, r = 0.1,
+            { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
+              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.2, minh = 0.46, r = 0.1,
                 colour = amu_fork_scanning and RGBA(0.5, 0.5, 0.5, 0.9) or G.C.GREEN,
                 button = "amu_scan_forks", hover = true, shadow = true }, nodes = {
                 { n = G.UIT.T, config = { text = "Scan Now", scale = 0.34, colour = purple } } } },
-            }},
-            { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-              { n = G.UIT.T, config = { ref_table = amu_fork_status, ref_value = "text", scale = 0.3, colour = purple } } } },
-            { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-              { n = G.UIT.C, config = { align = "cm", padding = 0.05, minw = 2.4, minh = 0.45, r = 0.1,
+              amu_gap(0.15),
+              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 3.4, minh = 0.46, r = 0.1,
+                colour = G.C.BLUE, button = "amu_fork_filter", hover = true, shadow = true }, nodes = {
+                { n = G.UIT.T, config = { ref_table = amu_fork_filter_label, ref_value = "text", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
+              amu_gap(0.15),
+              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.2, minh = 0.46, r = 0.1,
                 colour = G.C.BLUE, button = "amu_gh_help_open", hover = true, shadow = true }, nodes = {
-                { n = G.UIT.T, config = { text = "GitHub token", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
-              amu_gap(0.12),
-              { n = G.UIT.T, config = { ref_table = amu_gh_display, ref_value = "text", scale = 0.27, colour = G.C.UI.TEXT_LIGHT } },
+                { n = G.UIT.T, config = { text = "GitHub token", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
             }},
+            { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.3 }, nodes = {
+              { n = G.UIT.T, config = { ref_table = amu_fork_status, ref_value = "text", scale = 0.3, colour = purple } } } },
+            { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.28 }, nodes = {
+              { n = G.UIT.T, config = { ref_table = amu_gh_display, ref_value = "text", scale = 0.26, colour = G.C.UI.TEXT_LIGHT } } } },
           },
         })
       end
@@ -1372,20 +1862,20 @@ SMODS.current_mod.extra_tabs = function()
       tab_definition_function = function()
         return amu_make_tab({
           id = "amu_nosrc_list", cb = "amu_nosrc_page", build = build_nosrc_page,
-          count = #read_untracked_list(),
+          count = #read_untracked_list(), per_page = AMU_NS_PER,
           get_page = function() return AMU_NOSRC_PAGE end, set_page = function(p) AMU_NOSRC_PAGE = p end,
-          list_minh = 4.0, nav_pad = 0.15,
+          panel_w = 10.6, list_w = AMU_NS_W, list_h = AMU_NS_H,
           top = {
             amu_header_row("Mods With No Update Source", 0.46),
             { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-              { n = G.UIT.T, config = { text = "Copy a mod's GitHub or Nexus page link, then click 'Paste link'.", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } },
-            { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
+              { n = G.UIT.T, config = { text = "Copy a mod's GitHub or Nexus page link, then press 'Paste link'.", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } },
+            { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
               create_toggle { label = "Show the 'no update source' note after update checks",
                 ref_table = config, ref_value = "show_untracked_note", w = 0, scale = 0.34 },
             }},
           },
           after = {
-            { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
+            { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.4 }, nodes = {
               { n = G.UIT.T, config = { ref_table = amu_nosrc_msg, ref_value = "text", scale = 0.27, colour = G.C.GREEN } } } },
           },
         })
@@ -1543,7 +2033,7 @@ G.UIDEF.amu_github_token_help = function()
         { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
         button("Back", "amu_back_to_menu", panel, 2.0),
         { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
-        button("Close all", "amu_close_all", G.C.RED, 2.4),
+        button("Close All Menus", "amu_close_all", G.C.RED, 3.2),
       }},
     }
   }
@@ -1601,12 +2091,12 @@ G.UIDEF.amu_token_problem = function(kind)
   local gap = { n = G.UIT.B, config = { h = 0.1, w = 0.15 } }
   if kind == "limit_token" then
     nodes[#nodes + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
-      b("Back", "amu_back_to_menu", panel, 2.4), gap, b("Close all", "amu_close_all", G.C.RED, 2.6) } }
+      b("Back", "amu_back_to_menu", panel, 2.4), gap, b("Close All Menus", "amu_close_all", G.C.RED, 3.2) } }
   else
     nodes[#nodes + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
       b("Yes, replace it", "amu_gh_help_open", G.C.GREEN, 3.2), gap,
       b("Not now", "amu_back_to_menu", panel, 2.2), gap,
-      b("Close all", "amu_close_all", G.C.RED, 2.4) } }
+      b("Close All Menus", "amu_close_all", G.C.RED, 3.2) } }
   end
   return { n = G.UIT.ROOT, config = { align = "cm", minw = 9.0, padding = 0.22, r = 0.2, colour = bg, shadow = true, hover = true }, nodes = nodes }
 end
@@ -1716,21 +2206,100 @@ G.UIDEF.amu_backup_picker = function(ref)
   }
 end
 
+---------------------------------------------------------------------------
+-- CHANGELOG HOVER (Backups tab): short summary of the newest changes of each mod.
+-- Data comes from changelogs.json, which autoupdate.ps1 refreshes after every
+-- update and every restore, so it always describes the version that is installed.
+---------------------------------------------------------------------------
+
+-- one short readable line from a commit message / release note line
+local function amu_clean_note(s)
+  s = tostring(s or "")
+  s = s:gsub("[\r\n]+", " "):gsub("%*%*", ""):gsub("[{}]", "")
+  s = s:gsub("^[%s%-%*#>]+", "")
+  s = s:gsub("#(%d)", "%1"):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  return s
+end
+
+local function amu_is_noise(s)
+  local l = s:lower()
+  return l == "" or l:find("^merge ") or l:find("^stylua") or l:find("auto%-format") or l:find("^update readme")
+    or l:find("^initial commit")
+end
+
+-- Builds the rows of the hover box (called by the game when you hover / focus the row).
+local function amu_changelog_tip(args)
+  args = args or {}
+  local folder, display = args.folder or "", args.display or args.folder or ""
+  local dark = G.C.UI.TEXT_DARK or RGBA(0.2, 0.2, 0.25, 1)
+  local blue = G.C.BLUE or dark
+  local maxw = 6.2
+  local rows = {}
+  local function add(text, scale, colour)
+    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.015 }, nodes = {
+      { n = G.UIT.T, config = { text = amu_fit(text, scale, maxw), scale = scale, colour = colour or dark } } } }
+  end
+
+  add(display .. "  -  " .. mod_version_line(folder), 0.34, blue)
+
+  if amu_restore_in_progress and amu_restore_folder == folder then
+    add("Reverting... this list refreshes when it's done.", 0.3)
+  else
+    local pin = config.mod_pinned and config.mod_pinned[folder]
+    if type(pin) == "table" and pin.pinned then
+      add("Pinned: you reverted this mod, so updates are paused.", 0.28)
+    end
+    local info = amu_changelogs()[folder]
+    local shown = 0
+    if type(info) == "table" then
+      if info.restored then add("This is the reverted copy (its files come from the backup).", 0.27) end
+      local dt = info.date
+      if (not dt or dt == "") and type(info.commits) == "table" and info.commits[1] then dt = info.commits[1].d end
+      if dt and dt ~= "" then add("Latest version dated " .. tostring(dt), 0.28) end
+      local lines = {}
+      if type(info.commits) == "table" then
+        for _, c in ipairs(info.commits) do lines[#lines + 1] = { amu_clean_note(c.s), c.d } end
+      elseif type(info.notes) == "table" then
+        for _, n in ipairs(info.notes) do lines[#lines + 1] = { amu_clean_note(n) } end
+      end
+      local seen = {}
+      for _, ln in ipairs(lines) do
+        local t = ln[1]
+        if shown < 5 and not amu_is_noise(t) and not seen[t] then
+          add("\226\128\162 " .. t, 0.3)
+          shown = shown + 1
+          seen[t] = true
+        end
+      end
+      if shown == 0 and #lines > 0 then
+        add("(only minor changes: merges and formatting)", 0.28)
+      end
+    end
+    if shown == 0 and not (type(info) == "table" and #(info.commits or info.notes or {}) > 0) then
+      add("No change notes saved yet for this mod.", 0.3)
+      add("They fill in after the next 'Check for updates now'.", 0.27)
+    end
+  end
+
+  return { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = {
+    { n = G.UIT.C, config = { align = "cl", padding = 0.03 }, nodes = rows } } }
+end
+
 -- Paginated list of all mods with version, last-update date, pin state and buttons.
 -- NOTE: this is assigned to the forward-declared local 'build_backup_mods_page'.
 build_backup_mods_page = function(page)
   local entries = get_sorted_mod_entries(config.sort_backups)
-  local total_pages = math.max(1, math.ceil(#entries / MODS_PER_PAGE))
+  local total_pages = math.max(1, math.ceil(#entries / AMU_BK_PER))
   page = math.max(1, math.min(page or 1, total_pages))
   AMU_BACKUP_PAGE = page
 
   local umap = build_last_update_map()
-  local grey = RGBA(0.72, 0.72, 0.82, 1)
+  local grey = RGBA(0.78, 0.78, 0.88, 1)
   local orange = RGBA(0.98, 0.62, 0.12, 1)
 
   local rows = {}
-  local start_i = (page - 1) * MODS_PER_PAGE + 1
-  local end_i   = math.min(#entries, page * MODS_PER_PAGE)
+  local start_i = (page - 1) * AMU_BK_PER + 1
+  local end_i   = math.min(#entries, page * AMU_BK_PER)
 
   for i = start_i, end_i do
     local entry = entries[i]
@@ -1748,13 +2317,11 @@ build_backup_mods_page = function(page)
 
       G.FUNCS["amu_unpin_mod_" .. row_i] = function(e)
         unpin_mod(folder)
-        SMODS.GUI.DynamicUIManager.updateDynamicAreas({
-          ["amu_backup_mod_list"] = build_backup_mods_page(AMU_BACKUP_PAGE)
-        })
+        amu_update_area("amu_backup_mod_list", build_backup_mods_page(AMU_BACKUP_PAGE))
       end
 
-      -- Two small lines to the right of the name: version, then last update / pin info
-      local line1 = fit_name(mod_version_line(folder), 24)
+      -- Two lines to the right of the name: version, then last update / pin info
+      local line1 = amu_fit(mod_version_line(folder), 0.32, 3.55)
       local line2, line2_colour
       if is_pinned then
         local pd = fmt_date(parse_stamp(pin_info.backup_file or ""))
@@ -1765,76 +2332,65 @@ build_backup_mods_page = function(page)
         line2 = ud and ("Updated " .. ud) or "Never updated here"
         line2_colour = grey
       end
+      line2 = amu_fit(line2, 0.29, 3.55)
+
+      local tip = { filler = { func = amu_changelog_tip, args = { folder = folder, display = display } } }
 
       local pin_badge
       if is_pinned then
-        pin_badge = {
-          n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 0.95, minh = 0.32,
-            r = 0.08, colour = RGBA(0.7, 0.45, 0.0, 0.95) }, nodes = {
-            { n = G.UIT.T, config = { text = "PINNED", scale = 0.25, colour = RGBA(1,1,1,1) } }
-          }
-        }
+        pin_badge = { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 1.0, minh = 0.32, r = 0.08,
+          colour = RGBA(0.7, 0.45, 0.0, 0.95) }, nodes = {
+          { n = G.UIT.T, config = { text = "PINNED", scale = 0.25, colour = RGBA(1, 1, 1, 1) } } } }
       else
-        pin_badge = { n = G.UIT.B, config = { h = 0.1, w = 0.95 } }
+        pin_badge = { n = G.UIT.B, config = { h = 0.1, w = 1.0 } }
       end
 
       local unpin_node
       if is_pinned then
-        unpin_node = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 0.95, minh = 0.4, r = 0.09,
+        unpin_node = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.05, minh = 0.42, r = 0.09,
           colour = G.C.RED, button = "amu_unpin_mod_" .. row_i, hover = true, shadow = true }, nodes = {
-          { n = G.UIT.T, config = { text = "Unpin", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } }
-        }}
+          { n = G.UIT.T, config = { text = "Unpin", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } }
       else
-        unpin_node = { n = G.UIT.B, config = { h = 0.1, w = 0.95 } }
+        unpin_node = { n = G.UIT.B, config = { h = 0.1, w = 1.05 } }
       end
 
       local row_nodes = {
-        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 4.2 }, nodes = {
-          { n = G.UIT.T, config = { text = fit_name(display, 22), scale = 0.42, colour = G.C.UI.TEXT_LIGHT } }
-        }},
-        { n = G.UIT.C, config = { align = "cl", padding = 0, minw = 2.9 }, nodes = {
+        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 3.9 }, nodes = {
+          { n = G.UIT.T, config = { text = amu_fit(display, 0.44, 3.8), scale = 0.44, colour = G.C.UI.TEXT_LIGHT } } } },
+        { n = G.UIT.C, config = { align = "cl", padding = 0, minw = 3.7 }, nodes = {
           { n = G.UIT.R, config = { align = "cl", padding = 0 }, nodes = {
-            { n = G.UIT.T, config = { text = line1, scale = 0.24, colour = G.C.UI.TEXT_LIGHT } } } },
+            { n = G.UIT.T, config = { text = line1, scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
           { n = G.UIT.R, config = { align = "cl", padding = 0 }, nodes = {
-            { n = G.UIT.T, config = { text = line2, scale = 0.22, colour = line2_colour } } } },
+            { n = G.UIT.T, config = { text = line2, scale = 0.29, colour = line2_colour } } } },
         }},
         pin_badge,
         { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
-        { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.3, minh = 0.42, r = 0.09,
-          colour = G.C.BLUE, button = "amu_open_backups_" .. row_i, hover = true, shadow = true }, nodes = {
-          { n = G.UIT.T, config = { text = "Backups", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } }
-        }},
+        { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.45, minh = 0.42, r = 0.09,
+          colour = G.C.BLUE, button = "amu_open_backups_" .. row_i, hover = true, shadow = true,
+          on_demand_tooltip = tip }, nodes = {
+          { n = G.UIT.T, config = { text = "Backups", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
         { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
         unpin_node,
       }
 
-      rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = row_nodes }
+      rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_BK_ROW_H, on_demand_tooltip = tip }, nodes = row_nodes }
     end
   end
 
-  local shown = end_i - start_i + 1
-  for _ = shown + 1, MODS_PER_PAGE do
-    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = {
-      { n = G.UIT.B, config = { h = 0.5, w = 5.5 } }
-    }}
+  local shown = math.max(0, end_i - start_i + 1)
+  for _ = shown + 1, AMU_BK_PER do
+    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_BK_ROW_H }, nodes = {
+      { n = G.UIT.B, config = { h = AMU_BK_ROW_H - 0.04, w = AMU_BK_W - 0.5 } } } }
   end
 
-  return {
-    n = G.UIT.ROOT,
-    config = { align = "cm", colour = G.C.CLEAR, padding = 0.02 },
-    nodes = {
-      { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = rows }
-    }
-  }
+  return amu_list_root(rows, AMU_BK_W, AMU_BK_H)
 end
 
 -- Sort button on the Backups screen
 G.FUNCS.amu_sort_backups = function(e)
   config.sort_backups = (config.sort_backups == "recent") and "az" or "recent"
   amu_sort_label.backups = amu_sort_text(config.sort_backups)
-  pcall(SMODS.GUI.DynamicUIManager.updateDynamicAreas, {
-    ["amu_backup_mod_list"] = build_backup_mods_page(AMU_BACKUP_PAGE)
-  })
+  amu_update_area("amu_backup_mod_list", build_backup_mods_page(AMU_BACKUP_PAGE))
 end
 
 ---------------------------------------------------------------------------
@@ -1850,34 +2406,86 @@ load_fork_suggestions = function()
   return decode_json(data)
 end
 
-get_fork_mod_entries = function()
+-- A fork counts as "newer" when it is the original project (upstream), or it has commits the
+-- installed copy doesn't have AND was updated on/after the day the installed copy was made.
+local function amu_fork_is_newer(fork, installed_date)
+  if fork.is_upstream then return true end
+  if (fork.commits_ahead or 0) <= 0 then return false end
+  local pushed = tostring(fork.pushed_at or ""):match("^(%d%d%d%d%-%d%d%-%d%d)")
+  if not pushed or not installed_date or installed_date == "" then return true end
+  return pushed >= installed_date
+end
+
+local function amu_installed_date(folder, umap, cls)
+  local info = cls and cls[folder]
+  local d = info and type(info.commits) == "table" and info.commits[1] and info.commits[1].d
+  if type(d) == "string" and d ~= "" then return d end
+  return fmt_date(last_update_for(folder, umap)) or ""
+end
+
+get_fork_mod_entries = function(force_all)
   if not amu_fork_suggestions or not amu_fork_suggestions.suggestions then return {} end
+  local newer_only = (config.fork_newer_only ~= false) and not force_all
+  local umap = newer_only and build_last_update_map() or nil
+  local cls = newer_only and amu_changelogs() or nil
   local entries = {}
   for folder_name, data in pairs(amu_fork_suggestions.suggestions) do
     if type(data) == "table" and type(data.forks) == "table" and #data.forks > 0 then
-      -- Count upstream vs regular fork entries
-      local has_upstream = false
-      local fork_only_count = 0
+      local installed = newer_only and amu_installed_date(folder_name, umap, cls) or ""
+      local list = {}
       for _, f in ipairs(data.forks) do
-        if f.is_upstream then
-          has_upstream = true
-        else
-          fork_only_count = fork_only_count + 1
-        end
+        if not newer_only or amu_fork_is_newer(f, installed) then list[#list + 1] = f end
       end
-      entries[#entries+1] = {
-        folder         = folder_name,
-        display        = get_display_name(folder_name),
-        current_repo   = data.current_repo or folder_name,
-        installed_repo = data.installed_repo or data.current_repo or folder_name,
-        forks          = data.forks,
-        has_upstream   = has_upstream,
-        fork_count     = fork_only_count,
-      }
+      table.sort(list, function(a, b)
+        if (a.is_upstream and 1 or 0) ~= (b.is_upstream and 1 or 0) then return a.is_upstream and true or false end
+        return tostring(a.pushed_at or "") > tostring(b.pushed_at or "")
+      end)
+      if #list > 0 then
+        local has_upstream = false
+        local fork_only_count = 0
+        for _, f in ipairs(list) do
+          if f.is_upstream then has_upstream = true else fork_only_count = fork_only_count + 1 end
+        end
+        entries[#entries + 1] = {
+          folder         = folder_name,
+          display        = get_display_name(folder_name),
+          current_repo   = data.current_repo or folder_name,
+          installed_repo = data.installed_repo or data.current_repo or folder_name,
+          forks          = list,
+          total_forks    = #data.forks,
+          has_upstream   = has_upstream,
+          fork_count     = fork_only_count,
+        }
+      end
     end
   end
   table.sort(entries, function(a, b) return a.display:lower() < b.display:lower() end)
   return entries
+end
+
+amu_fork_filter_text = function()
+  return (config.fork_newer_only ~= false) and "Show all forks" or "Show newer forks only"
+end
+
+-- One-line description of what the list is showing right now.
+amu_fork_summary = function()
+  if not amu_fork_suggestions or not amu_fork_suggestions.suggestions then
+    return "No fork data yet - press Scan Now."
+  end
+  local shown = #get_fork_mod_entries()
+  local all = #get_fork_mod_entries(true)
+  if config.fork_newer_only ~= false then
+    return "Showing newer forks only: " .. shown .. " mod(s)  (" .. all .. " have any fork)"
+  end
+  return "Showing every fork: " .. all .. " mod(s)"
+end
+
+G.FUNCS.amu_fork_filter = function(e)
+  config.fork_newer_only = (config.fork_newer_only == false) and true or false
+  amu_fork_filter_label.text = amu_fork_filter_text()
+  AMU_FORK_PAGE = 1
+  if not amu_fork_scanning then amu_fork_status.text = amu_fork_summary() end
+  amu_reopen_if_open("amu_fork_mod_list")   -- the number of pages changes, so rebuild the tab
 end
 
 local function run_fork_scan()
@@ -1935,36 +2543,14 @@ local function run_fork_scan()
       if msg then
         amu_fork_scanning = false
         amu_fork_suggestions = load_fork_suggestions()
-        local entries = get_fork_mod_entries()
-        local count = #entries
-        if count > 0 then
-          -- Count how many entries have upstream updates vs forks (can overlap)
-          local upstream_count = 0
-          local with_forks = 0
-          for _, e in ipairs(entries) do
-            if e.has_upstream then upstream_count = upstream_count + 1 end
-            if (e.fork_count or 0) > 0 then with_forks = with_forks + 1 end
-          end
-          local parts = {}
-          if upstream_count > 0 then
-            parts[#parts+1] = upstream_count .. " with newer upstream"
-          end
-          if with_forks > 0 then
-            parts[#parts+1] = with_forks .. " with active forks"
-          end
-          amu_fork_status.text = "Found " .. count .. " mod(s): " .. table.concat(parts, ", ")
-        else
-          amu_fork_status.text = "No active forks or upstream updates found."
-        end
+        amu_fork_status.text = amu_fork_summary()
         local ts = amu_fork_suggestions and amu_fork_suggestions.token_status
         if ts == "bad" then
           amu_fork_status.text = "GitHub token rejected - replace it to scan."
         elseif ts == "rate_limited" then
           amu_fork_status.text = "Stopped early (GitHub limit) - list is partial."
         end
-        pcall(SMODS.GUI.DynamicUIManager.updateDynamicAreas, {
-          ["amu_fork_mod_list"] = build_fork_mods_page(AMU_FORK_PAGE)
-        })
+        amu_reopen_if_open("amu_fork_mod_list")
         if G.OVERLAY_MENU and (ts == "bad" or ts == "rate_limited") then
           local has_token = config.github_token and config.github_token ~= ""
           local kind = (ts == "bad") and "bad" or (has_token and "limit_token" or "limit")
@@ -2035,7 +2621,7 @@ local function switch_to_fork(folder_name, fork_repo)
           else
             amu_fork_status.text = folder_name .. " switch error. See last_run.json."
           end
-          pcall(SMODS.GUI.DynamicUIManager.updateDynamicAreas, {
+          pcall(amu_update_areas, {
             ["amu_fork_mod_list"] = build_fork_mods_page(AMU_FORK_PAGE)
           })
           return true
@@ -2100,7 +2686,7 @@ local function switch_back_fork(folder_name)
           else
             amu_fork_status.text = folder_name .. " revert error. See last_run.json."
           end
-          pcall(SMODS.GUI.DynamicUIManager.updateDynamicAreas, {
+          pcall(amu_update_areas, {
             ["amu_fork_mod_list"] = build_fork_mods_page(AMU_FORK_PAGE)
           })
           return true
@@ -2119,162 +2705,213 @@ G.FUNCS.amu_scan_forks = function(e)
   run_fork_scan()
 end
 
--- Overlay showing all active forks for a single mod with switch buttons.
+-- Hover box for one fork: a SHORT summary of what changed (never more than ~9 lines).
+local function amu_fork_tip(args)
+  local fork = (args and args.fork) or {}
+  local dark = G.C.UI.TEXT_DARK or RGBA(0.2, 0.2, 0.25, 1)
+  local blue = G.C.BLUE or dark
+  local maxw = 6.0
+  local rows = {}
+  local function add(text, scale, colour)
+    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.015 }, nodes = {
+      { n = G.UIT.T, config = { text = amu_fit(text, scale, maxw), scale = scale, colour = colour or dark } } } }
+  end
+
+  add(tostring(fork.repo or "fork"), 0.34, blue)
+  local bits = { "+" .. (fork.commits_ahead or 0) .. " new commits" }
+  if (fork.commits_behind or 0) > 0 then bits[#bits + 1] = (fork.commits_behind) .. " behind" end
+  local pd = tostring(fork.pushed_at or ""):match("^(%d%d%d%d%-%d%d%-%d%d)")
+  if pd then bits[#bits + 1] = "updated " .. pd end
+  add(table.concat(bits, "  -  "), 0.27)
+
+  local shown, seen = 0, {}
+  if type(fork.changelog) == "table" then
+    for _, m in ipairs(fork.changelog) do
+      local t = amu_clean_note(m)
+      if shown < 4 and not amu_is_noise(t) and not seen[t] then
+        add("\226\128\162 " .. t, 0.28)
+        shown = shown + 1
+        seen[t] = true
+      end
+    end
+  end
+  if shown == 0 then add("(no readable change notes)", 0.27) end
+
+  local rel = tostring(fork.latest_release_tag or "")
+  if rel ~= "" then
+    add("Release " .. rel, 0.3, blue)
+    local notes, n = tostring(fork.latest_release_notes or ""), 0
+    for line in notes:gmatch("[^\r\n]+") do
+      local t = amu_clean_note(line)
+      if t ~= "" and n < 2 then add("- " .. t, 0.26); n = n + 1 end
+    end
+  end
+
+  return { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = {
+    { n = G.UIT.C, config = { align = "cl", padding = 0.03 }, nodes = rows } } }
+end
+
+local amu_fork_picker_ref = nil
+
+G.FUNCS.amu_fork_picker_prev = function(e)
+  if not amu_fork_picker_ref then return end
+  amu_fork_picker_ref.page = math.max(1, (amu_fork_picker_ref.page or 1) - 1)
+  open_overlay(G.UIDEF.amu_fork_picker(amu_fork_picker_ref))
+end
+G.FUNCS.amu_fork_picker_next = function(e)
+  if not amu_fork_picker_ref then return end
+  amu_fork_picker_ref.page = (amu_fork_picker_ref.page or 1) + 1
+  open_overlay(G.UIDEF.amu_fork_picker(amu_fork_picker_ref))
+end
+
+-- Overlay showing the forks of a single mod: 3 per page, each with its changes, a
+-- switch button and an "open page" button (GitHub etc.).
 G.UIDEF.amu_fork_picker = function(ref)
   local purple = (G.C and G.C.PURPLE) or RGBA(0.62, 0.33, 0.92, 1)
   local bg     = RGBA(0.08, 0.08, 0.08, 0.96)
-  local panel  = RGBA(0.12, 0.12, 0.12, 0.96)
+  local panel  = RGBA(0.14, 0.14, 0.16, 0.96)
   local orange = RGBA(0.85, 0.5, 0.05, 1)
 
+  amu_fork_picker_ref = ref
   local folder  = ref.folder  or ""
   local display = ref.display or folder
   local forks   = ref.forks   or {}
 
-  local is_switched    = config.mod_fork_source and config.mod_fork_source[folder] ~= nil
-  local cur_fork_repo  = is_switched and config.mod_fork_source[folder].fork_repo or nil
+  local PER = 3
+  local total_pages = math.max(1, math.ceil(#forks / PER))
+  local page = math.max(1, math.min(ref.page or 1, total_pages))
+  ref.page = page
+  local first = (page - 1) * PER + 1
+  local last  = math.min(#forks, page * PER)
 
-  local max_show = 5
-  local shown = math.min(#forks, max_show)
+  local is_switched   = config.mod_fork_source and config.mod_fork_source[folder] ~= nil
+  local cur_fork_repo = is_switched and config.mod_fork_source[folder].fork_repo or nil
 
-  for i = 1, shown do
-    local fork = forks[i]
-    G.FUNCS["amu_switch_fork_" .. tostring(i)] = function(e)
+  local CARD_W = 8.2
+  local rows = {}
+  for i = first, last do
+    local fork        = forks[i]
+    local slot        = i - first + 1
+    local is_cur      = (cur_fork_repo == fork.repo)
+    local is_upstream = fork.is_upstream == true
+    local diverged    = (not is_upstream) and ((fork.commits_behind or 0) > 0) and ((fork.commits_ahead or 0) > 0)
+    local url = tostring(fork.html_url or "")
+    if url == "" then url = "https://github.com/" .. tostring(fork.repo or "") end
+
+    G.FUNCS["amu_switch_fork_" .. slot] = function(e)
       close_overlay()
       switch_to_fork(folder, fork.repo)
     end
-  end
+    G.FUNCS["amu_open_fork_" .. slot] = function(e)
+      local ok = pcall(function() love.system.openURL(url) end)
+      amu_fork_status.text = ok and ("Opened " .. tostring(fork.repo) .. " in your browser.") or "Couldn't open a browser."
+    end
 
-  local rows = {}
-  for i = 1, shown do
-    local fork     = forks[i]
-    local is_cur   = (cur_fork_repo == fork.repo)
-    local is_upstream = fork.is_upstream == true
-    local diverged = (not is_upstream) and ((fork.commits_behind or 0) > 0) and ((fork.commits_ahead or 0) > 0)
-
-    -- Parse pushed_at to a short date string
-    local pushed_str = tostring(fork.pushed_at or "")
-    local py, pm, pd = pushed_str:match("^(%d%d%d%d)-(%d%d)-(%d%d)")
-    if py then pushed_str = py .. "-" .. pm .. "-" .. pd end
-
-    -- Build short info line
+    local pushed_str = tostring(fork.pushed_at or ""):match("^(%d%d%d%d%-%d%d%-%d%d)") or ""
     local info_parts = { "+" .. (fork.commits_ahead or 0) .. " commits" }
     if (fork.commits_behind or 0) > 0 then
-      info_parts[#info_parts+1] = "-" .. fork.commits_behind .. (is_upstream and "" or " (diverged)")
+      info_parts[#info_parts + 1] = "-" .. fork.commits_behind .. (is_upstream and "" or " (diverged)")
     end
-    if (fork.stars or 0) > 0 then
-      info_parts[#info_parts+1] = "\226\152\133 " .. fork.stars
-    end
-    local info_str = table.concat(info_parts, "  ") .. "   " .. pushed_str
+    if (fork.stars or 0) > 0 then info_parts[#info_parts + 1] = "\226\152\133 " .. fork.stars end
+    if pushed_str ~= "" then info_parts[#info_parts + 1] = pushed_str end
+    local info_str = amu_fit(table.concat(info_parts, "   "), 0.27, CARD_W - 0.4)
 
-    -- Build changelog preview (up to 3 entries, truncated)
-    local cl_lines = {}
-    if type(fork.changelog) == "table" then
-      for j = 1, math.min(#fork.changelog, 3) do
-        local msg = tostring(fork.changelog[j] or "")
-        if #msg > 40 then msg = msg:sub(1, 37) .. "..." end
-        cl_lines[#cl_lines+1] = "  \226\128\162 " .. msg
-      end
-    end
-
-    -- Display name: upstream entries get a special prefix
-    local display_name = fork.repo or ""
-    local name_colour  = G.C.UI.TEXT_LIGHT
+    local display_name, name_colour = tostring(fork.repo or ""), G.C.UI.TEXT_LIGHT
     if is_upstream then
-      display_name = "\xe2\xac\x86 " .. display_name .. " (upstream)"
-      name_colour  = orange
+      display_name, name_colour = "\xe2\xac\x86 " .. display_name .. " (upstream)", orange
     elseif diverged then
-      display_name = "\226\154\160 " .. display_name
-      name_colour  = orange
+      display_name, name_colour = "\226\154\160 " .. display_name, orange
     end
-
-    local btn_text = is_upstream and "Switch to Original" or "Switch to Fork"
+    display_name = amu_fit(display_name, 0.36, CARD_W - 2.9)
 
     local btn_node
     if is_cur then
-      btn_node = {
-        n = G.UIT.C, config = { align = "cm", padding = 0.05, minw = 1.8, minh = 0.45, r = 0.1, colour = panel }, nodes = {
-          { n = G.UIT.T, config = { text = "\226\156\147 Active", scale = 0.3, colour = G.C.GREEN } }
-        }
-      }
+      btn_node = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.1, minh = 0.42, r = 0.1, colour = panel }, nodes = {
+        { n = G.UIT.T, config = { text = "\226\156\147 Active", scale = 0.3, colour = G.C.GREEN } } } }
     else
-      btn_node = {
-        n = G.UIT.C, config = { align = "cm", padding = 0.05, minw = 1.8, minh = 0.45, r = 0.1,
-          colour = is_upstream and orange or G.C.GREEN, button = "amu_switch_fork_" .. tostring(i), hover = true, shadow = true }, nodes = {
-          { n = G.UIT.T, config = { text = btn_text, scale = 0.28, colour = purple } }
-        }
-      }
+      btn_node = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.1, minh = 0.42, r = 0.1,
+        colour = is_upstream and orange or G.C.GREEN, button = "amu_switch_fork_" .. slot, hover = true, shadow = true }, nodes = {
+        { n = G.UIT.T, config = { text = is_upstream and "Switch to Original" or "Switch to Fork",
+            scale = 0.27, colour = purple } } } }
     end
 
-    local fork_rows = {
-      -- Fork name + button
+    local tip = { filler = { func = amu_fork_tip, args = { fork = fork } } }
+
+    local card = {
       { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        { n = G.UIT.C, config = { align = "cl", padding = 0.04, minw = 4.0 }, nodes = {
-          { n = G.UIT.T, config = {
-            text = display_name,
-            scale = 0.36,
-            colour = name_colour
-          }}
-        }},
-        { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
+        { n = G.UIT.C, config = { align = "cl", padding = 0.03, minw = CARD_W - 2.5 }, nodes = {
+          { n = G.UIT.T, config = { text = display_name, scale = 0.36, colour = name_colour } } } },
         btn_node,
       }},
-      -- Info row (commits ahead/behind, stars, date)
-      { n = G.UIT.R, config = { align = "cl", padding = 0.01 }, nodes = {
-        { n = G.UIT.T, config = { text = info_str, scale = 0.28, colour = purple } }
-      }},
+      { n = G.UIT.R, config = { align = "cl", padding = 0.01, on_demand_tooltip = tip }, nodes = {
+        { n = G.UIT.T, config = { text = info_str, scale = 0.27, colour = purple } } } },
     }
 
-    -- Changelog preview lines
-    for _, cl in ipairs(cl_lines) do
-      fork_rows[#fork_rows+1] = { n = G.UIT.R, config = { align = "cl", padding = 0.005 }, nodes = {
-        { n = G.UIT.T, config = { text = cl, scale = 0.27, colour = G.C.UI.TEXT_LIGHT } }
-      }}
+    local shown = 0
+    if type(fork.changelog) == "table" then
+      local seen_msg = {}
+      for _, m in ipairs(fork.changelog) do
+        local t = amu_clean_note(m)
+        if shown < 2 and not amu_is_noise(t) and not seen_msg[t] then
+          card[#card + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.005, on_demand_tooltip = tip }, nodes = {
+            { n = G.UIT.T, config = { text = amu_fit("  \226\128\162 " .. t, 0.26, CARD_W - 0.4), scale = 0.26, colour = G.C.UI.TEXT_LIGHT } } } }
+          shown = shown + 1
+          seen_msg[t] = true
+        end
+      end
+    end
+    if shown == 0 then
+      card[#card + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.005 }, nodes = {
+        { n = G.UIT.T, config = { text = "  (no readable change notes)", scale = 0.26, colour = G.C.UI.TEXT_LIGHT } } } }
     end
 
-    -- Release tag (if any)
-    if fork.latest_release_tag and fork.latest_release_tag ~= "" then
-      fork_rows[#fork_rows+1] = { n = G.UIT.R, config = { align = "cl", padding = 0.005 }, nodes = {
-        { n = G.UIT.T, config = { text = "Release: " .. fork.latest_release_tag, scale = 0.27, colour = G.C.GREEN } }
-      }}
-    end
+    -- the "open the fork's page" button, right under the changes
+    local rel = tostring(fork.latest_release_tag or "")
+    local open_label = "Open fork page" .. (rel ~= "" and ("     Release: " .. rel) or "")
+    card[#card + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = {
+      { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = CARD_W - 0.5, minh = 0.38, r = 0.09,
+          colour = G.C.BLUE, button = "amu_open_fork_" .. slot, hover = true, shadow = true, on_demand_tooltip = tip }, nodes = {
+        { n = G.UIT.T, config = { text = amu_fit(open_label, 0.3, CARD_W - 0.8), scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } } } }
 
-    rows[#rows+1] = {
-      n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
-        { n = G.UIT.C, config = { align = "cl", padding = 0.1, minw = 6.8, r = 0.1, colour = panel }, nodes = fork_rows }
-      }
-    }
-    if i < shown then
-      rows[#rows+1] = { n = G.UIT.B, config = { h = 0.06, w = 0.1 } }
-    end
+    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
+      { n = G.UIT.C, config = { align = "cl", padding = 0.08, minw = CARD_W, r = 0.1, colour = panel }, nodes = card } } }
   end
 
   if #forks == 0 then
-    rows[1] = {
-      n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
-        { n = G.UIT.T, config = { text = "No active forks or upstream updates found.", scale = 0.38, colour = purple } }
-      }
-    }
+    rows[1] = { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
+      { n = G.UIT.T, config = { text = "No forks to show.", scale = 0.38, colour = purple } } } }
   end
 
-  local minh = math.max(4.0, shown * 1.6 + 2.2)
+  local footer = {}
+  if total_pages > 1 then
+    footer[#footer + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+      { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.8, minh = 0.42, r = 0.1,
+          colour = page > 1 and G.C.BLUE or panel, button = page > 1 and "amu_fork_picker_prev" or nil,
+          hover = page > 1, shadow = true }, nodes = {
+        { n = G.UIT.T, config = { text = "< Previous", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
+      { n = G.UIT.C, config = { align = "cm", minw = 2.0 }, nodes = {
+        { n = G.UIT.T, config = { text = "Forks " .. first .. "-" .. last .. " of " .. #forks, scale = 0.28, colour = purple } } } },
+      { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.8, minh = 0.42, r = 0.1,
+          colour = page < total_pages and G.C.BLUE or panel, button = page < total_pages and "amu_fork_picker_next" or nil,
+          hover = page < total_pages, shadow = true }, nodes = {
+        { n = G.UIT.T, config = { text = "Next >", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
+    }}
+  end
 
   return {
     n = G.UIT.ROOT,
-    config = { align = "cm", minw = 8.2, minh = minh, padding = 0.24, r = 0.2, colour = bg, shadow = true, hover = true },
+    config = { align = "cm", minw = 8.8, padding = 0.14, r = 0.2, colour = bg, shadow = true, hover = true },
     nodes = {
-      { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
-        { n = G.UIT.T, config = { text = "Forks: " .. display, scale = 0.52, colour = purple, shadow = true } }
-      }},
-      { n = G.UIT.B, config = { h = 0.12, w = 0.1 } },
-      { n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = rows },
-      { n = G.UIT.B, config = { h = 0.14, w = 0.1 } },
-      { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
-        { n = G.UIT.C, config = { align = "cm", padding = 0.1, minw = 2.8, minh = 0.7, r = 0.12,
+      { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+        { n = G.UIT.T, config = { text = amu_fit("Forks: " .. display, 0.5, 8.0), scale = 0.5, colour = purple, shadow = true } } } },
+      { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = rows },
+      footer[1] or { n = G.UIT.B, config = { h = 0.02, w = 0.1 } },
+      { n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
+        { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = 2.4, minh = 0.5, r = 0.12,
           colour = panel, button = "amu_back_to_menu", hover = true, shadow = true }, nodes = {
-          { n = G.UIT.T, config = { text = "Back", scale = 0.42, colour = purple } }
-        }},
-        { n = G.UIT.B, config = { h = 0.1, w = 0.2 } },
-        amu_close_all_node(2.8),
+          { n = G.UIT.T, config = { text = "Back", scale = 0.38, colour = purple } } } },
+        { n = G.UIT.B, config = { h = 0.1, w = 0.3 } },
+        amu_close_all_node(2.6),
       }},
     }
   }
@@ -2283,7 +2920,7 @@ end
 -- Paginated list of mods with fork suggestions.
 build_fork_mods_page = function(page)
   local entries = get_fork_mod_entries()
-  local total_pages = math.max(1, math.ceil(#entries / MODS_PER_PAGE))
+  local total_pages = math.max(1, math.ceil(#entries / AMU_FORK_PER))
   page = math.max(1, math.min(page or 1, total_pages))
   AMU_FORK_PAGE = page
 
@@ -2292,18 +2929,22 @@ build_fork_mods_page = function(page)
   local rows = {}
 
   if #entries == 0 then
-    -- Empty state: show a hint row
-    rows[1] = { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
-      { n = G.UIT.T, config = { text = "No fork data. Click 'Scan' above.", scale = 0.35, colour = purple } }
-    }}
-    for _ = 2, MODS_PER_PAGE do
-      rows[#rows+1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = {
-        { n = G.UIT.B, config = { h = 0.38, w = 5.5 } }
-      }}
+    local msg = (amu_fork_suggestions and amu_fork_suggestions.suggestions)
+      and ((config.fork_newer_only ~= false) and "No newer forks found." or "No forks found.")
+      or "No fork data yet. Press 'Scan Now'."
+    rows[1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H }, nodes = {
+      { n = G.UIT.T, config = { text = msg, scale = 0.36, colour = purple } } } }
+    if amu_fork_suggestions and amu_fork_suggestions.suggestions and config.fork_newer_only ~= false then
+      rows[2] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H }, nodes = {
+        { n = G.UIT.T, config = { text = "Press 'Show all forks' to see older ones too.", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } }
+    end
+    for _ = #rows + 1, AMU_FORK_PER do
+      rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H }, nodes = {
+        { n = G.UIT.B, config = { h = AMU_FORK_ROW_H - 0.04, w = AMU_FORK_W - 0.5 } } } }
     end
   else
-    local start_i = (page - 1) * MODS_PER_PAGE + 1
-    local end_i   = math.min(#entries, page * MODS_PER_PAGE)
+    local start_i = (page - 1) * AMU_FORK_PER + 1
+    local end_i   = math.min(#entries, page * AMU_FORK_PER)
 
     for i = start_i, end_i do
       local entry = entries[i]
@@ -2328,63 +2969,43 @@ build_fork_mods_page = function(page)
           switch_back_fork(folder)
         end
 
-        -- Build label showing upstream + fork counts
         local label_parts = {}
-        if has_upstream then label_parts[#label_parts+1] = "\xe2\xac\x86 upstream" end
+        if has_upstream then label_parts[#label_parts + 1] = "\xe2\xac\x86 upstream" end
         if fork_count > 0 then
-          label_parts[#label_parts+1] = fork_count == 1 and "1 fork" or (fork_count .. " forks")
+          label_parts[#label_parts + 1] = fork_count == 1 and "1 fork" or (fork_count .. " forks")
         end
-        local fork_label = table.concat(label_parts, " + ")
+        local fork_label = amu_fit(table.concat(label_parts, " + "), 0.3, 3.1)
         local label_colour = has_upstream and orange or (is_switched and G.C.GREEN or G.C.UI.TEXT_LIGHT)
 
         local action_btn
         if is_switched then
-          action_btn = {
-            n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.3, minh = 0.38, r = 0.09,
-              colour = G.C.RED, button = "amu_switch_back_fork_" .. row_i, hover = true, shadow = true }, nodes = {
-              { n = G.UIT.T, config = { text = "Switch Back", scale = 0.26, colour = G.C.UI.TEXT_LIGHT } }
-            }
-          }
+          action_btn = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.8, minh = 0.4, r = 0.09,
+            colour = G.C.RED, button = "amu_switch_back_fork_" .. row_i, hover = true, shadow = true }, nodes = {
+            { n = G.UIT.T, config = { text = "Switch Back", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } }
         else
-          action_btn = {
-            n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.1, minh = 0.38, r = 0.09,
-              colour = G.C.BLUE, button = "amu_view_forks_" .. row_i, hover = true, shadow = true }, nodes = {
-              { n = G.UIT.T, config = { text = "View Forks", scale = 0.26, colour = G.C.UI.TEXT_LIGHT } }
-            }
-          }
+          action_btn = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.8, minh = 0.4, r = 0.09,
+            colour = G.C.BLUE, button = "amu_view_forks_" .. row_i, hover = true, shadow = true }, nodes = {
+            { n = G.UIT.T, config = { text = "View Forks", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } }
         end
 
-        rows[#rows+1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = {
-          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 2.8 }, nodes = {
-            { n = G.UIT.T, config = { text = display, scale = 0.4, colour = G.C.UI.TEXT_LIGHT } }
-          }},
-          { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
-          { n = G.UIT.C, config = { align = "cm", padding = 0.02, minw = 1.3 }, nodes = {
-            { n = G.UIT.T, config = { text = fork_label, scale = 0.29,
-              colour = label_colour } }
-          }},
-          { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
+        rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H }, nodes = {
+          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 3.9 }, nodes = {
+            { n = G.UIT.T, config = { text = amu_fit(display, 0.4, 3.8), scale = 0.4, colour = G.C.UI.TEXT_LIGHT } } } },
+          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 3.3 }, nodes = {
+            { n = G.UIT.T, config = { text = fork_label, scale = 0.3, colour = label_colour } } } },
           action_btn,
         }}
       end
     end
 
-    -- Pad remaining rows to keep height consistent
-    local shown = end_i - start_i + 1
-    for _ = shown + 1, MODS_PER_PAGE do
-      rows[#rows+1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = {
-        { n = G.UIT.B, config = { h = 0.38, w = 5.5 } }
-      }}
+    local shown = math.max(0, end_i - start_i + 1)
+    for _ = shown + 1, AMU_FORK_PER do
+      rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H }, nodes = {
+        { n = G.UIT.B, config = { h = AMU_FORK_ROW_H - 0.04, w = AMU_FORK_W - 0.5 } } } }
     end
   end
 
-  return {
-    n = G.UIT.ROOT,
-    config = { align = "cm", colour = G.C.CLEAR, padding = 0.02 },
-    nodes = {
-      { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = rows }
-    }
-  }
+  return amu_list_root(rows, AMU_FORK_W, AMU_FORK_H)
 end
 
 local AMU_PROMPT = { title = "Mod Updater", lines = {}, has_updates = false }
@@ -2652,7 +3273,7 @@ end
 -- Called after every full (non-single-mod) PS1 run completes.
 -- Writes the launch sentinel, processes any crash rollback report, and shows
 -- the appropriate in-game notification to the user.
-local function on_full_update_done(mod_path)
+on_full_update_done = function(mod_path)
   -- (The sentinel is now written when the main menu is reached, not here.)
 
   -- Process crash rollback report (written by PS1 when it detects a crash)

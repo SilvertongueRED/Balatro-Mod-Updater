@@ -30,6 +30,62 @@ function Save-JsonNoBom([string]$path, $obj) {
   [System.IO.File]::WriteAllText($path, $json, $utf8NoBom)
 }
 
+# ---- changelogs.json: short "what changed" notes shown when you hover a mod in the Backups tab ----
+# Refreshed after every update and every restore, so it always describes the INSTALLED version.
+function Get-GitLogEntries([string]$folderPath, [string]$until = "", [int]$max = 12) {
+  $old = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $a = @("-C", $folderPath, "log", "-n", "$max", "--no-merges", "--date=short", "--format=%h|%ad|%s")
+    if ($until -ne "") { $a += "--until=$until" }
+    $out = & git @a 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not $out) { return @() }
+    $list = @()
+    foreach ($line in @($out)) {
+      $p = ([string]$line).Split("|", 3)
+      if ($p.Count -eq 3) { $list += @{ h = $p[0]; d = $p[1]; s = $p[2] } }
+    }
+    return $list
+  } catch { return @() } finally { $ErrorActionPreference = $old }
+}
+
+function Set-ChangelogEntry([string]$modName, $entry) {
+  try {
+    $path = Join-Path $selfDirResolved "changelogs.json"
+    $cl = Read-JsonIfExists $path
+    $mods = @{}
+    if ($cl -and $cl.mods) { foreach ($p in $cl.mods.PSObject.Properties) { $mods[$p.Name] = $p.Value } }
+    $mods[$modName] = $entry
+    Save-JsonNoBom $path @{ generated_at = (Get-Date).ToString("yyyy-MM-dd HH:mm"); mods = $mods }
+  } catch {}
+}
+
+function Refresh-GitChangelog([string]$modName, [string]$folderPath, [string]$until = "") {
+  try {
+    $commits = @(Get-GitLogEntries $folderPath $until 12)
+    if ($commits.Count -eq 0) { return }
+    $entry = @{ source = "git"; head = $commits[0].h; date = $commits[0].d; commits = $commits }
+    if ($until -ne "") { $entry.restored = $true }
+    Set-ChangelogEntry $modName $entry
+  } catch {}
+}
+
+# Turns a release description (markdown) into a few short plain lines.
+function Split-ReleaseNotes([string]$body, [int]$max = 8) {
+  $out = @()
+  if (-not $body) { return $out }
+  foreach ($line in ($body -split "\r?\n")) {
+    $t = ($line -replace "^\s*[#>\-\*\+]+\s*", "" -replace "\*\*", "" -replace "\s+", " ").Trim()
+    if ($t.Length -lt 3) { continue }
+    if ($t.Length -gt 160) { $t = $t.Substring(0, 157) + "..." }
+    $out += $t
+    if ($out.Count -ge $max) { break }
+  }
+  return $out
+}
+
+$script:releaseNotes = @{}   # folder name -> @{ tag = ...; notes = @(...) } for non-git updates done in this run
+
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 # Windows PowerShell 5.1's progress bar makes Invoke-WebRequest downloads many times slower.
 $ProgressPreference = "SilentlyContinue"
@@ -190,6 +246,22 @@ function Restore-ModBackup([string]$modName, [string]$backupFile) {
       $summary.errors += "Failed to create restore marker for ${modName}: $($_.Exception.Message)"
     }
   }
+
+  # Refresh the "what changed" notes so they describe the version that was just restored.
+  try {
+    $until = ""
+    $sm = [regex]::Match($backupFile, '(\d{8})_(\d{6})\.zip$')
+    if ($sm.Success) {
+      $dt = [datetime]::ParseExact($sm.Groups[1].Value + $sm.Groups[2].Value, "yyyyMMddHHmmss", $null)
+      $until = $dt.ToString("yyyy-MM-dd HH:mm:ss")
+    }
+    if (Test-Path -LiteralPath $gitDir -PathType Container) {
+      Refresh-GitChangelog $modName $modPath $until
+    } else {
+      $when = if ($until -ne "") { $until } else { $backupFile }
+      Set-ChangelogEntry $modName @{ source = "backup"; restored = $true; date = $(if ($until -ne "") { $until.Substring(0,10) } else { "" }); notes = @("Reverted to the copy saved on $when") }
+    }
+  } catch {}
 
   Remove-Item -LiteralPath $tmpExtract  -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $tmpPreserve -Recurse -Force -ErrorAction SilentlyContinue
@@ -640,6 +712,7 @@ function Update-GitHubReleaseMod([string]$folderPath, [string]$folderName, $uj) 
     Install-ZipIntoMod $folderPath $folderName $dl @{ "User-Agent"="BalatroModUpdater" } $stripTop $bkFile
 
     Save-JsonNoBom $statePath @{ provider="github"; track="release"; tag=$tag; repo=$repo; updated_at=(Get-Date).ToString("o") }
+    $script:releaseNotes[$folderName] = @{ tag = $tag; notes = @(Split-ReleaseNotes ([string]$rel.body)) }
     $summary.updated_mods += "$folderName ($tag)"
     $recentlyUpdatedEntries.Add(@{ mod_name = $folderName; backup_file = if ($bkFile) { $bkFile } else { "" }; updated_to_version = $tag; updated_at = (Get-Date).ToString("o") })
     return $true
@@ -663,6 +736,9 @@ function Update-GitHubReleaseMod([string]$folderPath, [string]$folderName, $uj) 
 
   Save-JsonNoBom $statePath @{ provider="github"; track="branch"; branch=$branch; commit=$sha; repo=$repo; updated_at=(Get-Date).ToString("o") }
   $short = $sha.Substring(0, [Math]::Min(7, $sha.Length))
+  $commitMsg = ""
+  try { $commitMsg = ([string]$commit.commit.message -split "\r?\n")[0] } catch {}
+  $script:releaseNotes[$folderName] = @{ tag = "$branch@$short"; notes = @(Split-ReleaseNotes $commitMsg 1) }
   $summary.updated_mods += "$folderName ($branch@$short)"
   $recentlyUpdatedEntries.Add(@{ mod_name = $folderName; backup_file = if ($bkFile) { $bkFile } else { "" }; updated_to_version = $sha; updated_at = (Get-Date).ToString("o") })
   return $true
@@ -1232,6 +1308,31 @@ try {
 } catch {
   $summary.errors += "Top-level scan failed: $($_.Exception.Message)"
 }
+
+# Keep changelogs.json current: refresh every mod updated in this run, and add git mods that have no entry yet.
+try {
+  foreach ($e in $recentlyUpdatedEntries) {
+    $mn = [string]$e.mod_name
+    $mp = Join-Path $modsDirResolved $mn
+    if (Test-Path -LiteralPath (Join-Path $mp ".git") -PathType Container) {
+      Refresh-GitChangelog $mn $mp
+    } elseif ($script:releaseNotes.ContainsKey($mn)) {
+      $rn = $script:releaseNotes[$mn]
+      $notes = @($rn.notes)
+      if ($notes.Count -eq 0) { $notes = @("Updated to " + [string]$rn.tag) }
+      Set-ChangelogEntry $mn @{ source = "release"; head = [string]$rn.tag; date = (Get-Date).ToString("yyyy-MM-dd"); notes = $notes }
+    } else {
+      Set-ChangelogEntry $mn @{ source = "update"; head = [string]$e.updated_to_version; date = (Get-Date).ToString("yyyy-MM-dd"); notes = @("Updated " + (Get-Date).ToString("yyyy-MM-dd") + " (no change notes available for this source)") }
+    }
+  }
+  $have = Read-JsonIfExists (Join-Path $selfDirResolved "changelogs.json")
+  $known = @{}
+  if ($have -and $have.mods) { foreach ($p in $have.mods.PSObject.Properties) { $known[$p.Name] = $true } }
+  Get-ChildItem -LiteralPath $modsDirResolved -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.Name.StartsWith("_") -or $known.ContainsKey($_.Name)) { return }
+    if (Test-Path -LiteralPath (Join-Path $_.FullName ".git") -PathType Container) { Refresh-GitChangelog $_.Name $_.FullName }
+  }
+} catch {}
 
 # Write _recently_updated.json so that crash detection on the next run can roll
 # back these mods if the game fails to start after this update.
