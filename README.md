@@ -10,7 +10,7 @@ It notices changes to a mod you installed from its Git page, its GitHub Releases
 Auto-checking at startup is off by default. Turn it on in the mod's config tab.
 
 ## What's new in 0.7.9
-- **Hold B now works.** A quick tap of B is still "Back" (it happens when you let go); holding B for about 0.7 seconds closes all menus. Regular B presses keep working afterwards. The hold is now timed every frame, so it no longer fails when a menu is rebuilding at the moment you press B.
+- **Hold B now works.** A quick tap of B is still "Back" (it happens when you let go); holding B for about 0.7 seconds closes all menus. Regular B presses keep working afterwards. The hold is timed every frame straight from the gamepad, so it works even when another mod (like Better Mouse and Gamepad) handles the controller, and it no longer fails when a menu is rebuilding. Tapping B on a mod's Backups or Fork list screen now goes Back (it did nothing before).
 - **Your settings survive updates.** When the updater updates itself (release or git), your Nexus API key, GitHub token, `config.lua` settings, saved lists and changelogs are kept instead of being replaced by the repo's blank defaults.
 - **Mod Toggles:** the mod name is on the left, the on/off box and **Check** are together on the far right, and the status text sits in the gap between. Rows no longer overlap the buttons above or the "Saved on/off list" line below; the page selector sits a little lower.
 - **Backups:** the list is lowered away from the Sort button, and the space above and below the page selector is equal.

@@ -1008,6 +1008,75 @@ local function amu_now()
   return (love and love.timer and love.timer.getTime and love.timer.getTime()) or os.clock()
 end
 
+-- Is B physically down? Checks the game's held-button list AND the gamepad itself, so it still works when another
+-- mod (e.g. Better Mouse and Gamepad) swallows the button event before the game sees it.
+local function amu_b_down(ctl)
+  if ctl and ctl.held_buttons and ctl.held_buttons["b"] then return true end
+  if love and love.joystick and love.joystick.getJoysticks then
+    local raw = "b"
+    if G and G.button_mapping then
+      for k, v in pairs(G.button_mapping) do if v == "b" then raw = k end end
+    end
+    local ok, down = pcall(function()
+      for _, j in ipairs(love.joystick.getJoysticks()) do
+        if j.isGamepad and j:isGamepad() and j:isGamepadDown(raw) then return true end
+      end
+      return false
+    end)
+    if ok and down then return true end
+  end
+  return false
+end
+
+-- Called once per frame (see the controller hook below).
+local function amu_hold_tick(ctl)
+  if amu_b_down(ctl) then
+    if G.OVERLAY_MENU and not (ctl and ctl.text_input_hook) then
+      if not amu_holdb.t0 then amu_holdb.t0 = amu_now() end
+      if not amu_holdb.fired and (amu_now() - amu_holdb.t0) >= AMU_HOLD_B_SECS then
+        amu_holdb.pending, amu_holdb.fired = false, true
+        pcall(amu_close_everything)
+      end
+    end
+  else
+    -- Button is up: forget any stale hold (release events can be missed)
+    amu_holdb.pending, amu_holdb.fired, amu_holdb.t0 = false, false, nil
+  end
+end
+
+-- Find a node in the open overlay by a test on its config.
+local function amu_find_node(pred)
+  local om = G.OVERLAY_MENU
+  if not (om and om.UIRoot) then return nil end
+  local seen = {}
+  local function walk(node)
+    if type(node) ~= "table" or seen[node] then return nil end
+    seen[node] = true
+    local c = node.config
+    if type(c) == "table" and pred(c) then return node end
+    if type(node.children) == "table" then
+      for _, ch in pairs(node.children) do
+        local r = walk(ch)
+        if r then return r end
+      end
+    end
+    return nil
+  end
+  local ok, res = pcall(walk, om.UIRoot)
+  return ok and res or nil
+end
+
+-- A tap of B on one of our screens: press that screen's Back button directly. (The game's own B -> Back link only
+-- exists on the standard Back button; our sub-screens - a mod's backups, the fork list - use a custom Back button.)
+local function amu_do_back()
+  local node = amu_find_node(function(c) return c.id == "overlay_menu_back_button" end)
+            or amu_find_node(function(c) return c.button == "amu_back_to_menu" end)
+  if node and node.click then
+    if pcall(node.click, node) then return end
+  end
+  amu_close_everything()
+end
+
 if Controller and not Controller._amu_hooked then
   Controller._amu_hooked = true
 
@@ -1040,27 +1109,6 @@ if Controller and not Controller._amu_hooked then
     return orig_press(self, button, dt)
   end
 
-  -- Timed every frame from the controller's own held-button list. The game's per-button hold callback skips frames
-  -- (menu rebuilds, other buttons pressed, input locks), which made the hold unreliable.
-  local orig_update = Controller.update
-  function Controller:update(dt)
-    local r = orig_update(self, dt)
-    local held = self.held_buttons and self.held_buttons["b"]
-    if held then
-      if G.OVERLAY_MENU and not self.text_input_hook and amu_screen_open() then
-        if not amu_holdb.t0 then amu_holdb.t0 = amu_now() end   -- the press itself was dropped: start timing now
-        if not amu_holdb.fired and (amu_now() - amu_holdb.t0) >= AMU_HOLD_B_SECS then
-          amu_holdb.pending, amu_holdb.fired = false, true
-          pcall(amu_close_everything)
-        end
-      end
-    else
-      -- Button is up: forget any stale hold (release events can be missed)
-      amu_holdb.pending, amu_holdb.fired, amu_holdb.t0 = false, false, nil
-    end
-    return r
-  end
-
   local orig_release = Controller.button_release_update
   function Controller:button_release_update(button, dt)
     if button == "b" and (amu_holdb.pending or amu_holdb.fired) then
@@ -1068,10 +1116,36 @@ if Controller and not Controller._amu_hooked then
       amu_holdb.pending, amu_holdb.fired, amu_holdb.t0 = false, false, nil
       if was_tap and G.OVERLAY_MENU then
         self.frame_buttonpress = false
-        orig_press(self, "b", dt) -- the normal Back action
+        if amu_screen_open() then
+          amu_do_back()
+        else
+          orig_press(self, "b", dt) -- the normal Back action
+        end
       end
     end
     return orig_release(self, button, dt)
+  end
+
+  -- Time the hold from the controller INSTANCE's update. Other mods (Better Mouse and Gamepad) replace
+  -- G.CONTROLLER.update on the instance, which would silently skip a hook placed only on the Controller class.
+  local ctl = G and G.CONTROLLER
+  if ctl then
+    if not rawget(ctl, "_amu_upd_hooked") then
+      ctl._amu_upd_hooked = true
+      local prev = ctl.update
+      ctl.update = function(self, dt)
+        local r = prev(self, dt)
+        amu_hold_tick(self)
+        return r
+      end
+    end
+  else
+    local orig_update = Controller.update
+    function Controller:update(dt)
+      local r = orig_update(self, dt)
+      amu_hold_tick(self)
+      return r
+    end
   end
 
   local orig_focus = Controller.update_focus
