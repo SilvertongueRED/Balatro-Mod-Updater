@@ -195,6 +195,24 @@ function Backup-Folder([string]$folderPath, [string]$folderName) {
   }
 }
 
+# Files/folders that hold THIS mod's own settings and per-user data (API keys, GitHub token, toggles, saved lists,
+# staged framework updates...). A fresh copy from the repo only has blank defaults, so these must survive the updater
+# updating or restoring itself.
+$script:SelfKeepNames = @(
+  "config.lua", "autoupdater_config.json", "changelogs.json", "toggle_snapshot.json",
+  "update.json", "update.json.off", ".autoupdater_state.json", ".framework_state.json",
+  "fork_suggestions.json", "last_run.json", "_recently_updated.json", "launcher_debug.json",
+  "pending_apply_log.json", "pending_apply.json", "_pending_framework_updates"
+)
+
+function Test-IsSelfFolder([string]$folderPath) {
+  try {
+    $a = [IO.Path]::GetFullPath($folderPath).TrimEnd('\','/')
+    $b = [IO.Path]::GetFullPath($selfDirResolved).TrimEnd('\','/')
+    return ($a -ieq $b)
+  } catch { return $false }
+}
+
 # Restore a named backup zip over a mod folder.
 # Preserves update.json so the updater can resume normally after the mod is unpinned.
 function Restore-ModBackup([string]$modName, [string]$backupFile) {
@@ -205,11 +223,12 @@ function Restore-ModBackup([string]$modName, [string]$backupFile) {
 
   # Save files we never want to overwrite
   $preserve = @("update.json")
+  if (Test-IsSelfFolder $modPath) { $preserve = @($script:SelfKeepNames) }
   $tmpPreserve = Join-Path ([IO.Path]::GetTempPath()) ("amu_preserve_" + [Guid]::NewGuid().ToString("N"))
   Ensure-Dir $tmpPreserve
   foreach ($p in $preserve) {
     $pp = Join-Path $modPath $p
-    if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $tmpPreserve $p) -Force }
+    if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $tmpPreserve $p) -Recurse -Force }
   }
 
   # Extract backup to a temp directory first so we can copy cleanly
@@ -230,7 +249,7 @@ function Restore-ModBackup([string]$modName, [string]$backupFile) {
   # Restore preserved files
   foreach ($p in $preserve) {
     $pp = Join-Path $tmpPreserve $p
-    if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $modPath $p) -Force }
+    if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $modPath $p) -Recurse -Force }
   }
 
   # Clear autoupdater state so the version is re-evaluated after unpinning
@@ -432,7 +451,32 @@ function Get-ModUpdateJson([string]$folderPath) {
   return (Read-JsonIfExists $p)
 }
 
+# When the updater is itself a git clone, a pull can replace config.lua with the repo's blank defaults (or stash it
+# as a "local edit"). Save the settings/key files first and put them back afterwards.
 function Update-GitMod([string]$folderPath, [string]$folderName) {
+  if (-not (Test-IsSelfFolder $folderPath)) { return (Update-GitModCore $folderPath $folderName) }
+  $keepTmp = Join-Path ([IO.Path]::GetTempPath()) ("amu_selfkeep_" + [Guid]::NewGuid().ToString("N"))
+  Ensure-Dir $keepTmp
+  foreach ($n in $script:SelfKeepNames) {
+    $src = Join-Path $folderPath $n
+    if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $keepTmp $n) -Recurse -Force }
+  }
+  try {
+    return (Update-GitModCore $folderPath $folderName)
+  } finally {
+    foreach ($n in $script:SelfKeepNames) {
+      $k = Join-Path $keepTmp $n
+      if (Test-Path -LiteralPath $k) {
+        $dst = Join-Path $folderPath $n
+        if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue }
+        Copy-Item -LiteralPath $k -Destination $dst -Recurse -Force
+      }
+    }
+    Remove-Item -LiteralPath $keepTmp -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Update-GitModCore([string]$folderPath, [string]$folderName) {
   if (-not $config.update_git) { return $false }
   $gitDir = Join-Path $folderPath ".git"
   if (-not (Test-Path -LiteralPath $gitDir)) { return $false }
@@ -624,11 +668,13 @@ function Install-ZipIntoMod([string]$folderPath, [string]$folderName, [string]$u
     }
 
     $preserve = @("update.json", ".autoupdater_state.json")
+    # When the updater updates ITSELF, also keep its settings, API keys and per-user data.
+    if (Test-IsSelfFolder $folderPath) { $preserve = @($script:SelfKeepNames) }
     $preserveTemp = Join-Path $tmpRoot "preserve"
     Ensure-Dir $preserveTemp
     foreach ($p in $preserve) {
       $pp = Join-Path $folderPath $p
-      if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $preserveTemp $p) -Force }
+      if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $preserveTemp $p) -Recurse -Force }
     }
 
     try {
@@ -650,7 +696,7 @@ function Install-ZipIntoMod([string]$folderPath, [string]$folderName, [string]$u
 
     foreach ($p in $preserve) {
       $pp = Join-Path $preserveTemp $p
-      if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $folderPath $p) -Force }
+      if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $folderPath $p) -Recurse -Force }
     }
   } finally {
     Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue

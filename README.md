@@ -10,7 +10,8 @@ It notices changes to a mod you installed from its Git page, its GitHub Releases
 Auto-checking at startup is off by default. Turn it on in the mod's config tab.
 
 ## What's new in 0.7.9
-- **Hold B now works.** A quick tap of B is still "Back" (it happens when you let go); holding B for about 0.7 seconds closes all menus. Regular B presses keep working afterwards.
+- **Hold B now works.** A quick tap of B is still "Back" (it happens when you let go); holding B for about 0.7 seconds closes all menus. Regular B presses keep working afterwards. The hold is now timed every frame, so it no longer fails when a menu is rebuilding at the moment you press B.
+- **Your settings survive updates.** When the updater updates itself (release or git), your Nexus API key, GitHub token, `config.lua` settings, saved lists and changelogs are kept instead of being replaced by the repo's blank defaults.
 - **Mod Toggles:** the mod name is on the left, the on/off box and **Check** are together on the far right, and the status text sits in the gap between. Rows no longer overlap the buttons above or the "Saved on/off list" line below; the page selector sits a little lower.
 - **Backups:** the list is lowered away from the Sort button, and the space above and below the page selector is equal.
 - **Controller:** LB / RB no longer switch tabs on screens without pages (Config); only LT / RT switch tabs. D-pad / left-stick left and right now move to the next button in the same row (e.g. Paste from clipboard -> Clear).
@@ -81,7 +82,7 @@ Fix (one time, about a minute):
 The token only reads public data. When it expires (after 90 days) the next scan shows a prompt: click **Yes, replace it** and you are taken straight to the token screen. After pasting, click **Scan Now** to scan right away.
 
 ## In-game settings tabs
-- **Mod Toggles**: **All on / All off** buttons, a sort button (A-Z or Recently updated), larger names and checkboxes, and a per-mod **Check** button. Rows line up in fixed columns so the controller d-pad / stick moves straight up and down.
-- **Backups**: sort button (A-Z or Recently updated). Each mod shows the version in use and when it was last updated (pinned mods show "Pinned to backup <date>"). **Back** in a mod's backup list returns to this page.
+- **Mod Toggles**: **All on / All off** buttons, a **Now / Next** sort pair (*Now: A-Z* shows the current sort, and the *Next: Recent* button switches to it), larger names and checkboxes, and a per-mod **Check** button. Rows line up in fixed columns so the controller d-pad / stick moves straight up and down.
+- **Backups**: the same **Now / Next** sort pair (A-Z or Recent). Each mod shows the version in use and when it was last updated (pinned mods show "Pinned to backup <date>"). **Back** in a mod's backup list returns to this page.
 - **No Source**: lists mods with no git clone or `update.json`. Copy the mod's GitHub or Nexus page link and click **Paste link** to create its `update.json`. This tab also has the switch for the "N mod(s) have no git/update.json" note on the results screen (on by default).
 - **Close all** appears on every screen and leaves the mods menu completely.

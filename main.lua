@@ -354,6 +354,7 @@ pcall(scan_mods_and_init_config)
 -- WRITE SKIP LIST + MERGED CONFIG for the PowerShell script
 ---------------------------------------------------------------------------
 
+local amu_secrets_adopted = false   -- one-time (per game session): see below
 local function write_ps1_config_overlay()
   local mod_path = amu_mod_path()
   if mod_path == "" then return end
@@ -425,6 +426,17 @@ local function write_ps1_config_overlay()
       if config.github_token == nil and type(existing.github_token) == "string" and existing.github_token ~= "" then
         config.github_token = existing.github_token
         merged.github_token = existing.github_token
+      end
+      -- Same for the Nexus API key: if config.lua came back blank (e.g. it was replaced by the repo's default
+      -- copy during an update) but the key is still saved in autoupdater_config.json, keep using it instead of
+      -- overwriting it with a blank. Only done on the first run of a session, so clearing the key in-game still works.
+      if not amu_secrets_adopted then
+        amu_secrets_adopted = true
+        if (config.nexus_api_key == nil or config.nexus_api_key == "")
+           and type(existing.nexus_api_key) == "string" and existing.nexus_api_key ~= "" then
+          config.nexus_api_key = existing.nexus_api_key
+          merged.nexus_api_key = existing.nexus_api_key
+        end
       end
     end
   end
@@ -661,7 +673,8 @@ end
 
 local MODS_PER_PAGE = 7
 local AMU_CONFIG_PAGE = 1
-local amu_sort_label = { toggles = "Sort: A-Z", backups = "Sort: A-Z" }
+-- Sort pill ("Now: ...") and button ("Next: ...") text, one pair per screen
+local amu_sort_label = { toggles_now = "A-Z", toggles_next = "Next: Recent", backups_now = "A-Z", backups_next = "Next: Recent" }
 local amu_nosrc_msg = amu_status_tbl(0.27, 9.4, "")
 local AMU_NOSRC_PAGE = 1
 
@@ -818,8 +831,15 @@ local function get_sorted_mod_entries(mode)
   return entries
 end
 
-local function amu_sort_text(mode)
-  return (mode == "recent") and "Sort: Recent" or "Sort: A-Z"
+local function amu_sort_name(mode)
+  return (mode == "recent") and "Recent" or "A-Z"
+end
+
+-- Fill in both labels for a screen ("toggles" / "backups"): what is active now, and what the button switches to.
+local function amu_sort_set(which, mode)
+  local nxt = (mode == "recent") and "az" or "recent"
+  amu_sort_label[which .. "_now"] = amu_sort_name(mode)
+  amu_sort_label[which .. "_next"] = "Next: " .. amu_sort_name(nxt)
 end
 
 ---------------------------------------------------------------------------
@@ -981,7 +1001,12 @@ local function amu_row_nav(ctrl, dir)
   return true
 end
 
-local amu_holdb = { pending = false, fired = false, t = 0 }
+-- Hold-B state. t0 = when the current hold started (real clock), fired = the hold already closed everything,
+-- pending = the press was swallowed and a quick tap still has to be turned into the normal Back on release.
+local amu_holdb = { pending = false, fired = false, t0 = nil }
+local function amu_now()
+  return (love and love.timer and love.timer.getTime and love.timer.getTime()) or os.clock()
+end
 
 if Controller and not Controller._amu_hooked then
   Controller._amu_hooked = true
@@ -1004,9 +1029,10 @@ if Controller and not Controller._amu_hooked then
       end
     end
     -- B: a quick tap is the normal Back button (done when you let go), holding it closes ALL menus.
-    -- (The game acts on the very first press, which is why holding used to never get that far.)
+    -- The hold itself is timed in Controller:update below, so it no longer depends on this press getting through.
     if button == "b" and not self.locks.frame and G.OVERLAY_MENU and not self.text_input_hook and amu_screen_open() then
-      amu_holdb.pending, amu_holdb.fired, amu_holdb.t = true, false, 0
+      amu_holdb.pending, amu_holdb.fired = true, false
+      amu_holdb.t0 = amu_now()
       self.held_button_times["b"] = 0
       self.interrupt.focus = false
       return
@@ -1014,15 +1040,23 @@ if Controller and not Controller._amu_hooked then
     return orig_press(self, button, dt)
   end
 
-  local orig_hold = Controller.button_hold_update
-  function Controller:button_hold_update(button, dt)
-    local r = orig_hold(self, button, dt)
-    if button == "b" and amu_holdb.pending then
-      amu_holdb.t = amu_holdb.t + (dt or 0)
-      if amu_holdb.t >= AMU_HOLD_B_SECS then
-        amu_holdb.pending, amu_holdb.fired = false, true
-        amu_close_everything()
+  -- Timed every frame from the controller's own held-button list. The game's per-button hold callback skips frames
+  -- (menu rebuilds, other buttons pressed, input locks), which made the hold unreliable.
+  local orig_update = Controller.update
+  function Controller:update(dt)
+    local r = orig_update(self, dt)
+    local held = self.held_buttons and self.held_buttons["b"]
+    if held then
+      if G.OVERLAY_MENU and not self.text_input_hook and amu_screen_open() then
+        if not amu_holdb.t0 then amu_holdb.t0 = amu_now() end   -- the press itself was dropped: start timing now
+        if not amu_holdb.fired and (amu_now() - amu_holdb.t0) >= AMU_HOLD_B_SECS then
+          amu_holdb.pending, amu_holdb.fired = false, true
+          pcall(amu_close_everything)
+        end
       end
+    else
+      -- Button is up: forget any stale hold (release events can be missed)
+      amu_holdb.pending, amu_holdb.fired, amu_holdb.t0 = false, false, nil
     end
     return r
   end
@@ -1030,8 +1064,8 @@ if Controller and not Controller._amu_hooked then
   local orig_release = Controller.button_release_update
   function Controller:button_release_update(button, dt)
     if button == "b" and (amu_holdb.pending or amu_holdb.fired) then
-      local was_tap = amu_holdb.pending
-      amu_holdb.pending, amu_holdb.fired, amu_holdb.t = false, false, 0
+      local was_tap = amu_holdb.pending and not amu_holdb.fired
+      amu_holdb.pending, amu_holdb.fired, amu_holdb.t0 = false, false, nil
       if was_tap and G.OVERLAY_MENU then
         self.frame_buttonpress = false
         orig_press(self, "b", dt) -- the normal Back action
@@ -1318,7 +1352,7 @@ end
 -- Sort button on the Mod Toggles screen (A-Z <-> Recently updated)
 G.FUNCS.amu_sort_toggles = function(e)
   config.sort_toggles = (config.sort_toggles == "recent") and "az" or "recent"
-  amu_sort_label.toggles = amu_sort_text(config.sort_toggles)
+  amu_sort_set("toggles", config.sort_toggles)
   amu_refresh_toggles()
 end
 
@@ -1763,13 +1797,30 @@ end
 
 local function amu_gap(w) return { n = G.UIT.B, config = { w = w or 0.2, h = 0.1 } } end
 
+-- Two pieces for the sort control, like the Mod Sort mod:
+--   [ Now: <current sort> ]  (info only)   [ Next: <next sort> ]  (the button - switches to that sort)
+local function amu_sort_nodes(which, func, now_w, next_w)
+  local pill = HEX and HEX("2B2B35") or { 0.17, 0.17, 0.21, 1 }
+  local dim  = HEX and HEX("A9A9B8") or { 0.66, 0.66, 0.72, 1 }
+  return {
+    { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = now_w, minh = 0.44, r = 0.1, colour = pill }, nodes = {
+      { n = G.UIT.T, config = { text = "Now: ", scale = 0.28, colour = dim } },
+      { n = G.UIT.T, config = { ref_table = amu_sort_label, ref_value = which .. "_now", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } },
+    amu_gap(0.08),
+    { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = next_w, minh = 0.44, r = 0.1,
+        colour = G.C.BLUE, button = func, hover = true, shadow = true }, nodes = {
+      { n = G.UIT.T, config = { ref_table = amu_sort_label, ref_value = which .. "_next", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } },
+  }
+end
+
 SMODS.current_mod.extra_tabs = function()
   local purple = (G.C and G.C.PURPLE) or RGBA(0.62, 0.33, 0.92, 1)
   return {
     {
       label = "Mod Toggles",
       tab_definition_function = function()
-        amu_sort_label.toggles = amu_sort_text(config.sort_toggles)
+        amu_sort_set("toggles", config.sort_toggles)
+        local sn = amu_sort_nodes("toggles", "amu_sort_toggles", 1.75, 1.95)
         amu_snap_info.text = amu_snap_label()
         return amu_make_tab({
           id = "amu_mod_toggle_list", cb = "amu_mod_toggles_page", build = build_mod_toggles_page,
@@ -1779,17 +1830,15 @@ SMODS.current_mod.extra_tabs = function()
           top = {
             amu_header_row("Mod Update Toggles", 0.5),
             { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
-              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.3, minh = 0.44, r = 0.1,
-                colour = G.C.BLUE, button = "amu_sort_toggles", hover = true, shadow = true }, nodes = {
-                { n = G.UIT.T, config = { ref_table = amu_sort_label, ref_value = "toggles", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
+              sn[1], sn[2], sn[3],
+              amu_gap(0.12),
+              amu_btn("All on", "amu_toggles_all_on", G.C.GREEN, 1.1),
+              amu_gap(0.08),
+              amu_btn("All off", "amu_toggles_all_off", G.C.RED, 1.1),
               amu_gap(0.15),
-              amu_btn("All on", "amu_toggles_all_on", G.C.GREEN, 1.3),
-              amu_gap(0.1),
-              amu_btn("All off", "amu_toggles_all_off", G.C.RED, 1.3),
-              amu_gap(0.25),
-              amu_btn("Save list", "amu_snap_save", G.C.PURPLE or purple, 1.7),
-              amu_gap(0.1),
-              amu_btn("Restore list", "amu_snap_restore", G.C.ORANGE or RGBA(0.85, 0.5, 0.05, 1), 2.0),
+              amu_btn("Save list", "amu_snap_save", G.C.PURPLE or purple, 1.5),
+              amu_gap(0.08),
+              amu_btn("Restore list", "amu_snap_restore", G.C.ORANGE or RGBA(0.85, 0.5, 0.05, 1), 1.8),
             }},
           },
           after = {
@@ -1802,7 +1851,8 @@ SMODS.current_mod.extra_tabs = function()
     {
       label = "Backups",
       tab_definition_function = function()
-        amu_sort_label.backups = amu_sort_text(config.sort_backups)
+        amu_sort_set("backups", config.sort_backups)
+        local sn = amu_sort_nodes("backups", "amu_sort_backups", 1.9, 2.2)
         return amu_make_tab({
           id = "amu_backup_mod_list", cb = "amu_backup_mods_page", build = build_backup_mods_page,
           count = #get_sorted_mod_entries(config.sort_backups), per_page = AMU_BK_PER,
@@ -1811,9 +1861,7 @@ SMODS.current_mod.extra_tabs = function()
           top = {
             amu_header_row("Mod Backups & Pinning", 0.5),
             { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
-              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.3, minh = 0.44, r = 0.1,
-                colour = G.C.BLUE, button = "amu_sort_backups", hover = true, shadow = true }, nodes = {
-                { n = G.UIT.T, config = { ref_table = amu_sort_label, ref_value = "backups", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
+              sn[1], sn[2], sn[3],
             }},
           },
           after = {
@@ -2389,7 +2437,7 @@ end
 -- Sort button on the Backups screen
 G.FUNCS.amu_sort_backups = function(e)
   config.sort_backups = (config.sort_backups == "recent") and "az" or "recent"
-  amu_sort_label.backups = amu_sort_text(config.sort_backups)
+  amu_sort_set("backups", config.sort_backups)
   amu_update_area("amu_backup_mod_list", build_backup_mods_page(AMU_BACKUP_PAGE))
 end
 
