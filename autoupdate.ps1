@@ -143,8 +143,8 @@ $defaults = [ordered]@{
 
 # Forks not pushed within this many months are considered stale and skipped during fork scanning
 $ForkStalenessMonths = 12
-# Max forks compared per mod during a fork scan (keeps a scan inside GitHub's API limit)
-$ForkMaxComparesPerMod = 8
+# Max forks compared per source repo (installed / parent / original) during a fork scan (keeps a scan inside GitHub's API limit)
+$ForkMaxComparesPerMod = 6
 
 $configPath = Join-Path $selfDirResolved "autoupdater_config.json"
 $config = Read-JsonIfExists $configPath
@@ -934,6 +934,82 @@ function Get-GitDefaultBranch([string]$folderPath) {
   return "main"
 }
 
+# Files that look like translation work. The Fork Finder uses this to tell "just a translation" forks apart.
+$script:TranslationFileRegex = '(?i)(^|/)(localization|localisation|locales?|lang|languages?|i18n|translations?)/(?!en[-_./])|(^|/)(es|fr|de|it|pt|ru|ja|ko|zh|pl|tr|nl|id|vi|ar|uk|cs|hu|sv|fi|th|ro)([_-][a-z]{2,4})?\.(lua|json|toml)$'
+
+function Register-ForkError($err, [string]$what) {
+  $st = Get-HttpStatus $err
+  if ($st -eq 403 -or $st -eq 429) { $script:forkRateLimited = $true }
+  elseif ($st -eq 401) { $script:forkBadToken = $true }
+  else { $summary.errors += "Fork scan: error ${what}: $($err.Exception.Message)" }
+}
+
+function Format-ForkDate($d) {
+  if ($d -is [datetime]) { return $d.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ") }
+  return [string]$d
+}
+
+# Compares one repo ($info = its GitHub API object) against the copy the user has installed.
+# Returns $null when it has nothing new to offer, otherwise one entry for fork_suggestions.json.
+#   kind: original | parent | parent_fork | fork_fork | fork
+function New-ForkEntry([string]$kind, $info, [string]$installedRepo, [string]$installedBranch, $headers) {
+  $owner  = [string]$info.owner.login
+  $branch = if ($info.default_branch) { [string]$info.default_branch } else { "main" }
+  $full   = "$owner/$($info.name)"
+
+  $compare = Invoke-RestMethod -Uri "https://api.github.com/repos/$installedRepo/compare/${installedBranch}...${owner}:${branch}" -Headers $headers
+  $ahead   = if ($compare.ahead_by)  { [int]$compare.ahead_by  } else { 0 }
+  $behind  = if ($compare.behind_by) { [int]$compare.behind_by } else { 0 }
+  if ($ahead -eq 0) { return $null }
+
+  # Newest commit messages first (the compare API lists oldest first), first line only, up to 20.
+  $changelog = @()
+  if ($compare.commits) {
+    $commits = @($compare.commits)
+    [array]::Reverse($commits)
+    $limit = [Math]::Min($commits.Count, 20)
+    for ($i = 0; $i -lt $limit; $i++) {
+      $msg = $commits[$i].commit.message
+      if ($msg) { $changelog += ($msg -split "`n")[0].Trim() }
+    }
+  }
+
+  # How much of the change is translation files?
+  $filesChanged = 0
+  $locFiles     = 0
+  if ($compare.files) {
+    foreach ($cf in @($compare.files)) {
+      $filesChanged++
+      if (([string]$cf.filename) -match $script:TranslationFileRegex) { $locFiles++ }
+    }
+  }
+
+  # Latest GitHub release (best-effort)
+  $relTag = ""; $relNotes = ""
+  try {
+    $rel      = Invoke-RestMethod -Uri "https://api.github.com/repos/$full/releases/latest" -Headers $headers
+    $relTag   = if ($rel.tag_name) { [string]$rel.tag_name } else { "" }
+    $relNotes = if ($rel.body)     { [string]$rel.body     } else { "" }
+  } catch {}
+
+  return @{
+    repo                 = $full
+    owner                = $owner
+    kind                 = $kind
+    is_upstream          = ($kind -eq "original")
+    pushed_at            = (Format-ForkDate $info.pushed_at)
+    stars                = [int]$info.stargazers_count
+    commits_ahead        = $ahead
+    commits_behind       = $behind
+    changelog            = $changelog
+    files_changed        = $filesChanged
+    loc_files            = $locFiles
+    latest_release_tag   = $relTag
+    latest_release_notes = $relNotes
+    html_url             = [string]$info.html_url
+  }
+}
+
 function Check-Forks() {
   $suggestions = @{
     checked_at  = (Get-Date).ToString("o")
@@ -970,179 +1046,93 @@ function Check-Forks() {
         $ownerRepo = Get-GitHubRepoForMod $path
         if (-not $ownerRepo) { return }
 
-        # Remember the repo the user currently has installed so we can exclude it from suggestions
-        $installedRepo = $ownerRepo
+        # The copy the user has installed right now. Everything else is compared against it.
+        $instInfo        = Invoke-RestMethod -Uri "https://api.github.com/repos/$ownerRepo" -Headers $ghHeaders
+        $installedRepo   = [string]$instInfo.full_name
+        $installedBranch = if ($instInfo.default_branch) { [string]$instInfo.default_branch } else { "main" }
+        $installedIsFork = [bool]$instInfo.fork
 
-        # Fetch original repo metadata
-        $origInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/$ownerRepo" -Headers $ghHeaders
-
-        # Track whether the installed repo is itself a fork so we can check upstream
-        $installedIsFork      = $false
-        $installedForkBranch  = $null
-
-        # If this repo is itself a fork, walk up to the true source repo so we
-        # scan forks of the original (where the full fork network lives)
-        if ($origInfo.fork -and $origInfo.source -and $origInfo.source.full_name) {
-          $installedIsFork     = $true
-          $installedForkBranch = if ($origInfo.default_branch) { [string]$origInfo.default_branch } else { "main" }
-          $ownerRepo = [string]$origInfo.source.full_name
-          $origInfo  = Invoke-RestMethod -Uri "https://api.github.com/repos/$ownerRepo" -Headers $ghHeaders
+        # Walk up the family tree: installed -> parent (if different) -> original (root of the network)
+        $rootInfo   = $instInfo
+        $parentInfo = $null
+        if ($installedIsFork -and $instInfo.source -and $instInfo.source.full_name) {
+          $rootName = [string]$instInfo.source.full_name
+          $rootInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/$rootName" -Headers $ghHeaders
+          $parentName = if ($instInfo.parent -and $instInfo.parent.full_name) { [string]$instInfo.parent.full_name } else { $rootName }
+          if ($parentName -ne $rootName) {
+            $parentInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/$parentName" -Headers $ghHeaders
+          }
         }
+        $rootRepo = [string]$rootInfo.full_name
 
-        $defaultBranch = if ($origInfo.default_branch) { [string]$origInfo.default_branch } else { "main" }
         $staleThreshold = (Get-Date).AddMonths(-$ForkStalenessMonths)
+        $activeForks    = @()
+        $seen           = @{}
+        $seen[$installedRepo.ToLower()] = $true
 
-        $activeForks = @()
-
-        # ── Upstream check: when installed repo is a fork, see if the source is ahead ──
+        # 1) The original and (if there is one in between) the parent: only listed when they are ahead of the installed copy.
         if ($installedIsFork) {
+          $seen[$rootRepo.ToLower()] = $true
           try {
-            $installedParts = $installedRepo -split "/"
-            $installedOwner = $installedParts[0]
-
-            # Compare: base = installed fork branch, head = source default branch
-            # ahead_by = commits the source has that the installed fork doesn't
-            $upCompareUrl = "https://api.github.com/repos/$ownerRepo/compare/${installedOwner}:${installedForkBranch}...${defaultBranch}"
-            $upCompare    = Invoke-RestMethod -Uri $upCompareUrl -Headers $ghHeaders
-
-            $upAhead  = if ($upCompare.ahead_by)  { [int]$upCompare.ahead_by  } else { 0 }
-            $upBehind = if ($upCompare.behind_by) { [int]$upCompare.behind_by } else { 0 }
-
-            if ($upAhead -gt 0) {
-              # Build changelog from upstream's newer commits
-              $upChangelog = @()
-              if ($upCompare.commits) {
-                $limit = [Math]::Min($upCompare.commits.Count, 20)
-                for ($ci = 0; $ci -lt $limit; $ci++) {
-                  $msg = $upCompare.commits[$ci].commit.message
-                  if ($msg) {
-                    $firstLine = ($msg -split "`n")[0].Trim()
-                    $upChangelog += $firstLine
-                  }
-                }
-              }
-
-              # Check for a release on the source repo (best-effort)
-              $upRelTag   = ""
-              $upRelNotes = ""
-              try {
-                $rel        = Invoke-RestMethod -Uri "https://api.github.com/repos/$ownerRepo/releases/latest" -Headers $ghHeaders
-                $upRelTag   = if ($rel.tag_name) { [string]$rel.tag_name } else { "" }
-                $upRelNotes = if ($rel.body)     { [string]$rel.body     } else { "" }
-              } catch {}
-
-              $activeForks += @{
-                repo                 = $ownerRepo
-                owner                = ($ownerRepo -split "/")[0]
-                pushed_at            = $origInfo.pushed_at
-                stars                = [int]$origInfo.stargazers_count
-                commits_ahead        = $upAhead
-                commits_behind       = $upBehind
-                changelog            = $upChangelog
-                latest_release_tag   = $upRelTag
-                latest_release_notes = $upRelNotes
-                html_url             = [string]$origInfo.html_url
-                is_upstream          = $true
-              }
-            }
-          } catch {
-            $summary.errors += "Fork scan: error comparing upstream for '$name' ($installedRepo vs $ownerRepo): $($_.Exception.Message)"
+            $e = New-ForkEntry "original" $rootInfo $installedRepo $installedBranch $ghHeaders
+            if ($e) { $activeForks += $e }
+          } catch { Register-ForkError $_ "comparing the original of '$name' ($rootRepo)" }
+          if ($parentInfo) {
+            $seen[([string]$parentInfo.full_name).ToLower()] = $true
+            try {
+              $e = New-ForkEntry "parent" $parentInfo $installedRepo $installedBranch $ghHeaders
+              if ($e) { $activeForks += $e }
+            } catch { Register-ForkError $_ "comparing the parent of '$name'" }
           }
         }
 
-        # ── Scan forks of the source repo for ones with unique commits ──
-        # The forks endpoint only accepts sort = newest | oldest | stargazers | watchers
-        # (sort=pushed returns "400 Bad Request"). Fetch up to 100, then rank by last push here.
-        $forks = Invoke-RestMethod -Uri "https://api.github.com/repos/$ownerRepo/forks?sort=newest&per_page=100" -Headers $ghHeaders
+        # 2) Forks of: the installed copy (fork-forks), then the parent and the original (parent forks).
+        $targets = @()
+        $targets += @{ info = $instInfo; kind = $(if ($installedIsFork) { "fork_fork" } else { "fork" }) }
+        if ($parentInfo)       { $targets += @{ info = $parentInfo; kind = "parent_fork" } }
+        if ($installedIsFork)  { $targets += @{ info = $rootInfo;   kind = "parent_fork" } }
 
-        # Drop abandoned forks, newest push first, and only compare the top few so a scan
-        # stays inside the GitHub API limit (60/hour without a token).
-        $forks = @($forks | Where-Object { $_.pushed_at -and ([datetime]$_.pushed_at) -ge $staleThreshold } |
-                            Sort-Object { [datetime]$_.pushed_at } -Descending |
-                            Select-Object -First $ForkMaxComparesPerMod)
-
-        foreach ($fork in $forks) {
+        foreach ($t in $targets) {
           if ($script:forkRateLimited -or $script:forkBadToken) { break }
+          if (-not $t.info -or [int]$t.info.forks_count -le 0) { continue }
+          $tRepo = [string]$t.info.full_name
+
+          $list = $null
           try {
-            $forkOwner    = [string]$fork.owner.login
-            $forkPushedAt = [datetime]$fork.pushed_at
-            $forkBranch   = if ($fork.default_branch) { [string]$fork.default_branch } else { $defaultBranch }
-            $forkFullName = "$forkOwner/$($fork.name)"
+            # sort=pushed is not allowed here (400 Bad Request): fetch 'newest', then rank by last push ourselves.
+            $list = Invoke-RestMethod -Uri "https://api.github.com/repos/$tRepo/forks?sort=newest&per_page=100" -Headers $ghHeaders
+          } catch { Register-ForkError $_ "listing forks of $tRepo"; continue }
 
-            # Skip the repo the user already has installed
-            if ($forkFullName -eq $installedRepo) { continue }
+          # Drop abandoned forks and forks that were never pushed to since being created, newest push first,
+          # and only compare the top few so a scan stays inside the GitHub API limit.
+          $cands = @($list | Where-Object {
+              $_.pushed_at -and ([datetime]$_.pushed_at) -ge $staleThreshold -and ([datetime]$_.pushed_at) -gt ([datetime]$_.created_at)
+            } | Sort-Object { [datetime]$_.pushed_at } -Descending | Select-Object -First $ForkMaxComparesPerMod)
 
-            # Skip the source repo itself (already handled above as upstream)
-            if ($forkFullName -eq $ownerRepo) { continue }
-
-            # Skip forks that haven't been pushed in over a year (truly abandoned)
-            if ($forkPushedAt -lt $staleThreshold) { continue }
-
-            # Get commit comparison against the source's default branch
-            $compareUrl = "https://api.github.com/repos/$ownerRepo/compare/${defaultBranch}...${forkOwner}:${forkBranch}"
-            $compare    = Invoke-RestMethod -Uri $compareUrl -Headers $ghHeaders
-
-            $commitsAhead  = if ($compare.ahead_by)  { [int]$compare.ahead_by  } else { 0 }
-            $commitsBehind = if ($compare.behind_by) { [int]$compare.behind_by } else { 0 }
-
-            # Only include forks that have commits the original doesn't
-            if ($commitsAhead -eq 0) { continue }
-
-            # Build changelog (up to 20 most recent commit messages, first line only)
-            $changelog = @()
-            if ($compare.commits) {
-              $limit = [Math]::Min($compare.commits.Count, 20)
-              for ($i = 0; $i -lt $limit; $i++) {
-                $msg = $compare.commits[$i].commit.message
-                if ($msg) {
-                  $firstLine = ($msg -split "`n")[0].Trim()
-                  $changelog += $firstLine
-                }
-              }
-            }
-
-            # Check for a GitHub release on the fork (best-effort)
-            $releaseTag   = ""
-            $releaseNotes = ""
+          foreach ($f in $cands) {
+            if ($script:forkRateLimited -or $script:forkBadToken) { break }
+            $fn = "$([string]$f.owner.login)/$($f.name)"
+            if ($seen.ContainsKey($fn.ToLower())) { continue }
+            $seen[$fn.ToLower()] = $true
             try {
-              $rel          = Invoke-RestMethod -Uri "https://api.github.com/repos/$forkOwner/$($fork.name)/releases/latest" -Headers $ghHeaders
-              $releaseTag   = if ($rel.tag_name) { [string]$rel.tag_name } else { "" }
-              $releaseNotes = if ($rel.body)     { [string]$rel.body     } else { "" }
-            } catch {}
-
-            $activeForks += @{
-              repo                 = $forkFullName
-              owner                = $forkOwner
-              pushed_at            = $fork.pushed_at
-              stars                = [int]$fork.stargazers_count
-              commits_ahead        = $commitsAhead
-              commits_behind       = $commitsBehind
-              changelog            = $changelog
-              latest_release_tag   = $releaseTag
-              latest_release_notes = $releaseNotes
-              html_url             = [string]$fork.html_url
-            }
-          } catch {
-            # Log individual fork errors so the user can see what went wrong
-            $st = Get-HttpStatus $_
-            if ($st -eq 403 -or $st -eq 429) { $script:forkRateLimited = $true }
-            elseif ($st -eq 401) { $script:forkBadToken = $true }
-            else { $summary.errors += "Fork scan: error checking fork of $ownerRepo ($forkOwner): $($_.Exception.Message)" }
+              $e = New-ForkEntry $t.kind $f $installedRepo $installedBranch $ghHeaders
+              if ($e) { $activeForks += $e }
+            } catch { Register-ForkError $_ "checking fork $fn of $tRepo" }
           }
         }
 
         if ($activeForks.Count -gt 0) {
+          # Newest push first across every kind of fork
+          $activeForks = @($activeForks | Sort-Object { [string]$_.pushed_at } -Descending)
           $suggestions.suggestions[$name] = @{
-            current_repo   = $ownerRepo
-            installed_repo = $installedRepo
-            forks          = $activeForks
+            current_repo     = $rootRepo
+            installed_repo   = $installedRepo
+            installed_is_fork = $installedIsFork
+            forks            = $activeForks
           }
         }
       } catch {
-        $st = Get-HttpStatus $_
-        if ($st -eq 403 -or $st -eq 429) { $script:forkRateLimited = $true }
-        elseif ($st -eq 401) { $script:forkBadToken = $true }
-        else { $summary.errors += "Fork scan: error processing mod '$name': $($_.Exception.Message)" }
+        Register-ForkError $_ "processing mod '$name'"
       }
     }
   } catch {
@@ -1167,6 +1157,98 @@ function Check-Forks() {
 
   try { Save-JsonNoBom $forkSuggestionsPath $suggestions } catch {
     $summary.errors += "Failed to write fork_suggestions.json: $($_.Exception.Message)"
+  }
+}
+
+# ---- Impossible "Lovely (>=X)" requirement fixer ----
+# Some forks ask for a Lovely version that does not exist yet (e.g. Balatro-History's fork wants Lovely >= 0.15
+# while the newest Lovely is 0.10.0). Steamodded then refuses to load the mod ("Missing Dependencies") and puts
+# it on the blacklist. For mods that are on a fork we lower such a requirement to the Lovely version installed.
+function Compare-DottedVersion([string]$a, [string]$b) {
+  $pa = @($a -split '\.' | ForEach-Object { $d = ($_ -replace '\D', ''); if ($d -eq '') { 0 } else { [int]$d } })
+  $pb = @($b -split '\.' | ForEach-Object { $d = ($_ -replace '\D', ''); if ($d -eq '') { 0 } else { [int]$d } })
+  $n = [Math]::Max($pa.Count, $pb.Count)
+  for ($i = 0; $i -lt $n; $i++) {
+    $x = if ($i -lt $pa.Count) { $pa[$i] } else { 0 }
+    $y = if ($i -lt $pb.Count) { $pb[$i] } else { 0 }
+    if ($x -gt $y) { return 1 }
+    if ($x -lt $y) { return -1 }
+  }
+  return 0
+}
+
+function Get-InstalledLovelyVersion() {
+  # 1) what Lovely itself reported last time the game started (first line of its newest log: "Lovely 0.10.0")
+  try {
+    $logDir = Join-Path $modsDirResolved "lovely\log"
+    if (Test-Path -LiteralPath $logDir) {
+      $log = Get-ChildItem -LiteralPath $logDir -Filter "*.log" -File -ErrorAction SilentlyContinue |
+             Sort-Object LastWriteTime -Descending | Select-Object -First 1
+      if ($log) {
+        $line = Get-Content -LiteralPath $log.FullName -TotalCount 1 -ErrorAction Stop
+        if ([string]$line -match 'Lovely\s+v?(\d+(\.\d+)*)') { return $Matches[1] }
+      }
+    }
+  } catch {}
+  # 2) the tag the updater installed
+  try {
+    $fs = Read-JsonIfExists (Join-Path $selfDirResolved ".framework_state.json")
+    if ($fs -and $fs.lovely_tag -and ([string]$fs.lovely_tag) -match 'v?(\d+(\.\d+)*)') { return $Matches[1] }
+  } catch {}
+  return $null
+}
+
+function Repair-LovelyDependency([string]$modPath, [string]$modName) {
+  $installed = Get-InstalledLovelyVersion
+  if (-not $installed) { return }
+
+  # Newest Lovely that really exists (a requirement at or below this is fixed by updating Lovely, not by editing the mod)
+  $newest = $installed
+  if ($null -eq $script:latestLovelyVer) {
+    $script:latestLovelyVer = ""
+    try {
+      $rel = Github-LatestRelease "ethangreen-dev/lovely-injector"
+      if ([string]$rel.tag_name -match 'v?(\d+(\.\d+)*)') { $script:latestLovelyVer = $Matches[1] }
+    } catch {}
+  }
+  if ($script:latestLovelyVer -and (Compare-DottedVersion $script:latestLovelyVer $newest) -gt 0) { $newest = $script:latestLovelyVer }
+
+  $rx = '"\s*Lovely\s*\(\s*>=\s*(?<ver>\d+(?:\.\d+)*)\s*\)\s*"'
+  $files = @(Get-ChildItem -LiteralPath $modPath -Filter "*.json" -File -Force -ErrorAction SilentlyContinue |
+             Where-Object { $_.Name -notlike ".*" -and $_.Name -ne "update.json" })
+  foreach ($f in $files) {
+    try {
+      $bytes  = [IO.File]::ReadAllBytes($f.FullName)
+      $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+      $text   = [Text.Encoding]::UTF8.GetString($bytes)
+      if ($hasBom) { $text = $text.Substring(1) }
+      if ($text -notmatch '"dependencies"') { continue }
+      $m = [regex]::Match($text, $rx)
+      if (-not $m.Success) { continue }
+      $g   = $m.Groups['ver']
+      $req = $g.Value
+      if ((Compare-DottedVersion $req $newest) -le 0) { continue }
+
+      $parts = $installed -split '\.'
+      $fixed = if ($parts.Count -ge 2) { "$($parts[0]).$($parts[1])" } else { $installed }
+      $newText = $text.Substring(0, $g.Index) + $fixed + $text.Substring($g.Index + $g.Length)
+      [IO.File]::WriteAllText($f.FullName, $newText, (New-Object System.Text.UTF8Encoding($hasBom)))
+      $summary.updated_mods += "$modName (fixed impossible Lovely requirement >=$req -> >=$fixed in $($f.Name); restart to apply)"
+    } catch {
+      $summary.errors += "Could not check the Lovely requirement of ${modName} ($($f.Name)): $($_.Exception.Message)"
+    }
+  }
+}
+
+# Every mod that is currently switched to a fork gets the check (after every update run and right after a switch).
+function Repair-ForkLovelyDeps() {
+  try {
+    Get-ChildItem -LiteralPath $modsDirResolved -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+      $st = Read-JsonIfExists (Join-Path $_.FullName ".autoupdater_state.json")
+      if ($st -and $st.fork_repo) { Repair-LovelyDependency $_.FullName $_.Name }
+    }
+  } catch {
+    $summary.errors += "Lovely requirement check failed: $($_.Exception.Message)"
   }
 }
 
@@ -1232,6 +1314,8 @@ function Switch-ToFork([string]$modName, [string]$forkRepo) {
   }
 
   $summary.updated_mods += "$modName (switched to fork: $forkRepo)"
+  # Some forks ask for a Lovely version that does not exist; make the fork loadable with the Lovely we have.
+  Repair-LovelyDependency $modPath $modName
 }
 
 function Switch-BackFork([string]$modName) {
@@ -1758,6 +1842,8 @@ if ($CheckForks) {
   try { Save-JsonNoBom $summaryPath $summary } catch {}
   exit 0
 }
+
+Repair-ForkLovelyDeps
 
 Update-Frameworks
 

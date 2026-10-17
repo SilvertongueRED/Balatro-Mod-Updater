@@ -1,4 +1,4 @@
--- Mod Updater (Steamodded) v0.7.9
+-- Mod Updater (Steamodded) v0.8.0
 -- In-game config with two tabs: Settings (general + Nexus key + check now) and Mod Toggles (paginated).
 -- Uses Steamodded's DynamicUIManager for proper pagination.
 -- Git pull mode: rebase (default and recommended).
@@ -698,6 +698,8 @@ local AMU_FORK_PER, AMU_FORK_ROW_H, AMU_FORK_W, AMU_FORK_H = 6, 0.5, 9.8, 3.24
 local AMU_NS_PER, AMU_NS_W, AMU_NS_H = 7, 9.6, 3.9
 local amu_fork_filter_label = { text = "" }
 local amu_fork_filter_text    -- assigned with the Fork Finder code
+local amu_fork_tr_label = { text = "" }
+local amu_fork_tr_text        -- assigned with the Fork Finder code
 local amu_fork_summary        -- assigned with the Fork Finder code
 local amu_restore_folder = nil
 
@@ -1950,6 +1952,7 @@ SMODS.current_mod.extra_tabs = function()
       tab_definition_function = function()
         if not amu_fork_suggestions then amu_fork_suggestions = load_fork_suggestions() end
         amu_fork_filter_label.text = amu_fork_filter_text()
+        amu_fork_tr_label.text = amu_fork_tr_text()
         return amu_make_tab({
           id = "amu_fork_mod_list", cb = "amu_fork_mods_page", build = build_fork_mods_page,
           count = #get_fork_mod_entries(), per_page = AMU_FORK_PER,
@@ -1958,18 +1961,22 @@ SMODS.current_mod.extra_tabs = function()
           top = {
             amu_header_row("Fork Finder", 0.5),
             { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
-              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.2, minh = 0.46, r = 0.1,
+              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.7, minh = 0.46, r = 0.1,
                 colour = amu_fork_scanning and RGBA(0.5, 0.5, 0.5, 0.9) or G.C.GREEN,
                 button = "amu_scan_forks", hover = true, shadow = true }, nodes = {
-                { n = G.UIT.T, config = { text = "Scan Now", scale = 0.34, colour = purple } } } },
-              amu_gap(0.15),
-              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 3.4, minh = 0.46, r = 0.1,
+                { n = G.UIT.T, config = { text = "Scan Now", scale = 0.3, colour = purple } } } },
+              amu_gap(0.1),
+              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 3.0, minh = 0.46, r = 0.1,
                 colour = G.C.BLUE, button = "amu_fork_filter", hover = true, shadow = true }, nodes = {
-                { n = G.UIT.T, config = { ref_table = amu_fork_filter_label, ref_value = "text", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
-              amu_gap(0.15),
-              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.2, minh = 0.46, r = 0.1,
+                { n = G.UIT.T, config = { ref_table = amu_fork_filter_label, ref_value = "text", scale = 0.29, colour = G.C.UI.TEXT_LIGHT } } } },
+              amu_gap(0.1),
+              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.6, minh = 0.46, r = 0.1,
+                colour = G.C.BLUE, button = "amu_fork_tr_filter", hover = true, shadow = true }, nodes = {
+                { n = G.UIT.T, config = { ref_table = amu_fork_tr_label, ref_value = "text", scale = 0.29, colour = G.C.UI.TEXT_LIGHT } } } },
+              amu_gap(0.1),
+              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.9, minh = 0.46, r = 0.1,
                 colour = G.C.BLUE, button = "amu_gh_help_open", hover = true, shadow = true }, nodes = {
-                { n = G.UIT.T, config = { text = "GitHub token", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
+                { n = G.UIT.T, config = { text = "GitHub token", scale = 0.29, colour = G.C.UI.TEXT_LIGHT } } } },
             }},
             { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.3 }, nodes = {
               { n = G.UIT.T, config = { ref_table = amu_fork_status, ref_value = "text", scale = 0.3, colour = purple } } } },
@@ -2531,7 +2538,7 @@ end
 -- A fork counts as "newer" when it is the original project (upstream), or it has commits the
 -- installed copy doesn't have AND was updated on/after the day the installed copy was made.
 local function amu_fork_is_newer(fork, installed_date)
-  if fork.is_upstream then return true end
+  if fork.is_upstream or fork.kind == "original" or fork.kind == "parent" then return true end
   if (fork.commits_ahead or 0) <= 0 then return false end
   local pushed = tostring(fork.pushed_at or ""):match("^(%d%d%d%d%-%d%d%-%d%d)")
   if not pushed or not installed_date or installed_date == "" then return true end
@@ -2545,9 +2552,100 @@ local function amu_installed_date(folder, umap, cls)
   return fmt_date(last_update_for(folder, umap)) or ""
 end
 
-get_fork_mod_entries = function(force_all)
+-- What kind of copy is a fork? original / parent / parent_fork / fork_fork / fork
+--   original    = the repo the whole family started from
+--   parent      = the repo your installed copy was forked from (only when that is not the original)
+--   parent_fork = another fork of the original / parent (a "sibling" of your copy)
+--   fork_fork   = a fork of YOUR installed copy
+--   fork        = a fork of your installed copy when it is itself the original project
+local AMU_FORK_KIND = {
+  original    = { tag = "ORIGINAL",    word = "original",    rank = 1 },
+  parent      = { tag = "PARENT",      word = "parent",      rank = 2 },
+  parent_fork = { tag = "PARENT FORK", word = "parent fork", rank = 3 },
+  fork_fork   = { tag = "FORK-FORK",   word = "fork-fork",   rank = 4 },
+  fork        = { tag = "FORK",        word = "fork",        rank = 5 },
+}
+
+local function amu_fork_kind(f)
+  if f.kind and AMU_FORK_KIND[f.kind] then return f.kind end
+  if f.is_upstream then return "original" end   -- fork_suggestions.json from an older version
+  return "fork"
+end
+
+local function amu_fork_kind_colour(kind)
+  if kind == "original" or kind == "parent" then return (G.C and G.C.ORANGE) or RGBA(0.85, 0.5, 0.05, 1) end
+  if kind == "fork_fork" then return G.C.GREEN end
+  if kind == "parent_fork" then return G.C.BLUE end
+  return G.C.UI.TEXT_LIGHT
+end
+
+-- "Is this fork only a translation?"  (name says so, OR most changed files are language files,
+-- OR most of its commit messages are about translating)
+local AMU_TR_WORDS = { "espanol", "espa\195\177ol", "spanish", "castellano", "translat", "traduc", "traduz", "locali[sz]",
+  "portugu", "brasil", "chinese", "japanese", "korean", "russian", "french", "german", "italian", "polish", "turkish",
+  "vietnam", "indonesia", "arabic", "ukrain", "dutch", "czech", "swedish", "hungar", "romanian" }
+local AMU_TR_TOKENS = { esp = true, spa = true, ptbr = true, pt = true, cn = true, zh = true, tw = true, jp = true,
+  ru = true, kr = true, lang = true, l10n = true, i18n = true, loc = true }
+
+local function amu_fork_is_translation(f)
+  if f._tr ~= nil then return f._tr end
+  local result = false
+  local kind = amu_fork_kind(f)
+  if kind ~= "original" and kind ~= "parent" then
+    local name = tostring(f.repo or ""):lower():match("/(.+)$") or ""
+    for _, w in ipairs(AMU_TR_WORDS) do
+      if name:find(w) then result = true break end
+    end
+    if not result then
+      for tok in name:gmatch("[a-z0-9]+") do
+        if AMU_TR_TOKENS[tok] then result = true break end
+      end
+    end
+    if not result and (f.files_changed or 0) > 0 and (f.loc_files or 0) / f.files_changed >= 0.75 then result = true end
+    if not result and type(f.changelog) == "table" and #f.changelog > 0 then
+      local hits = 0
+      for _, m in ipairs(f.changelog) do
+        local l = tostring(m):lower()
+        if l:find("translat") or l:find("traduc") or l:find("traduz") or l:find("locali[sz]ation") or l:find("spanish")
+           or l:find("espa\195\177ol") or l:find("espanol") or l:find("%f[%a]lang%f[%A]") then hits = hits + 1 end
+      end
+      if hits / #f.changelog >= 0.6 then result = true end
+    end
+  end
+  f._tr = result
+  return result
+end
+
+-- Where can the player read about the mod they have installed RIGHT NOW? (GitHub and/or Nexus)
+local function amu_current_page_links(folder, installed_repo)
+  local links = {}
+  local src = config.mod_fork_source and config.mod_fork_source[folder]
+  local repo = src and src.fork_repo or nil
+  local nexus_id = nil
+  local ok, uj = pcall(function()
+    local mods_dir = join_path(love.filesystem.getSaveDirectory(), "Mods")
+    local raw = read_all(join_path(join_path(mods_dir, folder), "update.json"))
+    return raw and decode_json(raw) or nil
+  end)
+  if ok and type(uj) == "table" then
+    if uj.provider == "github" and type(uj.repo) == "string" and uj.repo ~= "" and not repo then repo = uj.repo end
+    if uj.provider == "nexus" and uj.mod_id then nexus_id = tostring(uj.mod_id) end
+  end
+  if (not repo or repo == "") and type(installed_repo) == "string" and installed_repo ~= "" then repo = installed_repo end
+  if repo and repo ~= "" then
+    links[#links + 1] = { label = "Open GitHub page", url = "https://github.com/" .. repo, name = repo }
+  end
+  if nexus_id then
+    links[#links + 1] = { label = "Open Nexus page", url = "https://www.nexusmods.com/balatro/mods/" .. nexus_id, name = "Nexus #" .. nexus_id }
+  end
+  return links
+end
+
+-- keep_tr = true: do not remove translation-only forks even when that option is on (used for counting)
+get_fork_mod_entries = function(force_all, keep_tr)
   if not amu_fork_suggestions or not amu_fork_suggestions.suggestions then return {} end
   local newer_only = (config.fork_newer_only ~= false) and not force_all
+  local hide_tr = (config.fork_hide_translations ~= false) and not keep_tr
   local umap = newer_only and build_last_update_map() or nil
   local cls = newer_only and amu_changelogs() or nil
   local entries = {}
@@ -2556,17 +2654,21 @@ get_fork_mod_entries = function(force_all)
       local installed = newer_only and amu_installed_date(folder_name, umap, cls) or ""
       local list = {}
       for _, f in ipairs(data.forks) do
-        if not newer_only or amu_fork_is_newer(f, installed) then list[#list + 1] = f end
+        local keep = (not newer_only or amu_fork_is_newer(f, installed)) and not (hide_tr and amu_fork_is_translation(f))
+        if keep then list[#list + 1] = f end
       end
+      -- newest push first, whatever kind of fork it is
       table.sort(list, function(a, b)
-        if (a.is_upstream and 1 or 0) ~= (b.is_upstream and 1 or 0) then return a.is_upstream and true or false end
-        return tostring(a.pushed_at or "") > tostring(b.pushed_at or "")
+        local pa, pb = tostring(a.pushed_at or ""), tostring(b.pushed_at or "")
+        if pa ~= pb then return pa > pb end
+        return AMU_FORK_KIND[amu_fork_kind(a)].rank < AMU_FORK_KIND[amu_fork_kind(b)].rank
       end)
       if #list > 0 then
-        local has_upstream = false
-        local fork_only_count = 0
+        local counts, has_upstream, fork_only_count = {}, false, 0
         for _, f in ipairs(list) do
-          if f.is_upstream then has_upstream = true else fork_only_count = fork_only_count + 1 end
+          local k = amu_fork_kind(f)
+          counts[k] = (counts[k] or 0) + 1
+          if k == "original" then has_upstream = true else fork_only_count = fork_only_count + 1 end
         end
         entries[#entries + 1] = {
           folder         = folder_name,
@@ -2577,6 +2679,7 @@ get_fork_mod_entries = function(force_all)
           total_forks    = #data.forks,
           has_upstream   = has_upstream,
           fork_count     = fork_only_count,
+          counts         = counts,
         }
       end
     end
@@ -2589,17 +2692,35 @@ amu_fork_filter_text = function()
   return (config.fork_newer_only ~= false) and "Show all forks" or "Show newer forks only"
 end
 
+amu_fork_tr_text = function()
+  return (config.fork_hide_translations ~= false) and "Translations: Hidden" or "Translations: Shown"
+end
+
+local function amu_count_forks(entries)
+  local n = 0
+  for _, e in ipairs(entries) do n = n + #e.forks end
+  return n
+end
+
 -- One-line description of what the list is showing right now.
 amu_fork_summary = function()
   if not amu_fork_suggestions or not amu_fork_suggestions.suggestions then
     return "No fork data yet - press Scan Now."
   end
-  local shown = #get_fork_mod_entries()
-  local all = #get_fork_mod_entries(true)
+  local shown_entries = get_fork_mod_entries()
+  local shown = #shown_entries
+  local all = #get_fork_mod_entries(true, true)
+  local text
   if config.fork_newer_only ~= false then
-    return "Showing newer forks only: " .. shown .. " mod(s)  (" .. all .. " have any fork)"
+    text = "Showing newer forks only: " .. shown .. " mod(s)  (" .. all .. " have any fork)"
+  else
+    text = "Showing every fork: " .. shown .. " mod(s)"
   end
-  return "Showing every fork: " .. all .. " mod(s)"
+  if config.fork_hide_translations ~= false then
+    local hidden = amu_count_forks(get_fork_mod_entries(nil, true)) - amu_count_forks(shown_entries)
+    if hidden > 0 then text = text .. "  [" .. hidden .. " translation(s) hidden]" end
+  end
+  return text
 end
 
 G.FUNCS.amu_fork_filter = function(e)
@@ -2608,6 +2729,14 @@ G.FUNCS.amu_fork_filter = function(e)
   AMU_FORK_PAGE = 1
   if not amu_fork_scanning then amu_fork_status.text = amu_fork_summary() end
   amu_reopen_if_open("amu_fork_mod_list")   -- the number of pages changes, so rebuild the tab
+end
+
+G.FUNCS.amu_fork_tr_filter = function(e)
+  config.fork_hide_translations = (config.fork_hide_translations == false) and true or false
+  amu_fork_tr_label.text = amu_fork_tr_text()
+  AMU_FORK_PAGE = 1
+  if not amu_fork_scanning then amu_fork_status.text = amu_fork_summary() end
+  amu_reopen_if_open("amu_fork_mod_list")
 end
 
 local function run_fork_scan()
@@ -2911,18 +3040,43 @@ G.UIDEF.amu_fork_picker = function(ref)
 
   local CARD_W = 8.2
   local rows = {}
+
+  -- "Your current copy" row: lets you read about what you have BEFORE switching away from it
+  local cur_links = amu_current_page_links(folder, ref.installed_repo)
+  local cur_row = nil
+  if #cur_links > 0 then
+    local cur_nodes = {
+      { n = G.UIT.C, config = { align = "cl", padding = 0.03, minw = 3.3 }, nodes = {
+        { n = G.UIT.T, config = { text = amu_fit("Your current: " .. tostring(cur_links[1].name), 0.3, 3.2), scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
+    }
+    for ci, link in ipairs(cur_links) do
+      G.FUNCS["amu_open_current_" .. ci] = function(e)
+        local ok = pcall(function() love.system.openURL(link.url) end)
+        amu_fork_status.text = ok and ("Opened " .. tostring(link.name) .. " in your browser.") or "Couldn't open a browser."
+      end
+      cur_nodes[#cur_nodes + 1] = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.3, minh = 0.4, r = 0.09,
+        colour = G.C.BLUE, button = "amu_open_current_" .. ci, hover = true, shadow = true }, nodes = {
+        { n = G.UIT.T, config = { text = link.label, scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } }
+      cur_nodes[#cur_nodes + 1] = { n = G.UIT.B, config = { w = 0.1, h = 0.1 } }
+    end
+    cur_row = { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = cur_nodes }
+  end
+
   for i = first, last do
     local fork        = forks[i]
     local slot        = i - first + 1
     local is_cur      = (cur_fork_repo == fork.repo)
-    local is_upstream = fork.is_upstream == true
+    local kind        = amu_fork_kind(fork)
+    local is_upstream = (kind == "original" or kind == "parent")
     local diverged    = (not is_upstream) and ((fork.commits_behind or 0) > 0) and ((fork.commits_ahead or 0) > 0)
+    local is_tr       = amu_fork_is_translation(fork)
+    local kind_tag    = AMU_FORK_KIND[kind].tag .. (is_tr and "  /  TRANSLATION" or "")
     local url = tostring(fork.html_url or "")
     if url == "" then url = "https://github.com/" .. tostring(fork.repo or "") end
 
     G.FUNCS["amu_switch_fork_" .. slot] = function(e)
-      close_overlay()
       switch_to_fork(folder, fork.repo)
+      G.FUNCS.amu_back_to_menu()   -- land on the Fork Finder tab again, not the main menu
     end
     G.FUNCS["amu_open_fork_" .. slot] = function(e)
       local ok = pcall(function() love.system.openURL(url) end)
@@ -2936,11 +3090,11 @@ G.UIDEF.amu_fork_picker = function(ref)
     end
     if (fork.stars or 0) > 0 then info_parts[#info_parts + 1] = "\226\152\133 " .. fork.stars end
     if pushed_str ~= "" then info_parts[#info_parts + 1] = pushed_str end
-    local info_str = amu_fit(table.concat(info_parts, "   "), 0.27, CARD_W - 0.4)
+    local info_str = amu_fit("   " .. table.concat(info_parts, "   "), 0.27, CARD_W - 0.5 - amu_text_w(kind_tag, 0.27))
 
     local display_name, name_colour = tostring(fork.repo or ""), G.C.UI.TEXT_LIGHT
     if is_upstream then
-      display_name, name_colour = "\xe2\xac\x86 " .. display_name .. " (upstream)", orange
+      name_colour = orange
     elseif diverged then
       display_name, name_colour = "\226\154\160 " .. display_name, orange
     end
@@ -2953,7 +3107,7 @@ G.UIDEF.amu_fork_picker = function(ref)
     else
       btn_node = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.1, minh = 0.42, r = 0.1,
         colour = is_upstream and orange or G.C.GREEN, button = "amu_switch_fork_" .. slot, hover = true, shadow = true }, nodes = {
-        { n = G.UIT.T, config = { text = is_upstream and "Switch to Original" or "Switch to Fork",
+        { n = G.UIT.T, config = { text = (kind == "original") and "Switch to Original" or ((kind == "parent") and "Switch to Parent" or "Switch to Fork"),
             scale = 0.27, colour = purple } } } }
     end
 
@@ -2966,6 +3120,7 @@ G.UIDEF.amu_fork_picker = function(ref)
         btn_node,
       }},
       { n = G.UIT.R, config = { align = "cl", padding = 0.01, on_demand_tooltip = tip }, nodes = {
+        { n = G.UIT.T, config = { text = kind_tag, scale = 0.27, colour = amu_fork_kind_colour(kind), shadow = true } },
         { n = G.UIT.T, config = { text = info_str, scale = 0.27, colour = purple } } } },
     }
 
@@ -2974,7 +3129,7 @@ G.UIDEF.amu_fork_picker = function(ref)
       local seen_msg = {}
       for _, m in ipairs(fork.changelog) do
         local t = amu_clean_note(m)
-        if shown < 2 and not amu_is_noise(t) and not seen_msg[t] then
+        if shown < 1 and not amu_is_noise(t) and not seen_msg[t] then
           card[#card + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.005, on_demand_tooltip = tip }, nodes = {
             { n = G.UIT.T, config = { text = amu_fit("  \226\128\162 " .. t, 0.26, CARD_W - 0.4), scale = 0.26, colour = G.C.UI.TEXT_LIGHT } } } }
           shown = shown + 1
@@ -3026,6 +3181,7 @@ G.UIDEF.amu_fork_picker = function(ref)
     nodes = {
       { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
         { n = G.UIT.T, config = { text = amu_fit("Forks: " .. display, 0.5, 8.0), scale = 0.5, colour = purple, shadow = true } } } },
+      cur_row or { n = G.UIT.B, config = { h = 0.02, w = 0.1 } },
       { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = rows },
       footer[1] or { n = G.UIT.B, config = { h = 0.02, w = 0.1 } },
       { n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
@@ -3084,6 +3240,7 @@ build_fork_mods_page = function(page)
             display      = display,
             forks        = entry.forks,
             current_repo = entry.current_repo,
+            installed_repo = entry.installed_repo,
           }))
         end
 
@@ -3091,12 +3248,27 @@ build_fork_mods_page = function(page)
           switch_back_fork(folder)
         end
 
-        local label_parts = {}
-        if has_upstream then label_parts[#label_parts + 1] = "\xe2\xac\x86 upstream" end
-        if fork_count > 0 then
-          label_parts[#label_parts + 1] = fork_count == 1 and "1 fork" or (fork_count .. " forks")
+        G.FUNCS["amu_page_current_" .. row_i] = function(e)
+          local links = amu_current_page_links(folder, entry.installed_repo)
+          if not links[1] then amu_fork_status.text = "No page known for " .. display .. "." return end
+          local ok = pcall(function() love.system.openURL(links[1].url) end)
+          amu_fork_status.text = ok and ("Opened " .. tostring(links[1].name) .. " in your browser.") or "Couldn't open a browser."
         end
-        local fork_label = amu_fit(table.concat(label_parts, " + "), 0.3, 3.1)
+
+        local label_parts = {}
+        local counts = entry.counts or {}
+        for _, k in ipairs({ "original", "parent", "parent_fork", "fork_fork", "fork" }) do
+          local n = counts[k] or 0
+          if n > 0 then
+            local w = AMU_FORK_KIND[k].word
+            if k == "original" or k == "parent" then
+              label_parts[#label_parts + 1] = w:sub(1, 1):upper() .. w:sub(2)
+            else
+              label_parts[#label_parts + 1] = n .. " " .. w .. (n == 1 and "" or "s")
+            end
+          end
+        end
+        local fork_label = amu_fit(table.concat(label_parts, " + "), 0.28, 3.4)
         local label_colour = has_upstream and orange or (is_switched and G.C.GREEN or G.C.UI.TEXT_LIGHT)
 
         local action_btn
@@ -3111,10 +3283,13 @@ build_fork_mods_page = function(page)
         end
 
         rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H }, nodes = {
-          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 3.9 }, nodes = {
-            { n = G.UIT.T, config = { text = amu_fit(display, 0.4, 3.8), scale = 0.4, colour = G.C.UI.TEXT_LIGHT } } } },
-          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 3.3 }, nodes = {
-            { n = G.UIT.T, config = { text = fork_label, scale = 0.3, colour = label_colour } } } },
+          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 3.2 }, nodes = {
+            { n = G.UIT.T, config = { text = amu_fit(display, 0.4, 3.1), scale = 0.4, colour = G.C.UI.TEXT_LIGHT } } } },
+          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 3.4 }, nodes = {
+            { n = G.UIT.T, config = { text = fork_label, scale = 0.28, colour = label_colour } } } },
+          { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.0, minh = 0.4, r = 0.09,
+            colour = G.C.BLUE, button = "amu_page_current_" .. row_i, hover = true, shadow = true }, nodes = {
+            { n = G.UIT.T, config = { text = "Page", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
           action_btn,
         }}
       end

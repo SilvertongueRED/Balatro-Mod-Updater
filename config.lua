@@ -65,6 +65,9 @@ return {
   -- Fork Finder list: true = only forks newer than the installed copy (default), false = every fork
   fork_newer_only = true,
 
+  -- Fork Finder list: true = hide forks that are only/mostly translations (esp/espanol...), false = show them
+  fork_hide_translations = true,
+
   -- Per-mod fork tracking: which fork source is currently in use
   -- Keys are folder names; values are { fork_repo="owner/repo", original_repo="owner/repo", switched_at="ISO" }
   mod_fork_source = {},

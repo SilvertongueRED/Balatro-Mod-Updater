@@ -9,6 +9,14 @@ It notices changes to a mod you installed from its Git page, its GitHub Releases
 
 Auto-checking at startup is off by default. Turn it on in the mod's config tab.
 
+## What's new in 0.8.0
+- **Switching goes back to the Fork Finder.** After you press **Switch to Fork** (or **Switch to Original / Parent**) you land on the Fork Finder list again instead of the main menu.
+- **Fork Finder finds the whole family now.** For a mod that is itself a fork it checks (1) the **Original** project, (2) the **Parent** it was forked from (when that is a different repo), (3) other forks of the parent/original (**Parent fork**) and (4) forks of *your own copy* (**Fork-fork**). Everything is compared against the copy you have installed, so "+N commits" means "N commits you don't have". Example: Redux Arcanum now finds `RakibRyan/Redux-Arcanum`, a fork of the fork you have installed.
+- **Newest first, clearly labelled.** Each mod's list is sorted by last update with the newest on top, and every card says what it is: ORIGINAL, PARENT, PARENT FORK, FORK-FORK or FORK. The mod list shows the counts (for example "Original + 2 parent forks + 1 fork-fork").
+- **Hide translations.** New **Translations: Hidden / Shown** button. Forks that are only or mostly translations (Espanol / ESP / language files / "translation" commits) are left out while it is on (on by default; the status line says how many are hidden). Scan again to improve detection on old scan data.
+- **Open the page of what you have now.** Every mod row has a **Page** button, and the fork screen has **Open GitHub page** (and **Open Nexus page** when the mod has one) for your current copy, so you can read about it before switching.
+- **Lovely requirement fixer.** Some forks ask for a Lovely version that doesn't exist (Balatro-History's fork wants `Lovely (>=0.15)` while the newest Lovely is 0.10.0), so Steamodded refuses to load them ("Missing Dependencies") and blacklists them. For mods switched to a fork, the updater now lowers a requirement that is higher than any real Lovely to the Lovely you have, after a switch and after every update run. Restart the game to apply.
+
 ## What's new in 0.7.9
 - **Hold B now works.** A quick tap of B is still "Back" (it happens when you let go); holding B for about 0.7 seconds closes all menus. Regular B presses keep working afterwards. The hold is timed every frame straight from the gamepad, so it works even when another mod (like Better Mouse and Gamepad) handles the controller, and it no longer fails when a menu is rebuilding. Tapping B on a mod's Backups or Fork list screen now goes Back (it did nothing before).
 - **Your settings survive updates.** When the updater updates itself (release or git), your Nexus API key, GitHub token, `config.lua` settings, saved lists and changelogs are kept instead of being replaced by the repo's blank defaults.
