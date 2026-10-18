@@ -115,6 +115,62 @@ pcall(function()
     end) .. '"'
   end
 
+  -- ---------------------------------------------------------------- running PowerShell without a window
+  -- os.execute (cmd.exe) pops up a console window for a moment and "start" opens a real PowerShell window. On Windows
+  -- we start the program ourselves with CREATE_NO_WINDOW instead, so nothing appears at all. The source is kept as a
+  -- string so the Mod Updater's worker threads (which are separate Lua states) can load the same function.
+  CG.RUNNER_SRC = [==[
+local function amu_run(cmd, nowait)
+  local okf, ffi = pcall(require, "ffi")
+  if okf and ffi.os == "Windows" then
+    local ok, rc = pcall(function()
+      pcall(ffi.cdef, [[
+        typedef struct { uint32_t cb; void* a; void* b; void* c; uint32_t x, y, w, h, cw, ch, fill, flags; uint16_t show, res2; void* res3; void* hin; void* hout; void* herr; } AMU_SI;
+        typedef struct { void* hp; void* ht; uint32_t pid, tid; } AMU_PI;
+        int CreateProcessW(const uint16_t*, uint16_t*, void*, void*, int, uint32_t, void*, const uint16_t*, AMU_SI*, AMU_PI*);
+        uint32_t WaitForSingleObject(void*, uint32_t);
+        int GetExitCodeProcess(void*, uint32_t*);
+        int CloseHandle(void*);
+        int MultiByteToWideChar(uint32_t, uint32_t, const char*, int, uint16_t*, int);
+      ]])
+      local C = ffi.C
+      local n = C.MultiByteToWideChar(65001, 0, cmd, #cmd, nil, 0)
+      if n <= 0 then error("could not convert the command") end
+      local buf = ffi.new("uint16_t[?]", n + 1)
+      C.MultiByteToWideChar(65001, 0, cmd, #cmd, buf, n)
+      buf[n] = 0
+      local si = ffi.new("AMU_SI")
+      si.cb = ffi.sizeof("AMU_SI")
+      si.flags = 1   -- STARTF_USESHOWWINDOW
+      si.show = 0    -- SW_HIDE
+      local pi = ffi.new("AMU_PI")
+      if C.CreateProcessW(nil, buf, nil, nil, 0, 0x08000000, nil, nil, si, pi) == 0 then error("CreateProcess failed") end
+      local code = 0
+      if not nowait then
+        C.WaitForSingleObject(pi.hp, 0xFFFFFFFF)
+        local ec = ffi.new("uint32_t[1]")
+        if C.GetExitCodeProcess(pi.hp, ec) ~= 0 then code = tonumber(ec[0]) end
+      end
+      C.CloseHandle(pi.hp)
+      C.CloseHandle(pi.ht)
+      return code
+    end)
+    if ok then return rc end
+  end
+  -- fallback (not Windows, or the direct start failed): the old way, but ask PowerShell to hide itself
+  local c = cmd
+  if c:match("^powershell ") and not c:find("-WindowStyle", 1, true) then
+    c = c:gsub("^powershell ", "powershell -WindowStyle Hidden ", 1)
+  end
+  if nowait then c = 'start "" ' .. c end
+  return os.execute(c)
+end
+]==]
+  do
+    local chunk = (loadstring or load)(CG.RUNNER_SRC .. "\nreturn amu_run")
+    CG.run_hidden = chunk and chunk() or function(c) return os.execute(c) end
+  end
+
   -- Run autoupdate.ps1 to put these mods back (and pin them). Blocks until it is done.
   function CG.put_back(dir, names)
     local parts = {}
@@ -135,7 +191,7 @@ pcall(function()
       "-RollbackRecent",
       "-SelectionFile", win(sel),
     }, " ")
-    pcall(os.execute, cmd)
+    pcall(CG.run_hidden, cmd)
     local decode = CG.decoder(dir)
     local okr, rep = pcall(decode or error, read_all(dir .. "/_crash_rollback_report.json") or "")
     if not (okr and type(rep) == "table") then return false, "The put-back did not run (see last_run.json)." end
@@ -226,12 +282,12 @@ pcall(function()
     local ran = false
     if pcall(love.filesystem.write, LAUNCHER, table.concat(launcher, "\r\n") .. "\r\n") then
       local lf = (love.filesystem.getSaveDirectory() .. "/" .. LAUNCHER):gsub("/", "\\")
-      local okc, rc = pcall(os.execute, 'powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' .. lf .. '"')
+      local okc, rc = pcall(CG.run_hidden, 'powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' .. lf .. '"')
       ran = okc and (rc == 0 or rc == true)
     end
     if not ran then
       -- no Task Scheduler: start the helper in its own (hidden) window instead
-      local okp = pcall(os.execute, 'start "" powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' .. script .. '"')
+      local okp = pcall(CG.run_hidden, 'powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' .. script .. '"', true)
       ran = okp
     end
     return ran

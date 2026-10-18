@@ -1,4 +1,4 @@
--- Mod Updater (Steamodded) v0.8.4
+-- Mod Updater (Steamodded) v0.8.5
 -- In-game config with two tabs: Settings (general + Nexus key + check now) and Mod Toggles (paginated).
 -- Uses Steamodded's DynamicUIManager for proper pagination.
 -- Git pull mode: rebase (default and recommended).
@@ -92,6 +92,8 @@ local amu_run_fork_scan
 -- menu (crash/freeze), so _crash_flag tells autoupdate.ps1 to roll back the
 -- mods it updated last time.
 ---------------------------------------------------------------------------
+AMU_RUN = function(c) return os.execute(c) end
+AMU_HIDE_SRC = "local function amu_run(c) return os.execute(c) end\n"
 do
   local mp = mod and mod.path
   if mp and mp ~= "" then
@@ -101,6 +103,10 @@ do
       if not (AMU_CRASH_GUARD and AMU_CRASH_GUARD.installed) then dofile(join_path(mp, "crash_guard.lua")) end
       if AMU_CRASH_GUARD then AMU_CRASH_GUARD.mod_dir = (tostring(mp):gsub("[/\\]+$", "")) end
     end)
+    -- Run a command with no window (see crash_guard.lua). AMU_HIDE_SRC is the same function as source text, put in
+    -- front of the worker threads' code (a thread is a separate Lua state).
+    AMU_RUN = (AMU_CRASH_GUARD and AMU_CRASH_GUARD.run_hidden) or function(c) return os.execute(c) end
+    AMU_HIDE_SRC = (AMU_CRASH_GUARD and AMU_CRASH_GUARD.RUNNER_SRC) or "local function amu_run(c) return os.execute(c) end\n"
     local function touch(name)
       pcall(function()
         local f = io.open(join_path(mp, name), "wb")
@@ -733,22 +739,30 @@ local function run_manual_check()
     "-SelfDir", safe_quote(winpath(mod_path)),
   }, " ")
 
-  local thread_code = [[
+  local thread_code = AMU_HIDE_SRC .. [[
     local cmd = ...
-    local ok = pcall(function() os.execute(cmd) end)
+    local ok = pcall(function() amu_run(cmd) end)
     local ch = love.thread.getChannel("amu_manual_check")
     ch:push(ok and "done" or "error")
   ]]
   local t = love.thread.newThread(thread_code)
   t:start(cmd)
 
+  -- While this runs, the main menu shows "Shuffling mods..." again (also when you go back to it from the Mods menu)
+  local shown_loading = false
+  if config.show_loading_overlay ~= false and AMU_LOADING_API and not AMU_LOADING_API.is_waiting() then
+    shown_loading = pcall(AMU_LOADING_API.show, { text = "Shuffling mods...", suits = "\226\153\160  \226\153\165  \226\153\166  \226\153\163" })
+  end
+
   G.E_MANAGER:add_event(Event({
     blockable = false,
     blocking = false,
+    no_delete = true,
     func = function()
       local msg = channel:pop()
       if msg then
         amu_is_checking = false
+        if shown_loading and AMU_LOADING_API then pcall(AMU_LOADING_API.hide) end
         local summary_path = join_path(mod_path, "last_run.json")
         local data = read_all(summary_path)
         local summary = data and decode_json(data) or nil
@@ -816,9 +830,9 @@ local function run_single_mod_check(folder_name)
     "-TargetMod", safe_quote(folder_name),
   }, " ")
 
-  local thread_code = string.format([[
+  local thread_code = AMU_HIDE_SRC .. string.format([[
     local cmd = ...
-    local ok = pcall(function() os.execute(cmd) end)
+    local ok = pcall(function() amu_run(cmd) end)
     local ch = love.thread.getChannel(%q)
     ch:push(ok and "done" or "error")
   ]], ch_name)
@@ -1798,6 +1812,96 @@ local function amu_save_snapshot(source, keep)
   return true
 end
 
+---------------------------------------------------------------------------
+-- WEBPAGE LINKS: where a mod came from (used by the "Webpage" buttons in Fork Finder, Mod Toggles and Backups)
+-- Order: the fork you switched to, then update.json (what the updater or a pasted link set), then the mod's own
+-- git remote, then Nexus. Kept in a table (not locals) because main.lua is close to Lua's local variable limit.
+---------------------------------------------------------------------------
+AMU_WEB = AMU_WEB or {}
+
+-- "git@github.com:owner/repo.git", "https://user:pw@host/owner/repo.git" and friends -> a clean https address
+function AMU_WEB.clean_remote(url)
+  url = tostring(url or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if url == "" then return nil end
+  local host, path = url:match("^[%w%._%-]+@([^:/]+):(.+)$")
+  if not host then host, path = url:match("^ssh://[%w%._%-]+@([^/:]+)[:%d]*/(.+)$") end
+  if not host then
+    url = url:gsub("^(https?://)[^/@]*@", "%1")
+    host, path = url:match("^https?://([^/]+)/(.+)$")
+  end
+  if not host or not path then return nil end
+  path = path:gsub("%.git$", ""):gsub("/+$", "")
+  if path == "" then return nil end
+  return host, path
+end
+
+function AMU_WEB.git_remote(folder)
+  local ok, res = pcall(function()
+    local mods_dir = join_path(love.filesystem.getSaveDirectory(), "Mods")
+    local raw = read_all(join_path(join_path(join_path(mods_dir, folder), ".git"), "config"))
+    if not raw then return nil end
+    raw = raw:gsub("\r", "")
+    local body = raw:match('%[remote "origin"%]([^%[]*)')
+    if not body then body = raw:match('%[remote "[^"]+"%]([^%[]*)') end
+    local url = body and body:match("url%s*=%s*([^\n]+)")
+    return url
+  end)
+  if ok then return res end
+  return nil
+end
+
+-- Returns a list of { label, url, name }. The first one is what the "Webpage" buttons open.
+function AMU_WEB.links(folder, installed_repo)
+  local links = {}
+  local src = config.mod_fork_source and config.mod_fork_source[folder]
+  local repo = src and src.fork_repo or nil
+  local nexus_id = nil
+  local ok, uj = pcall(function()
+    local mods_dir = join_path(love.filesystem.getSaveDirectory(), "Mods")
+    local raw = read_all(join_path(join_path(mods_dir, folder), "update.json"))
+    return raw and decode_json(raw) or nil
+  end)
+  if ok and type(uj) == "table" then
+    if uj.provider == "github" and type(uj.repo) == "string" and uj.repo ~= "" and not repo then repo = uj.repo end
+    if uj.provider == "nexus" and uj.mod_id then nexus_id = tostring(uj.mod_id) end
+  end
+  local other_url, other_name
+  if not repo or repo == "" then
+    local host, path = AMU_WEB.clean_remote(AMU_WEB.git_remote(folder))
+    if host and path then
+      if host:lower() == "github.com" or host:lower() == "www.github.com" then
+        repo = path
+      else
+        other_url, other_name = "https://" .. host .. "/" .. path, path
+      end
+    end
+  end
+  if (not repo or repo == "") and type(installed_repo) == "string" and installed_repo ~= "" then repo = installed_repo end
+  if repo and repo ~= "" then
+    links[#links + 1] = { label = "GitHub webpage", url = "https://github.com/" .. repo, name = repo }
+  end
+  if other_url then
+    links[#links + 1] = { label = "Webpage", url = other_url, name = other_name }
+  end
+  if nexus_id then
+    links[#links + 1] = { label = "Nexus webpage", url = "https://www.nexusmods.com/balatro/mods/" .. nexus_id, name = "Nexus #" .. nexus_id }
+  end
+  return links
+end
+
+-- Opens the first link; returns the message to show.
+function AMU_WEB.open_first(folder, display, installed_repo, short)
+  local links = AMU_WEB.links(folder, installed_repo)
+  if not links[1] then
+    if short then return "No webpage known yet." end
+    return "No webpage known for " .. tostring(display) .. ". Add its link in the 'No Source' tab."
+  end
+  local ok = pcall(function() love.system.openURL(links[1].url) end)
+  if short then return ok and "Opened in your browser." or "Couldn't open a browser." end
+  if ok then return "Opened " .. tostring(links[1].name) .. " in your browser." end
+  return "Couldn't open a browser."
+end
+
 local build_mod_toggles_page
 
 local function amu_refresh_toggles()
@@ -1884,13 +1988,23 @@ build_mod_toggles_page = function(page)
 
       local check_colour = amu_per_mod_checking[folder] and RGBA(0.5, 0.5, 0.5, 0.9) or G.C.BLUE
 
-      -- name on the left, the update status in the middle, toggle + Check together on the far right
+      -- Webpage: where this mod was downloaded from (git, Nexus, or the link pasted in 'No Source')
+      local has_web = AMU_WEB.links(folder)[1] ~= nil
+      G.FUNCS["amu_web_mod_" .. row_i] = function(e)
+        amu_per_mod_status[folder] = AMU_WEB.open_first(folder, entry.display, nil, true)
+      end
+
+      -- name on the left, the update status, Webpage, then toggle + Check together on the far right
       local row_nodes = {
-        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 6.6 }, nodes = {
-          { n = G.UIT.T, config = { text = amu_fit(entry.display, 0.5, 6.4), scale = 0.5, colour = G.C.UI.TEXT_LIGHT } }
+        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 5.9 }, nodes = {
+          { n = G.UIT.T, config = { text = amu_fit(entry.display, 0.5, 5.7), scale = 0.5, colour = G.C.UI.TEXT_LIGHT } }
         }},
-        { n = G.UIT.C, config = { align = "cl", padding = 0.04, minw = 4.6 }, nodes = {
+        { n = G.UIT.C, config = { align = "cl", padding = 0.04, minw = 3.7 }, nodes = {
           { n = G.UIT.T, config = { ref_table = amu_per_mod_status, ref_value = folder, scale = 0.3, colour = G.C.UI.TEXT_LIGHT } }
+        }},
+        { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 1.8, minh = 0.5, r = 0.09,
+          colour = has_web and G.C.BLUE or RGBA(0.5, 0.5, 0.5, 0.9), button = "amu_web_mod_" .. row_i, hover = true, shadow = true }, nodes = {
+          { n = G.UIT.T, config = { text = "Webpage", scale = 0.4, colour = G.C.UI.TEXT_LIGHT } }
         }},
         { n = G.UIT.C, config = { align = "cm", padding = 0, minw = 1.2 }, nodes = {
           amu_tight_toggle {
@@ -2113,9 +2227,9 @@ local function revert_and_pin_mod(folder_name, backup_file)
   if love and love.thread and love.thread.newThread and love.thread.getChannel then
     local channel = love.thread.getChannel("amu_restore_status")
     channel:clear()
-    local thread_code = [[
+    local thread_code = AMU_HIDE_SRC .. [[
       local cmd = ...
-      local ok = pcall(function() os.execute(cmd) end)
+      local ok = pcall(function() amu_run(cmd) end)
       local ch = love.thread.getChannel("amu_restore_status")
       ch:push(ok and "done" or "error")
     ]]
@@ -2136,7 +2250,7 @@ local function revert_and_pin_mod(folder_name, backup_file)
       end
     }))
   else
-    os.execute(cmd)
+    AMU_RUN(cmd)
     amu_restore_in_progress = false; amu_restore_folder = nil
     amu_backup_status.text = folder_name .. " restored. Restart to apply."
   end
@@ -2359,7 +2473,7 @@ local function build_nosrc_page(page)
         pcall(function() clip = love.system.getClipboardText() or "" end)
         local kind, val = parse_source_link(clip)
         if not kind then
-          amu_nosrc_msg.text = "Copy the mod's GitHub or Nexus page link first, then press again."
+          amu_nosrc_msg.text = "Copy the mod's GitHub or Nexus webpage link first, then press again."
           return
         end
         if write_update_json(folder, kind, val) then
@@ -2861,7 +2975,7 @@ amu_extra_tabs_raw = function()
           top = {
             amu_header_row("Mods With No Update Source", 0.5),
             { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-              { n = G.UIT.T, config = { text = "Copy a mod's GitHub or Nexus page link, then press 'Paste link'.", scale = 0.36, colour = G.C.UI.TEXT_LIGHT } } } },
+              { n = G.UIT.T, config = { text = "Copy a mod's GitHub or Nexus webpage link, then press 'Paste link'.", scale = 0.36, colour = G.C.UI.TEXT_LIGHT } } } },
             { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
               create_toggle { label = "Show the 'no update source' note after update checks",
                 ref_table = config, ref_value = "show_untracked_note", w = 0, scale = 0.4 },
@@ -3409,13 +3523,18 @@ build_backup_mods_page = function(page)
         open_overlay(G.UIDEF.amu_backup_picker({ folder = folder, display = display, backups = backups }))
       end
 
+      local has_web = AMU_WEB.links(folder)[1] ~= nil
+      G.FUNCS["amu_web_bk_" .. row_i] = function(e)
+        amu_backup_status.text = AMU_WEB.open_first(folder, display)
+      end
+
       G.FUNCS["amu_unpin_mod_" .. row_i] = function(e)
         unpin_mod(folder)
         amu_update_area("amu_backup_mod_list", build_backup_mods_page(AMU_BACKUP_PAGE))
       end
 
       -- Two lines to the right of the name: version, then last update / pin info
-      local line1 = amu_fit(mod_version_line(folder), 0.35, 4.6)
+      local line1 = amu_fit(mod_version_line(folder), 0.35, 4.2)
       local line2, line2_colour
       if is_pinned then
         local pd = fmt_date(parse_stamp(pin_info.backup_file or ""))
@@ -3426,17 +3545,17 @@ build_backup_mods_page = function(page)
         line2 = ud and ("Updated " .. ud) or "Never updated here"
         line2_colour = grey
       end
-      line2 = amu_fit(line2, 0.31, 4.6)
+      line2 = amu_fit(line2, 0.31, 4.2)
 
       local tip = { filler = { func = amu_changelog_tip, args = { folder = folder, display = display } } }
 
       local pin_badge
       if is_pinned then
-        pin_badge = { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 1.2, minh = 0.36, r = 0.08,
+        pin_badge = { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 1.1, minh = 0.36, r = 0.08,
           colour = RGBA(0.7, 0.45, 0.0, 0.95) }, nodes = {
           { n = G.UIT.T, config = { text = "PINNED", scale = 0.28, colour = RGBA(1, 1, 1, 1) } } } }
       else
-        pin_badge = { n = G.UIT.B, config = { h = 0.1, w = 1.2 } }
+        pin_badge = { n = G.UIT.B, config = { h = 0.1, w = 1.1 } }
       end
 
       local unpin_node
@@ -3449,16 +3568,20 @@ build_backup_mods_page = function(page)
       end
 
       local row_nodes = {
-        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 5.6 }, nodes = {
-          { n = G.UIT.T, config = { text = amu_fit(display, 0.5, 5.4), scale = 0.5, colour = G.C.UI.TEXT_LIGHT } } } },
-        { n = G.UIT.C, config = { align = "cl", padding = 0, minw = 4.8 }, nodes = {
+        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 4.6 }, nodes = {
+          { n = G.UIT.T, config = { text = amu_fit(display, 0.5, 4.4), scale = 0.5, colour = G.C.UI.TEXT_LIGHT } } } },
+        { n = G.UIT.C, config = { align = "cl", padding = 0, minw = 4.2 }, nodes = {
           { n = G.UIT.R, config = { align = "cl", padding = 0 }, nodes = {
             { n = G.UIT.T, config = { text = line1, scale = 0.35, colour = G.C.UI.TEXT_LIGHT } } } },
           { n = G.UIT.R, config = { align = "cl", padding = 0 }, nodes = {
             { n = G.UIT.T, config = { text = line2, scale = 0.31, colour = line2_colour } } } },
         }},
         pin_badge,
-        { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
+        { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
+        { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.7, minh = 0.48, r = 0.09,
+          colour = has_web and G.C.BLUE or RGBA(0.5, 0.5, 0.5, 0.9), button = "amu_web_bk_" .. row_i, hover = true, shadow = true }, nodes = {
+          { n = G.UIT.T, config = { text = "Webpage", scale = 0.38, colour = G.C.UI.TEXT_LIGHT } } } },
+        { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
         { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.9, minh = 0.48, r = 0.09,
           colour = G.C.BLUE, button = "amu_open_backups_" .. row_i, hover = true, shadow = true,
           on_demand_tooltip = tip }, nodes = {
@@ -3589,27 +3712,7 @@ end
 
 -- Where can the player read about the mod they have installed RIGHT NOW? (GitHub and/or Nexus)
 local function amu_current_page_links(folder, installed_repo)
-  local links = {}
-  local src = config.mod_fork_source and config.mod_fork_source[folder]
-  local repo = src and src.fork_repo or nil
-  local nexus_id = nil
-  local ok, uj = pcall(function()
-    local mods_dir = join_path(love.filesystem.getSaveDirectory(), "Mods")
-    local raw = read_all(join_path(join_path(mods_dir, folder), "update.json"))
-    return raw and decode_json(raw) or nil
-  end)
-  if ok and type(uj) == "table" then
-    if uj.provider == "github" and type(uj.repo) == "string" and uj.repo ~= "" and not repo then repo = uj.repo end
-    if uj.provider == "nexus" and uj.mod_id then nexus_id = tostring(uj.mod_id) end
-  end
-  if (not repo or repo == "") and type(installed_repo) == "string" and installed_repo ~= "" then repo = installed_repo end
-  if repo and repo ~= "" then
-    links[#links + 1] = { label = "Open GitHub page", url = "https://github.com/" .. repo, name = repo }
-  end
-  if nexus_id then
-    links[#links + 1] = { label = "Open Nexus page", url = "https://www.nexusmods.com/balatro/mods/" .. nexus_id, name = "Nexus #" .. nexus_id }
-  end
-  return links
+  return AMU_WEB.links(folder, installed_repo)
 end
 
 -- keep_tr = true: do not remove translation-only forks even when that option is on (used for counting)
@@ -3771,9 +3874,9 @@ local function run_fork_scan()
     "-CheckForks",
   }, " ")
 
-  local thread_code = [[
+  local thread_code = AMU_HIDE_SRC .. [[
     local cmd = ...
-    local ok = pcall(function() os.execute(cmd) end)
+    local ok = pcall(function() amu_run(cmd) end)
     local ch = love.thread.getChannel("amu_fork_scan")
     ch:push(ok and "done" or "error")
   ]]
@@ -3847,9 +3950,9 @@ local function switch_to_fork(folder_name, fork_repo)
   if love and love.thread and love.thread.newThread and love.thread.getChannel then
     local channel = love.thread.getChannel("amu_fork_switch")
     channel:clear()
-    local thread_code = [[
+    local thread_code = AMU_HIDE_SRC .. [[
       local cmd = ...
-      local ok = pcall(function() os.execute(cmd) end)
+      local ok = pcall(function() amu_run(cmd) end)
       local ch = love.thread.getChannel("amu_fork_switch")
       ch:push(ok and "done" or "error")
     ]]
@@ -3875,7 +3978,7 @@ local function switch_to_fork(folder_name, fork_repo)
       end
     }))
   else
-    os.execute(cmd)
+    AMU_RUN(cmd)
     amu_fork_status.text = folder_name .. " switched to fork. Restart to apply."
   end
 end
@@ -3912,9 +4015,9 @@ local function switch_back_fork(folder_name)
   if love and love.thread and love.thread.newThread and love.thread.getChannel then
     local channel = love.thread.getChannel("amu_fork_switchback")
     channel:clear()
-    local thread_code = [[
+    local thread_code = AMU_HIDE_SRC .. [[
       local cmd = ...
-      local ok = pcall(function() os.execute(cmd) end)
+      local ok = pcall(function() amu_run(cmd) end)
       local ch = love.thread.getChannel("amu_fork_switchback")
       ch:push(ok and "done" or "error")
     ]]
@@ -3940,7 +4043,7 @@ local function switch_back_fork(folder_name)
       end
     }))
   else
-    os.execute(cmd)
+    AMU_RUN(cmd)
     amu_fork_status.text = folder_name .. " reverted to original. Restart to apply."
   end
 end
@@ -4246,10 +4349,7 @@ build_fork_mods_page = function(page)
         end
 
         G.FUNCS["amu_page_current_" .. row_i] = function(e)
-          local links = amu_current_page_links(folder, entry.installed_repo)
-          if not links[1] then amu_fork_status.text = "No page known for " .. display .. "." return end
-          local ok = pcall(function() love.system.openURL(links[1].url) end)
-          amu_fork_status.text = ok and ("Opened " .. tostring(links[1].name) .. " in your browser.") or "Couldn't open a browser."
+          amu_fork_status.text = AMU_WEB.open_first(folder, display, entry.installed_repo)
         end
 
         local label_parts = {}
@@ -4265,7 +4365,7 @@ build_fork_mods_page = function(page)
             end
           end
         end
-        local fork_label = amu_fit(table.concat(label_parts, " + "), 0.34, 4.9)
+        local fork_label = amu_fit(table.concat(label_parts, " + "), 0.34, 4.5)
         local label_colour = has_upstream and orange or (is_switched and G.C.GREEN or G.C.UI.TEXT_LIGHT)
 
         local action_btn
@@ -4282,11 +4382,11 @@ build_fork_mods_page = function(page)
         rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H }, nodes = {
           { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 5.6 }, nodes = {
             { n = G.UIT.T, config = { text = amu_fit(display, 0.5, 5.4), scale = 0.5, colour = G.C.UI.TEXT_LIGHT } } } },
-          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 5.0 }, nodes = {
+          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 4.6 }, nodes = {
             { n = G.UIT.T, config = { text = fork_label, scale = 0.34, colour = label_colour } } } },
-          { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.3, minh = 0.48, r = 0.09,
+          { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.7, minh = 0.48, r = 0.09,
             colour = G.C.BLUE, button = "amu_page_current_" .. row_i, hover = true, shadow = true }, nodes = {
-            { n = G.UIT.T, config = { text = "Page", scale = 0.36, colour = G.C.UI.TEXT_LIGHT } } } },
+            { n = G.UIT.T, config = { text = "Webpage", scale = 0.36, colour = G.C.UI.TEXT_LIGHT } } } },
           { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
           action_btn,
         }}
@@ -4326,7 +4426,7 @@ local function wrap_line(s, max_chars)
     table.insert(out, (s:sub(1, cut):gsub("%s+$","")))
     s = s:sub(cut + 1):gsub("^%s+","")
   end
-  if #s > 0 then table.insert(out, s) end
+  if #s > 0 then table.insert(out, s) elseif #out == 0 then table.insert(out, "") end
   return out
 end
 
@@ -4339,11 +4439,32 @@ local function wrap_lines(lines, max_chars)
   return out
 end
 
+-- Mods the updater could not check (no git, no update.json). Ones you gave a link since the check are not counted.
+local function amu_untracked_count(summary)
+  local u = summary and summary.untracked_mods
+  if type(u) == "string" then u = { u } end
+  if type(u) ~= "table" or config.show_untracked_note == false then return 0 end
+  local n = 0
+  local mods_dir = join_path(love.filesystem.getSaveDirectory(), "Mods")
+  for _, name in ipairs(u) do
+    if type(name) == "string" and not file_exists(join_path(join_path(mods_dir, name), "update.json")) then n = n + 1 end
+  end
+  return n
+end
+
 local function build_prompt_lines(summary)
   local lines = {}
   local updated = summary.updated_mods or {}
   local errors = summary.errors or {}
   local skipped = summary.skipped_mods or {}
+
+  -- first, so it is never hidden below the scroll
+  local untracked_n = amu_untracked_count(summary)
+  if untracked_n > 0 then
+    table.insert(lines, tostring(untracked_n) .. " mod(s) have no update source, so they are never checked.")
+    table.insert(lines, "Add their links in Mods > Mod Updater > No Source.")
+    table.insert(lines, "")
+  end
 
   if #updated > 0 then
     table.insert(lines, "Updated " .. tostring(#updated) .. " mod(s):")
@@ -4384,13 +4505,6 @@ local function build_prompt_lines(summary)
     table.insert(lines, "")
   end
 
-  local untracked = summary.untracked_mods or {}
-  if #untracked > 0 and (#updated > 0 or #errors > 0) and config.show_untracked_note ~= false then
-    table.insert(lines, tostring(#untracked) .. " mod(s) have no git/update.json and are never")
-    table.insert(lines, "checked. Add links in the 'No Source' tab.")
-    table.insert(lines, "")
-  end
-
   if #skipped > 0 and #updated == 0 then
     -- Mods you switched off are just counted; only show skips that tell you something.
     local shown, off = {}, 0
@@ -4413,6 +4527,9 @@ local function build_prompt_lines(summary)
   end
 
   if #lines == 0 then table.insert(lines, "No mod updates were applied.") end
+  if untracked_n > 0 and #updated == 0 and #errors == 0 and #(summary.available_updates or {}) == 0 then
+    table.insert(lines, "No mod updates were applied.")
+  end
   return wrap_lines(lines, 46)
 end
 
@@ -4422,6 +4539,7 @@ function show_prompt(summary)
   local available = summary and summary.available_updates or {}
   local fw = summary and summary.framework_staged == true
   local should = (#updated > 0) or fw or (#available > 0) or ((config.prompt_on_errors ~= false) and (#errors > 0))
+    or (amu_untracked_count(summary) > 0)
   if not should then return end
 
   AMU_PROMPT.title = "Mod Updater"
@@ -4432,22 +4550,179 @@ function show_prompt(summary)
   open_overlay(G.UIDEF.amu_restart_prompt(AMU_PROMPT))
 end
 
--- The results window shows a fixed number of lines per page so it always fits on
--- screen, with the Restart/Later buttons right under the title (they used to sit at
--- the bottom and get pushed off-screen by long results).
-local AMU_PROMPT_PAGE_SIZE = 12
+-- The results window shows 12 lines at a time. Longer results scroll: drag the bar on the right, use the mouse wheel,
+-- the right stick, or LB (up) / RB (down). The window is always the same size, so it can never run off the screen.
+-- On a controller the cursor starts on the buttons and stays inside this window until you answer it.
+-- (State lives in the AMU_SCR table, not in locals: main.lua is close to Lua's limit of local variables.)
+AMU_SCR = AMU_SCR or { VISIBLE = 12, SEGS = 36, first = 1, total = 0, vis = 0, lines = {}, view = {}, segs = {}, alive_at = -10, acc = 0 }
+do
+  local S = AMU_SCR
+  S.thumb_col = RGBA(0.62, 0.33, 0.92, 1)
+  S.track_col = RGBA(0.3, 0.3, 0.38, 1)
+
+  local function now() return (G and G.TIMERS and G.TIMERS.REAL) or 0 end
+
+  function S.fill()
+    for i = 1, S.vis do
+      local v = S.lines[S.first + i - 1]
+      if v == nil or v == "" then v = " " end
+      S.view[i] = v
+    end
+  end
+
+  -- colour the bar: the purple part is the part of the list you are looking at
+  function S.paint()
+    local n = S.SEGS
+    local span = math.max(1, S.total - S.vis)
+    local len = math.max(2, math.min(n, math.floor(n * S.vis / math.max(1, S.total) + 0.5)))
+    local start = math.floor((n - len) * (S.first - 1) / span + 0.5)
+    for i = 1, n do
+      local seg = S.segs[i]
+      if seg then seg.colour = (i > start and i <= start + len) and S.thumb_col or S.track_col end
+    end
+  end
+
+  function S.set_first(f)
+    local maxf = math.max(1, S.total - S.vis + 1)
+    f = math.max(1, math.min(maxf, math.floor(f + 0.5)))
+    if f == S.first then return false end
+    S.first = f
+    S.fill()
+    S.paint()
+    return true
+  end
+
+  function S.scroll(by) return S.set_first(S.first + by) end
+
+  function S.active() return (now() - (S.alive_at or -10)) < 0.25 and S.total > S.vis end
+
+  -- mouse wheel
+  if love and not S.wheel_hooked then
+    S.wheel_hooked = true
+    local prev = love.wheelmoved
+    love.wheelmoved = function(x, y, ...)
+      if y and y ~= 0 and S.active() then
+        S.scroll(y > 0 and -3 or 3)
+        return
+      end
+      if prev then return prev(x, y, ...) end
+    end
+  end
+
+  -- While the results window is open the right stick scrolls it (it must not move the pointer, which would switch the
+  -- game to pointer mode and take the highlight off the buttons). So the game is shown the stick as "centred".
+  if Controller and not Controller._amu_prompt_axis then
+    Controller._amu_prompt_axis = true
+    local orig_axis = Controller.update_axis
+    function Controller:update_axis(dt)
+      local gp = self.GAMEPAD
+      local real = gp and gp.object
+      if real and S.active() or (real and (now() - (S.alive_at or -10)) < 0.25) then
+        local okr, ry = pcall(real.getGamepadAxis, real, "righty")
+        S.stick_y = okr and ry or 0
+        local proxy = setmetatable({}, { __index = function(_, k)
+          if k == "getGamepadAxis" then
+            return function(_, name, ...)
+              if name == "righty" or name == "rightx" then return 0 end
+              return real:getGamepadAxis(name, ...)
+            end
+          end
+          local v = real[k]
+          if type(v) == "function" then return function(_, ...) return v(real, ...) end end
+          return v
+        end })
+        gp.object = proxy
+        local ok, res = pcall(orig_axis, self, dt)
+        gp.object = real
+        if not ok then error(res, 0) end
+        return res
+      end
+      S.stick_y = 0
+      return orig_axis(self, dt)
+    end
+  end
+
+  -- run every frame by the results window itself (so it stops by itself when the window is gone)
+  function G.FUNCS.amu_prompt_tick(e)
+    S.alive_at = now()
+    local c = G.CONTROLLER
+    if not c then return end
+    local using_pad = c.HID and c.HID.controller and c.snap_to
+    -- 1. keep the controller cursor inside this window
+    if using_pad then
+      local om = G.OVERLAY_MENU
+      local t = c.focused and c.focused.target
+      if om and e.UIBox == om and not (t and t.UIBox == om) and not c.locks.frame then
+        local n = e.UIBox.get_UIE_by_ID and e.UIBox:get_UIE_by_ID("amu_prompt_main")
+        if n then
+          pcall(c.snap_to, c, { node = n })
+          if c.update_cursor then pcall(c.update_cursor, c) end
+          c.interrupt.focus = false
+        end
+      end
+    end
+    -- 2. controller scrolling: right stick (up/down) and LB / RB
+    if S.total > S.vis then
+      local dt = (love.timer and love.timer.getDelta and love.timer.getDelta()) or 0.016
+      local sy = S.stick_y or 0
+      if math.abs(sy) > 0.25 then
+        S.acc = S.acc + sy * 18 * dt
+        local whole = S.acc >= 0 and math.floor(S.acc) or math.ceil(S.acc)
+        if whole ~= 0 then S.acc = S.acc - whole; S.scroll(whole) end
+      else
+        S.acc = 0
+      end
+      local real = c.GAMEPAD and c.GAMEPAD.object
+      if real then
+        local okl, lb = pcall(real.isGamepadDown, real, "leftshoulder")
+        local okr, rb = pcall(real.isGamepadDown, real, "rightshoulder")
+        local dir = (okl and lb and -1) or (okr and rb and 1) or 0
+        if dir == 0 then
+          S.held_dir, S.next_rep = 0, nil
+        else
+          local t = now()
+          if S.held_dir ~= dir then
+            S.held_dir, S.next_rep = dir, t + 0.4
+            S.scroll(dir * 3)
+          elseif S.next_rep and t >= S.next_rep then
+            S.next_rep = t + 0.08
+            S.scroll(dir * 3)
+          end
+        end
+      end
+    end
+  end
+
+  -- the bar: click or drag it
+  function G.FUNCS.amu_scroll_track(e)
+    e.states.drag.can = true
+    local c = G.CONTROLLER
+    if not c then return end
+    if c.dragging.target == e or (c.is_cursor_down and c.cursor_down.target == e) then
+      local h = e.T.h
+      if h and h > 0 then
+        local ratio = (G.CURSOR.T.y - G.ROOM.T.y - e.T.y) / h
+        local frac = S.vis / math.max(1, S.total)
+        local pos = (ratio - frac / 2) / math.max(0.001, 1 - frac)
+        pos = math.max(0, math.min(1, pos))
+        S.set_first(1 + pos * math.max(0, S.total - S.vis))
+      end
+    end
+  end
+end
 
 G.UIDEF.amu_restart_prompt = function(ref)
+  local S = AMU_SCR
   local purple = (G.C and (G.C.PURPLE or (G.C.UI and G.C.UI.PURPLE))) or RGBA(0.62, 0.33, 0.92, 1)
   local bg    = RGBA(0.08, 0.08, 0.08, 0.96)
   local panel = RGBA(0.12, 0.12, 0.12, 0.96)
 
   local lines = ref.lines or {}
-  local page_size = AMU_PROMPT_PAGE_SIZE
-  local pages = math.max(1, math.ceil(#lines / page_size))
-  ref.page = math.max(1, math.min(tonumber(ref.page) or 1, pages))
-  local first = (ref.page - 1) * page_size + 1
-  local last = math.min(#lines, first + page_size - 1)
+  S.lines, S.total = lines, #lines
+  S.vis = math.min(#lines, S.VISIBLE)
+  S.first, S.acc, S.view, S.segs = 1, 0, {}, {}
+  S.fill()
+  local need_bar = #lines > S.vis
 
   local max_len = 0
   for i = 1, #lines do
@@ -4457,22 +4732,22 @@ G.UIDEF.amu_restart_prompt = function(ref)
 
   local w = math.min(15.5, math.max(10.0, 6.4 + max_len * 0.11))
   local line_h = 0.42
-  -- same height on every page so the window doesn't jump around
-  local content_h = math.max(1.9, math.min(#lines, page_size) * line_h + 0.3)
+  -- the same height whatever is scrolled to, so the window never jumps around
+  local content_h = math.max(1.9, S.vis * line_h + 0.3)
 
   local text_rows = {}
-  for i = first, last do
+  for i = 1, S.vis do
     text_rows[#text_rows+1] = {
       n = G.UIT.R,
       config = { align = "cl", padding = 0.01 },
       nodes = {
-        { n = G.UIT.T, config = { text = tostring(lines[i]), scale = 0.4, colour = purple } }
+        { n = G.UIT.T, config = { ref_table = S.view, ref_value = i, scale = 0.4, colour = purple, no_recalc = true } }
       }
     }
   end
 
-  local function btn(label, func, colour, minw)
-    return { n = G.UIT.C, config = { align = "cm", padding = 0.1, minw = minw or 3.0, minh = 0.75, r = 0.15, colour = colour, button = func, hover = true, shadow = true }, nodes = {
+  local function btn(label, func, colour, minw, id)
+    return { n = G.UIT.C, config = { id = id, align = "cm", padding = 0.1, minw = minw or 3.0, minh = 0.75, r = 0.15, colour = colour, button = func, hover = true, shadow = true }, nodes = {
       { n = G.UIT.T, config = { text = label, scale = 0.5, colour = purple } }
     }}
   end
@@ -4480,9 +4755,27 @@ G.UIDEF.amu_restart_prompt = function(ref)
 
   local buttons_row = { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {} }
   if ref.has_updates and (config.prompt_restart ~= false) then
-    buttons_row.nodes = { btn("Restart now", "amu_restart_now", G.C.GREEN, 3.6), gap, btn("Later", "amu_close_prompt", panel, 2.6) }
+    buttons_row.nodes = { btn("Restart now", "amu_restart_now", G.C.GREEN, 3.6, "amu_prompt_main"), gap, btn("Later", "amu_close_prompt", panel, 2.6) }
   else
-    buttons_row.nodes = { btn("OK", "amu_close_prompt", panel, 3.0) }
+    buttons_row.nodes = { btn("OK", "amu_close_prompt", panel, 3.0, "amu_prompt_main") }
+  end
+
+  local list_row = { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
+    { n = G.UIT.C, config = { align = "tl", padding = 0.10, minw = w - 1.2, minh = content_h, r = 0.16, colour = panel, func = "amu_prompt_tick" }, nodes = text_rows }
+  }}
+
+  if need_bar then
+    local seg_h = content_h / S.SEGS
+    local seg_rows = {}
+    for i = 1, S.SEGS do
+      local cfg = { w = 0.3, h = seg_h, colour = S.track_col }
+      S.segs[i] = cfg
+      seg_rows[i] = { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = { { n = G.UIT.B, config = cfg } } }
+    end
+    S.paint()
+    list_row.nodes[#list_row.nodes+1] = { n = G.UIT.B, config = { h = 0.1, w = 0.12 } }
+    list_row.nodes[#list_row.nodes+1] = { n = G.UIT.C, config = { id = "amu_scr_track", align = "tm", padding = 0, minw = 0.3, minh = content_h,
+      r = 0.08, colour = S.track_col, collideable = true, hover = true, func = "amu_scroll_track" }, nodes = seg_rows }
   end
 
   local nodes = {
@@ -4490,18 +4783,12 @@ G.UIDEF.amu_restart_prompt = function(ref)
       { n = G.UIT.T, config = { text = ref.title or "Mod Updater", scale = 0.65, colour = purple, shadow = true } }
     }},
     buttons_row,
-    { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
-      { n = G.UIT.C, config = { align = "tl", padding = 0.10, minw = w - 1.0, minh = content_h, r = 0.16, colour = panel }, nodes = text_rows }
-    }},
+    list_row,
   }
 
-  if pages > 1 then
-    nodes[#nodes+1] = { n = G.UIT.R, config = { align = "cm", padding = 0.06 }, nodes = {
-      btn("< Prev", "amu_prompt_prev", ref.page > 1 and panel or bg, 2.2), gap,
-      { n = G.UIT.C, config = { align = "cm", minw = 2.4 }, nodes = {
-        { n = G.UIT.T, config = { text = "Page " .. ref.page .. " / " .. pages, scale = 0.45, colour = purple } }
-      }}, gap,
-      btn("Next >", "amu_prompt_next", ref.page < pages and panel or bg, 2.2),
+  if need_bar then
+    nodes[#nodes+1] = { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+      { n = G.UIT.T, config = { text = "Scroll: mouse wheel, drag the bar, right stick, or LB / RB", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } }
     }}
   end
 
@@ -4512,16 +4799,6 @@ G.UIDEF.amu_restart_prompt = function(ref)
   }
 end
 
-local function amu_prompt_goto(delta)
-  local pages = math.max(1, math.ceil(#(AMU_PROMPT.lines or {}) / AMU_PROMPT_PAGE_SIZE))
-  local target = math.max(1, math.min(pages, (AMU_PROMPT.page or 1) + delta))
-  if target == AMU_PROMPT.page then return end
-  AMU_PROMPT.page = target
-  close_overlay()
-  open_overlay(G.UIDEF.amu_restart_prompt(AMU_PROMPT))
-end
-function G.FUNCS.amu_prompt_next(e) amu_prompt_goto(1) end
-function G.FUNCS.amu_prompt_prev(e) amu_prompt_goto(-1) end
 
 function G.FUNCS.amu_close_prompt(e) close_overlay() end
 function G.FUNCS.amu_restart_now(e)
@@ -4542,7 +4819,7 @@ function G.FUNCS.amu_restart_now(e)
       "-SteamAppId", safe_quote(tostring(config.steam_appid or "2379780")),
       "-WaitProcessName", safe_quote("Balatro"),
     }, " ")
-    os.execute('start "" ' .. cmd)
+    AMU_RUN(cmd, true)
     love.event.quit()
     return
   end
@@ -4553,7 +4830,7 @@ function G.FUNCS.amu_restart_now(e)
     local okh, started = pcall(function() return AMU_CRASH_GUARD and AMU_CRASH_GUARD.relaunch_helper and AMU_CRASH_GUARD.relaunch_helper() end)
     if not (okh and started) then
       local url = "steam://rungameid/" .. tostring(config.steam_appid)
-      os.execute('start "" "' .. url .. '"')
+      pcall(love.system.openURL, url)
     end
   end
   love.event.quit()
@@ -4884,9 +5161,9 @@ function AMU_CRASH.run_revert(names)
 
   local channel = love.thread.getChannel("amu_crash_revert")
   channel:clear()
-  local thread_code = [[
+  local thread_code = AMU_HIDE_SRC .. [[
     local cmd = ...
-    local ok = pcall(function() os.execute(cmd) end)
+    local ok = pcall(function() amu_run(cmd) end)
     love.thread.getChannel("amu_crash_revert"):push(ok and "done" or "error")
   ]]
   love.thread.newThread(thread_code):start(cmd)
@@ -5272,6 +5549,14 @@ local function amu_hide_loading()
   end
 end
 
+-- Lets the manual "Check for updates now" (defined much earlier) show the same "Shuffling mods..." line on the main menu.
+AMU_LOADING_API = {
+  show = amu_show_loading,
+  hide = amu_hide_loading,
+  is_waiting = function() return AMU_LOADING.waiting end,
+  state = AMU_LOADING,
+}
+
 local function run_update_async(mods_dir, mod_path)
   pcall(write_ps1_config_overlay)
 
@@ -5304,7 +5589,7 @@ local function run_update_async(mods_dir, mod_path)
       local f = io.open(join_path(mod_path, "launcher_debug.json"), "wb")
       if f then f:write(encode_json(dbg)); f:close() end
     end)
-    os.execute('start "" ' .. cmd)
+    AMU_RUN(cmd, true)
     love.event.quit()
     return
   end
@@ -5316,7 +5601,7 @@ local function run_update_async(mods_dir, mod_path)
       "-ModsDir", safe_quote(winpath(mods_dir)),
       "-SelfDir", safe_quote(winpath(mod_path)),
     }, " ")
-    os.execute(cmd)
+    AMU_RUN(cmd)
     on_full_update_done(mod_path)
     return
   end
@@ -5332,9 +5617,9 @@ local function run_update_async(mods_dir, mod_path)
     "-SelfDir", safe_quote(winpath(mod_path)),
   }, " ")
 
-  local thread_code = [[
+  local thread_code = AMU_HIDE_SRC .. [[
     local cmd = ...
-    local ok = pcall(function() os.execute(cmd) end)
+    local ok = pcall(function() amu_run(cmd) end)
     local ch = love.thread.getChannel("amu_update_status")
     ch:push(ok and "done" or "error")
   ]]

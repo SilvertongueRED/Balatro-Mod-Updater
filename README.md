@@ -9,6 +9,14 @@ It notices changes to a mod you installed from its Git page, its GitHub Releases
 
 Auto-checking at startup is off by default. Turn it on in the mod's config tab.
 
+## What's new in 0.8.5
+- **The results window keeps your controller.** When the update results appear, the controller cursor starts on **Restart now** (or **OK**) and stays inside the window until you answer it. It can no longer wander off to COLLECTION, OPTIONS or QUIT behind it.
+- **Long results scroll.** Instead of pages, there is a scroll bar on the right. Drag it or click it, use the mouse wheel, push the right stick up or down, or press **LB** to go up and **RB** to go down (hold to keep going). The window is always the same size, so it can never run off the screen.
+- **No more PowerShell window.** Checking, restoring, switching forks, putting mods back and restarting the game now run completely hidden. (On Windows the Updater starts PowerShell with no window at all. If that ever fails it falls back to the old way with a hidden window.)
+- **The "no update source" note works again.** It now comes first in the results window and also shows up when nothing else was updated (before, it only showed if something had updated or failed). Untick **Show the 'no update source' note after update checks** on the No Source tab to turn it off.
+- **Webpage buttons.** The Fork Finder's "Page" button is now **Webpage**. Mod Toggles has a **Webpage** button to the left of each check box and Backups has one to the left of **Backups**. It opens where the mod came from: the fork you switched to, the link in its update.json (including links pasted in the No Source tab), its git remote, or its Nexus page. It is grey when no source is known.
+- **"Shuffling mods..." comes back during a manual check.** After pressing **Check for updates now**, the main menu shows the Shuffling mods line again until the check is done, even if you go back to it while the Config page still says Checking.
+
 ## What's new in 0.8.4
 - **Hold S clears the search, even while you are typing.** On Mod Toggles, Backups and Fork Finder, holding **S** on the keyboard for about half a second now empties the search box. Before, it only worked when the cursor was outside the box. A quick tap of S still jumps into the box, and holding **R3** on a controller still clears it.
 - **No more sideways jump after leaving the search box with a controller.** Pressing **B** (or Enter, or Esc) in the search box could push the whole tab to the right. The tab is now put back.
