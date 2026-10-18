@@ -9,6 +9,41 @@ It notices changes to a mod you installed from its Git page, its GitHub Releases
 
 Auto-checking at startup is off by default. Turn it on in the mod's config tab.
 
+## What's new in 0.8.3
+- **Bigger Config page.** The settings now fill the whole window: two panels with larger toggles, text and buttons, and room for the controller button hints.
+- **Easier Nexus key.** The Config page has a **How do I get a key?** button. It shows the steps and opens your Nexus account's API tab in the browser, and **Paste key** saves it. (Nexus only offers one-click sign-in to apps it has registered itself, so the key is still copied by hand.)
+- **Config page controller fix.** Up and Down on the right-hand buttons no longer jump to a toggle on the left.
+- **Close All Menus on the title line.** On every tab the red button now sits next to the page title with its "Hold B or press Esc" hint beside it, instead of in the corner.
+- **Bigger page selector** on every list tab, matching the size of the search box and Clear button.
+- **Bigger No Source tab**, sized like the other tabs.
+- **Updated mod description.** The Mod Updater page in Steamodded now shows four short cards (updates, search and sort, Fork Finder, crash protection) instead of a block of text.
+
+## What's new in 0.8.2
+- **Search on the Mod Toggles, Backups and Fork Finder tabs**, like in Balatro Mod Search and Sort. Type in the box next to the page selector and the list narrows while you type. Every word has to match the mod's name or folder name, in any order. **Clear** empties the box, and **Found x of y** shows how many match.
+  - Keyboard: press **S** to jump into the box and hold **S** to clear it. Controller: press **R3** (click the right stick), hold it to clear.
+  - On Mod Toggles, **All on / All off** change only the mods your search found while a search is active.
+  - The search is kept while you move between tabs and sub-screens. It empties when you leave the Mods menu.
+  - **Clear** empties the search right where you are: only the list changes, the menu does not reload.
+- **Bigger, roomier Mod Toggles, Backups and Fork Finder tabs**: larger text and buttons that use the whole window, with room for the controller button hints.
+- **Fork Finder can be sorted** like the other tabs: **A-Z**, or **Recent** (the mods whose newest fork was updated most recently first). Its search also matches the GitHub repository name.
+- **Crash recovery screen for crashes before the main menu.** If Balatro crashes while it is still starting, right after the updater updated some mods, you get a recovery screen instead of only the crash report. It offers **Put them all back and restart**, **Choose which mods to put back...**, and **Show the crash report** (nothing changes). It works with mouse, keyboard (arrows, Enter, Esc) and controller (D-pad or stick, A, B). Crashes after the main menu still get the normal crash report.
+- **Crash Detected question fixes:**
+  - On a controller, the cursor now starts on the question instead of the main menu behind it.
+  - The question always waits for the main menu. It no longer gets lost when the update check finishes while the game is still loading.
+  - After **Not now**, you are reliably asked again the next time the game starts.
+
+## What's new in 0.8.1
+- **A startup crash now asks you what to do instead of changing things by itself.** If Balatro did not reach the main menu right after the updater changed some mods, the next time the game gets to the main menu you see **Crash Detected** with the list of mods that were updated (version and time). Pick one:
+  - **Yes, put them all back**: every one of those mods goes back to the version you had before and is pinned. A window then lists what was put back, with **Restart now**.
+  - **Choose mods...**: one check box per mod, with **Revert selected**, **Revert all** and **Keep all** (plus **Tick all** / **Untick all**). Handy for finding the one that breaks the game: put half back, restart, see.
+  - **Not now**: nothing changes. You are asked again the next time you start the game, or press **Startup crash: review N mod(s)** in the Mod Updater settings.
+- Mods you keep stay suspects until the game has started fine once: if it crashes again, you are asked again, and `Undo last update.bat` can still undo them.
+- Works with mouse, keyboard (**Esc** = Not now) and controller (D-pad and A, **B** = Not now / Back, LB / RB turn the picker's pages).
+- **Works with "Auto-check at startup" off, too.** The crash is noticed by the game itself when it starts, not by the update check.
+- **`Undo last update.bat` lets you choose too.** Press Enter to put everything back, type numbers (for example `1,3`) for only some, or `K` to keep everything.
+- **Fixed:** pins made by `Undo last update.bat` were lost the next time the game started, so the mods could update to the broken version again. They are kept now, and the main menu tells you what was put back.
+- While you have not answered, those mods are not updated again.
+
 ## What's new in 0.8.0
 - **Switching goes back to the Fork Finder.** After you press **Switch to Fork** (or **Switch to Original / Parent**) you land on the Fork Finder list again instead of the main menu.
 - **Fork Finder finds the whole family now.** For a mod that is itself a fork it checks (1) the **Original** project, (2) the **Parent** it was forked from (when that is a different repo), (3) other forks of the parent/original (**Parent fork**) and (4) forks of *your own copy* (**Fork-fork**). Everything is compared against the copy you have installed, so "+N commits" means "N commits you don't have". Example: Redux Arcanum now finds `RakibRyan/Redux-Arcanum`, a fork of the fork you have installed.
@@ -71,8 +106,10 @@ Auto-checking at startup is off by default. Turn it on in the mod's config tab.
 - Old staged updates are removed automatically once you're current.
 
 ## If the game won't start after an update
-- **Automatic:** the next time the game reaches the main menu and the updater runs, it rolls back and pins the mods it last updated.
-- **By hand:** close Balatro and double-click **`Undo last update.bat`** in this folder.
+- **The game crashes while starting (before the main menu):** the Mod Updater's crash recovery screen appears instead of the crash report. It lists the mods it just updated. Choose **Put them all back and restart**, or **Choose which mods to put back...**, or **Show the crash report** to change nothing.
+- **The game reaches the main menu (after one failed start):** you get the **Crash Detected** question described in "What's new in 0.8.1". Nothing is changed until you answer.
+- **Neither screen shows up:** close Balatro and double-click **`Undo last update.bat`** in this folder. It lists the mods from the last update. Press **Enter** to put all of them back, type numbers like **1,3** for only some, or **K** to keep everything.
+- Put-back mods are **pinned**: they are not updated again until you unpin them in the **Backups** tab.
 
 ## Optional settings (`autoupdater_config.json`)
 - `github_token`: raises GitHub's limit from 60 to 5000 checks per hour. You don't need to edit this file: in the **Fork Finder** tab click **GitHub token** and follow the steps (free, read-only, takes about a minute).

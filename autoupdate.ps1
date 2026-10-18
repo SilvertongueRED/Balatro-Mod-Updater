@@ -8,7 +8,11 @@ param(
   [string]$SwitchModName = "",
   [string]$SwitchToForkRepo = "",
   [string]$SwitchBackModName = "",
-  [switch]$RollbackRecent
+  [switch]$RollbackRecent,
+  # With -RollbackRecent: a JSON file {"mods":["A","B"]} saying which mods to put back (the in-game picker writes it).
+  [string]$SelectionFile = "",
+  # With -RollbackRecent: list the mods and ask which ones to put back (used by "Undo last update.bat").
+  [switch]$Interactive
 )
 
 $ErrorActionPreference = "Stop"
@@ -117,6 +121,9 @@ $summaryPath           = Join-Path $selfDirResolved "last_run.json"
 $recentlyUpdatedPath   = Join-Path $selfDirResolved "_recently_updated.json"
 $launchSentinelPath    = Join-Path $selfDirResolved "_launch_sentinel"
 $crashReportPath       = Join-Path $selfDirResolved "_crash_rollback_report.json"
+# Mods that were updated right before a startup crash and are waiting for the player's decision
+# (put back / keep). Written by main.lua (or by this script), answered in game or by "Undo last update.bat".
+$crashPendingPath      = Join-Path $selfDirResolved "_crash_pending.json"
 $forkSuggestionsPath   = Join-Path $selfDirResolved "fork_suggestions.json"
 
 
@@ -201,7 +208,7 @@ function Backup-Folder([string]$folderPath, [string]$folderName) {
 $script:SelfKeepNames = @(
   "config.lua", "autoupdater_config.json", "changelogs.json", "toggle_snapshot.json",
   "update.json", "update.json.off", ".autoupdater_state.json", ".framework_state.json",
-  "fork_suggestions.json", "last_run.json", "_recently_updated.json", "launcher_debug.json",
+  "fork_suggestions.json", "last_run.json", "_recently_updated.json", "_crash_pending.json", "launcher_debug.json",
   "pending_apply_log.json", "pending_apply.json", "_pending_framework_updates"
 )
 
@@ -300,20 +307,20 @@ if ($config.pinned_mods) {
   }
 }
 
-# ---- Sentinel-based crash detection ----
+# ---- Startup-crash detection and the "put the old versions back?" question ----
 # Only active in normal update mode (not restore-only and not single-mod target).
 #
-# How it works (fixed in 0.7.0 - previously the sentinel was written right after the
-# update ran, in the same session, so a crash on the NEXT launch was never detected):
-#   * PS1 writes _recently_updated.json after updating, and deletes the old sentinel/flags.
+# How it works:
+#   * This script writes _recently_updated.json after updating (and deletes the old sentinel/flags).
 #   * main.lua writes _launch_attempt very early while the game is loading, and
 #     _launch_sentinel once the main menu is reached.
-#   * If main.lua starts and finds _launch_attempt but no _launch_sentinel, the previous
-#     launch never reached the menu, so it writes _crash_flag.
-#   * Next PS1 run: _crash_flag present -> roll back + pin the recently updated mods.
-#                   sentinel present    -> the update was fine, clean up.
-#   * -RollbackRecent (used by "Undo last update.bat") forces the rollback from outside
-#     the game, for when Balatro won't start at all.
+#   * If main.lua starts and finds _launch_attempt but no _launch_sentinel, the previous launch never reached
+#     the menu. main.lua then moves the mods from _recently_updated.json into _crash_pending.json and ASKS the
+#     player in game: put them all back / choose which / keep them. (If this script sees _crash_flag first, it
+#     does the same move.)
+#   * Nothing is put back until the player decides. While a decision is waiting, those mods are not updated again.
+#   * -RollbackRecent puts mods back and pins them. It is used by the in-game question (with -SelectionFile) and by
+#     "Undo last update.bat" (with -Interactive), which also works when Balatro won't start at all.
 $launchAttemptPath = Join-Path $selfDirResolved "_launch_attempt"
 $crashFlagPath     = Join-Path $selfDirResolved "_crash_flag"
 
@@ -323,73 +330,208 @@ function Clear-LaunchMarkers() {
   }
 }
 
+# JSON dates may come back as DateTime objects; keep them as ISO text so the game can read them.
+function ConvertTo-IsoText($v) {
+  if ($null -eq $v) { return "" }
+  if ($v -is [datetime]) { return $v.ToString("o") }
+  return [string]$v
+}
+
+# The mods that could have caused a startup crash: the ones waiting for a decision plus the ones from the last update.
+function Get-CrashCandidates() {
+  $byName = [ordered]@{}
+  $recent = Read-JsonIfExists $recentlyUpdatedPath
+  if ($recent) { foreach ($e in @($recent)) { if ($e.mod_name) { $byName[[string]$e.mod_name] = $e } } }
+  $pend = Read-JsonIfExists $crashPendingPath
+  if ($pend -and $pend.mods) { foreach ($e in @($pend.mods)) { if ($e.mod_name) { $byName[[string]$e.mod_name] = $e } } }
+  return @($byName.Values)
+}
+
+# One clean, plain entry (text only) for the files that main.lua also reads.
+function New-CrashEntry($e) {
+  return [ordered]@{
+    mod_name           = [string]$e.mod_name
+    backup_file        = [string]$e.backup_file
+    updated_to_version = [string]$e.updated_to_version
+    updated_at         = (ConvertTo-IsoText $e.updated_at)
+  }
+}
+
+# Remember the mods from the last update as "waiting for a decision". No mod files are touched.
+function Save-CrashPending($entries) {
+  $merged = [ordered]@{}
+  $old = Read-JsonIfExists $crashPendingPath
+  if ($old -and $old.mods) { foreach ($e in @($old.mods)) { if ($e.mod_name) { $merged[[string]$e.mod_name] = $e } } }
+  foreach ($e in @($entries)) { if ($e.mod_name) { $merged[[string]$e.mod_name] = $e } }
+  $list = @()
+  foreach ($e in $merged.Values) { $list += New-CrashEntry $e }
+  Save-JsonNoBom $crashPendingPath ([ordered]@{ detected_at = (Get-Date).ToString("o"); mods = @($list) })
+}
+
+# Put the previous version of each mod back and pin it so it is not updated again until the player unpins it.
+# $entries = the mods to put back; $keptNames = mods that were offered but are staying as they are.
+function Invoke-CrashRollback($entries, $keptNames) {
+  if (-not $config.pinned_mods) { $config.pinned_mods = [PSCustomObject]@{} }
+  $rollbackReport = @{ rolled_back_at = (Get-Date).ToString("o"); mods = @(); kept = @($keptNames) }
+
+  foreach ($entry in @($entries)) {
+    $modName    = [string]$entry.mod_name
+    $backupFile = [string]$entry.backup_file
+    $crashedVer = if ($entry.updated_to_version) { [string]$entry.updated_to_version } else { "" }
+    if (-not $modName) { continue }
+
+    try {
+      if ($backupFile -and (Test-Path -LiteralPath (Join-Path $backupRoot $backupFile))) {
+        Restore-ModBackup $modName $backupFile
+
+        # Pin the mod to prevent it re-updating until the user unpins it
+        $pinInfo = [PSCustomObject]@{
+          pinned           = $true
+          backup_file      = $backupFile
+          pinned_at        = (Get-Date).ToString("o")
+          auto_rolled_back = $true
+          crashed_version  = $crashedVer
+        }
+        $config.pinned_mods | Add-Member -NotePropertyName $modName -NotePropertyValue $pinInfo -Force
+        $skipSet[$modName]   = $true
+        $pinnedSet[$modName] = $true
+
+        $summary.skipped_mods += "$modName (put back to the previous version after a startup crash)"
+        $rollbackReport.mods  += @{ mod_name = $modName; backup_file = $backupFile; crashed_version = $crashedVer }
+      } else {
+        $errMsg = if ($backupFile) { "backup file not found: $backupFile" } else { "no backup file recorded" }
+        $summary.errors      += "Rollback skipped for ${modName}: $errMsg"
+        $rollbackReport.mods += @{ mod_name = $modName; backup_file = $backupFile; error = $errMsg }
+      }
+    } catch {
+      $summary.errors      += "Rollback failed for ${modName}: $($_.Exception.Message)"
+      $rollbackReport.mods += @{ mod_name = $modName; backup_file = $backupFile; error = $_.Exception.Message }
+    }
+  }
+
+  # Persist the updated config so the Lua side also knows about the new pins on next run
+  try { Save-JsonNoBom $configPath $config } catch {
+    $summary.errors += "Failed to save config after crash rollback: $($_.Exception.Message)"
+  }
+
+  # Write the report so the game can tell the player what was put back
+  if ($rollbackReport.mods.Count -gt 0) {
+    try { Save-JsonNoBom $crashReportPath $rollbackReport } catch {
+      $summary.errors += "Failed to write crash rollback report: $($_.Exception.Message)"
+    }
+  }
+  return $rollbackReport
+}
+
+# For "Undo last update.bat": list the mods and ask which to put back.
+# Returns the chosen entries (an empty list = keep everything).
+function Read-CrashChoice($cands) {
+  Write-Host ""
+  Write-Host "Mods that were updated last time (the likely cause if Balatro will not start):"
+  Write-Host ""
+  for ($i = 0; $i -lt $cands.Count; $i++) {
+    $c = $cands[$i]
+    $when = ""
+    try { if ($c.updated_at) { $when = "   (updated " + ([datetime]$c.updated_at).ToString("yyyy-MM-dd HH:mm") + ")" } } catch {}
+    $note = if ($c.backup_file) { "" } else { "   - no backup saved, cannot be put back" }
+    Write-Host ("  {0,2})  {1}{2}{3}" -f ($i + 1), $c.mod_name, $when, $note)
+  }
+  Write-Host ""
+  Write-Host "  A      = put back the previous version of ALL of them (just press Enter)"
+  Write-Host "  1,3    = put back only those numbers (separate with commas)"
+  Write-Host "  K      = keep everything as it is"
+  Write-Host ""
+  while ($true) {
+    $ans = ""
+    try { $ans = [string](Read-Host "Your choice") } catch { return @($cands) }   # no console: act like the old 'undo everything'
+    $ans = $ans.Trim()
+    if ($ans -eq "" -or $ans -match '^(a|all)$') { return @($cands) }
+    if ($ans -match '^(k|keep|n|no|q|quit)$') { return @() }
+    $picked = @(); $seen = @{}; $bad = $false
+    foreach ($tok in ($ans -split '[,\s;]+')) {
+      if ($tok -eq "") { continue }
+      $n = 0
+      if ([int]::TryParse($tok, [ref]$n) -and $n -ge 1 -and $n -le $cands.Count) {
+        if (-not $seen.ContainsKey($n)) { $seen[$n] = $true; $picked += $cands[$n - 1] }
+      } else { $bad = $true }
+    }
+    if (-not $bad -and $picked.Count -gt 0) { return @($picked) }
+    Write-Host "  Please type A, K, or numbers from the list (for example 1,3)."
+  }
+}
+
+$crashPendingSet = @{}
 if ($RestoreModName -eq "" -and $TargetMod -eq "") {
   $sentinelExists    = Test-Path -LiteralPath $launchSentinelPath
   $recentlyUpdExists = Test-Path -LiteralPath $recentlyUpdatedPath
-  $crashFlagExists   = (Test-Path -LiteralPath $crashFlagPath) -or $RollbackRecent
+  $crashFlagExists   = Test-Path -LiteralPath $crashFlagPath
 
-  if ($RollbackRecent -and -not $recentlyUpdExists) {
-    $summary.errors += "Undo last update: nothing to undo (_recently_updated.json not found)."
-  }
-
-  if ($recentlyUpdExists -and -not $crashFlagExists -and $sentinelExists) {
-    # Game reached the main menu after the last update. Clean up.
-    Remove-Item -LiteralPath $recentlyUpdatedPath -Force -ErrorAction SilentlyContinue
-    Clear-LaunchMarkers
-  } elseif ($recentlyUpdExists -and $crashFlagExists) {
-    # A launch after the last update never reached the main menu (or the user asked to undo).
-    $recentlyUpdated = Read-JsonIfExists $recentlyUpdatedPath
-    if ($recentlyUpdated) {
-      if (-not $config.pinned_mods) { $config.pinned_mods = [PSCustomObject]@{} }
-      $rollbackReport = @{ rolled_back_at = (Get-Date).ToString("o"); mods = @() }
-
-      foreach ($entry in $recentlyUpdated) {
-        $modName    = [string]$entry.mod_name
-        $backupFile = [string]$entry.backup_file
-        $crashedVer = if ($entry.updated_to_version) { [string]$entry.updated_to_version } else { "" }
-        if (-not $modName) { continue }
-
-        try {
-          if ($backupFile -and (Test-Path -LiteralPath (Join-Path $backupRoot $backupFile))) {
-            Restore-ModBackup $modName $backupFile
-
-            # Pin the mod to prevent it re-updating until the user unpins it
-            $pinInfo = [PSCustomObject]@{
-              pinned           = $true
-              backup_file      = $backupFile
-              pinned_at        = (Get-Date).ToString("o")
-              auto_rolled_back = $true
-              crashed_version  = $crashedVer
-            }
-            $config.pinned_mods | Add-Member -NotePropertyName $modName -NotePropertyValue $pinInfo -Force
-            $skipSet[$modName]   = $true
-            $pinnedSet[$modName] = $true
-
-            $summary.skipped_mods += "$modName (auto-rolled-back after startup crash)"
-            $rollbackReport.mods  += @{ mod_name = $modName; backup_file = $backupFile; crashed_version = $crashedVer }
-          } else {
-            $errMsg = if ($backupFile) { "backup file not found: $backupFile" } else { "no backup file recorded" }
-            $summary.errors      += "Auto-rollback skipped for ${modName}: $errMsg"
-            $rollbackReport.mods += @{ mod_name = $modName; backup_file = $backupFile; error = $errMsg }
-          }
-        } catch {
-          $summary.errors      += "Auto-rollback failed for ${modName}: $($_.Exception.Message)"
-          $rollbackReport.mods += @{ mod_name = $modName; backup_file = $backupFile; error = $_.Exception.Message }
+  if ($RollbackRecent) {
+    # The player asked for it (in-game question or "Undo last update.bat").
+    $cands = @(Get-CrashCandidates)
+    if ($cands.Count -eq 0) {
+      $summary.errors += "Undo last update: nothing to undo (no recently updated mods are recorded)."
+    } else {
+      $chosen = $cands
+      $selectionOk = $true
+      if ($SelectionFile -ne "") {
+        $selectionOk = $false
+        $sel = Read-JsonIfExists $SelectionFile
+        if ($sel -and $null -ne $sel.mods) {
+          $want = @{}
+          foreach ($n in @($sel.mods)) { $want[[string]$n] = $true }
+          $chosen = @($cands | Where-Object { $want.ContainsKey([string]$_.mod_name) })
+          $selectionOk = $true
+        } else {
+          $summary.errors += "Undo last update: couldn't read the selection file, so nothing was changed."
         }
+      } elseif ($Interactive) {
+        $chosen = @(Read-CrashChoice $cands)
       }
 
-      # Persist the updated config so the Lua side also knows about the new pins on next run
-      try { Save-JsonNoBom $configPath $config } catch {
-        $summary.errors += "Failed to save config after crash rollback: $($_.Exception.Message)"
-      }
-
-      # Write the crash rollback report so the Lua mod can notify the user in-game
-      if ($rollbackReport.mods.Count -gt 0) {
-        try { Save-JsonNoBom $crashReportPath $rollbackReport } catch {
-          $summary.errors += "Failed to write crash rollback report: $($_.Exception.Message)"
+      if ($selectionOk) {
+        $chosenNames = @{}
+        foreach ($c in $chosen) { $chosenNames[[string]$c.mod_name] = $true }
+        $kept = @($cands | Where-Object { -not $chosenNames.ContainsKey([string]$_.mod_name) } | ForEach-Object { [string]$_.mod_name })
+        if ($chosen.Count -gt 0) {
+          [void](Invoke-CrashRollback $chosen $kept)
+        } elseif ($Interactive) {
+          Write-Host ""
+          Write-Host "Nothing was changed."
+        }
+        # The question is answered: nothing is waiting any more.
+        Remove-Item -LiteralPath $crashPendingPath   -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $recentlyUpdatedPath -Force -ErrorAction SilentlyContinue
+        Clear-LaunchMarkers
+        # Mods that stay as they are remain suspects until the game has started fine once: the next launch
+        # tests them again (and asks again if it fails too), and "Undo last update.bat" can still find them.
+        $stillSuspect = @($cands | Where-Object { -not $chosenNames.ContainsKey([string]$_.mod_name) })
+        if ($stillSuspect.Count -gt 0) {
+          $again = @(); foreach ($e in $stillSuspect) { $again += New-CrashEntry $e }
+          try { Save-JsonNoBom $recentlyUpdatedPath @($again) } catch {
+            $summary.errors += "Couldn't remember the mods you kept: $($_.Exception.Message)"
+          }
         }
       }
     }
+    if ($SelectionFile -ne "") { Remove-Item -LiteralPath $SelectionFile -Force -ErrorAction SilentlyContinue }
+  } elseif ($recentlyUpdExists -and $crashFlagExists) {
+    # A launch after the last update never reached the main menu. Don't change any mod on our own: keep the list
+    # for the in-game question (put all back / choose / keep).
+    $recentlyUpdated = Read-JsonIfExists $recentlyUpdatedPath
+    $parked = $true
+    if ($recentlyUpdated) {
+      try { Save-CrashPending @($recentlyUpdated) } catch {
+        $parked = $false
+        $summary.errors += "Couldn't save the list of mods to ask about after the crash: $($_.Exception.Message)"
+      }
+    }
+    if ($parked) {
+      Remove-Item -LiteralPath $recentlyUpdatedPath -Force -ErrorAction SilentlyContinue
+      Clear-LaunchMarkers
+    }
+  } elseif ($recentlyUpdExists -and $sentinelExists) {
+    # Game reached the main menu after the last update. Clean up.
     Remove-Item -LiteralPath $recentlyUpdatedPath -Force -ErrorAction SilentlyContinue
     Clear-LaunchMarkers
   } elseif (-not $recentlyUpdExists) {
@@ -397,6 +539,16 @@ if ($RestoreModName -eq "" -and $TargetMod -eq "") {
     Clear-LaunchMarkers
   }
   # else: update applied but the game hasn't been relaunched yet. Keep waiting.
+
+  # Mods waiting for the player's decision are left alone (not updated again) until it is made.
+  if (-not $RollbackRecent) {
+    $pendNow = Read-JsonIfExists $crashPendingPath
+    if ($pendNow -and $pendNow.mods) {
+      foreach ($e in @($pendNow.mods)) {
+        if ($e.mod_name) { $crashPendingSet[[string]$e.mod_name] = $true; $skipSet[[string]$e.mod_name] = $true }
+      }
+    }
+  }
 }
 
 if ($RollbackRecent) {
@@ -1424,6 +1576,8 @@ try {
           }
         }
         $summary.skipped_mods += $skippedMsg
+      } elseif ($crashPendingSet.ContainsKey($name)) {
+        $summary.skipped_mods += "$name (not updated: waiting for your answer about the startup crash)"
       } else {
         $summary.skipped_mods += "$name (updates disabled)"
       }

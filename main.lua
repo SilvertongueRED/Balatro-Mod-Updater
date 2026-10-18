@@ -1,4 +1,4 @@
--- Mod Updater (Steamodded) v0.8.0
+-- Mod Updater (Steamodded) v0.8.3
 -- In-game config with two tabs: Settings (general + Nexus key + check now) and Mod Toggles (paginated).
 -- Uses Steamodded's DynamicUIManager for proper pagination.
 -- Git pull mode: rebase (default and recommended).
@@ -95,6 +95,12 @@ local amu_run_fork_scan
 do
   local mp = mod and mod.path
   if mp and mp ~= "" then
+    -- Crash recovery screen for crashes BEFORE the main menu (crash_guard.lua). Lovely normally loads it at the very
+    -- start of the game (lovely.toml); load it here too in case that did not happen. Tell it where this folder is.
+    pcall(function()
+      if not (AMU_CRASH_GUARD and AMU_CRASH_GUARD.installed) then dofile(join_path(mp, "crash_guard.lua")) end
+      if AMU_CRASH_GUARD then AMU_CRASH_GUARD.mod_dir = (tostring(mp):gsub("[/\\]+$", "")) end
+    end)
     local function touch(name)
       pcall(function()
         local f = io.open(join_path(mp, name), "wb")
@@ -113,6 +119,7 @@ do
     if orig_main_menu then
       function Game:main_menu(...)
         if not wrote then wrote = true; touch("_launch_sentinel") end
+        if AMU_CRASH_GUARD then AMU_CRASH_GUARD.reached_menu = true end   -- crashes from now on get the normal report
         return orig_main_menu(self, ...)
       end
     end
@@ -193,6 +200,185 @@ local function show_msg(title, msg, buttons, mtype)
   if love and love.window and love.window.showMessageBox then
     love.window.showMessageBox(title, msg, buttons or {"OK"}, mtype or "info")
   end
+end
+
+---------------------------------------------------------------------------
+-- CRASH RECOVERY - data side
+-- When the game does not reach the main menu after an update, the mods that were
+-- updated are kept in _crash_pending.json until the player answers: put them all
+-- back / choose which / keep them. The screens and actions are further down.
+-- Everything lives in this ONE table because Lua allows only 200 top-level locals per file.
+---------------------------------------------------------------------------
+local AMU_CRASH = {
+  mods = {},          -- waiting for an answer: list of { mod_name, backup_file, updated_to_version, updated_at }
+  sel = {},           -- picker check boxes: sel[mod_name] == true means "put this one back"
+  page = 1,           -- picker page
+  busy = false,       -- a put-back is running
+  shown = false,      -- the question was already put on screen this session
+  in_flight = false,  -- an update run is going; the question waits for it
+  extra_note = nil,   -- line under the question, e.g. "Also updated 2 other mod(s) just now."
+}
+
+function AMU_CRASH.path(name) return join_path(amu_mod_path(), name) end
+
+-- The JSON files hold a list, but PowerShell writes a one-item list as a single object. Accept both.
+function AMU_CRASH.as_list(v)
+  if type(v) == "string" then return { v } end
+  if type(v) ~= "table" then return {} end
+  if v.mod_name ~= nil then return { v } end
+  return v
+end
+
+function AMU_CRASH.clean_entry(e)
+  if type(e) ~= "table" or type(e.mod_name) ~= "string" or e.mod_name == "" then return nil end
+  return {
+    mod_name = e.mod_name,
+    backup_file = type(e.backup_file) == "string" and e.backup_file or "",
+    updated_to_version = (e.updated_to_version ~= nil) and tostring(e.updated_to_version) or "",
+    updated_at = type(e.updated_at) == "string" and e.updated_at or "",
+  }
+end
+
+-- _crash_pending.json -> list of clean entries
+function AMU_CRASH.read_pending()
+  local out = {}
+  local data = decode_json(read_all(AMU_CRASH.path("_crash_pending.json")) or "")
+  if type(data) == "table" then
+    for _, e in ipairs(AMU_CRASH.as_list(data.mods)) do
+      local c = AMU_CRASH.clean_entry(e)
+      if c then out[#out + 1] = c end
+    end
+  end
+  return out
+end
+
+function AMU_CRASH.write_json(name, value)
+  local f = io.open(AMU_CRASH.path(name), "wb")
+  if not f then return false end
+  f:write(encode_json(value))
+  f:close()
+  return true
+end
+
+function AMU_CRASH.write_pending(list)
+  return AMU_CRASH.write_json("_crash_pending.json", { detected_at = os.date("!%Y-%m-%dT%H:%M:%SZ"), mods = list })
+end
+
+-- At load time: "the last launch never reached the menu" (autoupdate.ps1 left _crash_flag next to the list of mods
+-- it updated) becomes a pending question. Nothing is reverted here; the player decides on the main menu.
+-- Done here, in Lua, so it works even when the auto-check at startup is off.
+function AMU_CRASH.park_at_load()
+  local flag, recent = AMU_CRASH.path("_crash_flag"), AMU_CRASH.path("_recently_updated.json")
+  if not (file_exists(flag) and file_exists(recent)) then return end
+  local data = decode_json(read_all(recent) or "")
+  if type(data) ~= "table" then return end      -- unreadable: leave it for autoupdate.ps1
+  local merged, index = {}, {}
+  for _, e in ipairs(AMU_CRASH.read_pending()) do
+    merged[#merged + 1] = e
+    index[e.mod_name] = #merged
+  end
+  for _, e in ipairs(AMU_CRASH.as_list(data)) do
+    local c = AMU_CRASH.clean_entry(e)
+    if c then
+      if index[c.mod_name] then
+        merged[index[c.mod_name]] = c
+      else
+        merged[#merged + 1] = c
+        index[c.mod_name] = #merged
+      end
+    end
+  end
+  if AMU_CRASH.write_pending(merged) then
+    pcall(os.remove, recent)
+    pcall(os.remove, flag)
+  end
+end
+pcall(AMU_CRASH.park_at_load)
+
+-- Keep these mods as suspects: the next launch tests them again, and asks again if that one fails too.
+function AMU_CRASH.rearm(list)
+  if not AMU_CRASH.write_json("_recently_updated.json", list) then return false end
+  for _, n in ipairs({ "_launch_attempt", "_launch_sentinel", "_crash_flag" }) do pcall(os.remove, AMU_CRASH.path(n)) end
+  return true
+end
+
+-- Reload what is waiting for an answer. Returns how many mods are waiting.
+function AMU_CRASH.load()
+  local list = AMU_CRASH.read_pending()
+  table.sort(list, function(a, b) return a.mod_name:lower() < b.mod_name:lower() end)
+  AMU_CRASH.mods = list
+  local known = {}
+  for _, e in ipairs(list) do
+    known[e.mod_name] = true
+    if AMU_CRASH.sel[e.mod_name] == nil then AMU_CRASH.sel[e.mod_name] = true end   -- everything ticked at first
+  end
+  for k in pairs(AMU_CRASH.sel) do
+    if not known[k] then AMU_CRASH.sel[k] = nil end
+  end
+  return #list
+end
+
+-- "2026-10-17 18:30" from the ISO time autoupdate.ps1 writes
+function AMU_CRASH.when(e)
+  local y, mo, d, h, mi = tostring(e.updated_at or ""):match("^(%d%d%d%d)%-(%d%d)%-(%d%d)[T ](%d%d):(%d%d)")
+  if y then return y .. "-" .. mo .. "-" .. d .. " " .. h .. ":" .. mi end
+  return ""
+end
+
+-- short version text: a long commit id becomes its first 7 characters
+function AMU_CRASH.ver(e)
+  local v = tostring(e.updated_to_version or "")
+  if v:match("^%x+$") and #v > 7 then v = v:sub(1, 7) end
+  if #v > 14 then v = v:sub(1, 13) .. ".." end
+  return v
+end
+
+function AMU_CRASH.detail(e)
+  local parts = {}
+  local v, w = AMU_CRASH.ver(e), AMU_CRASH.when(e)
+  if v ~= "" then parts[#parts + 1] = "now " .. v end
+  if w ~= "" then parts[#parts + 1] = "updated " .. w end
+  return table.concat(parts, "   ")
+end
+
+function AMU_CRASH.label(e)
+  local d = AMU_CRASH.detail(e)
+  if d == "" then return e.mod_name end
+  return e.mod_name .. "   (" .. d .. ")"
+end
+
+-- Apply a put-back report (_crash_rollback_report.json) to this mod's own settings: the put-back mods are pinned and
+-- their updates are off. Returns three lists: put back, could not be put back (with the reason), kept as they are.
+function AMU_CRASH.apply_report(report)
+  local reverted, failed, kept = {}, {}, {}
+  if type(report) ~= "table" then return reverted, failed, kept end
+  config.mod_pinned = config.mod_pinned or {}
+  config.mod_update_enabled = config.mod_update_enabled or {}
+  for _, entry in ipairs(AMU_CRASH.as_list(report.mods)) do
+    if type(entry) == "table" and entry.mod_name then
+      if entry.error then
+        failed[#failed + 1] = tostring(entry.mod_name) .. " - " .. tostring(entry.error)
+      else
+        reverted[#reverted + 1] = tostring(entry.mod_name)
+        config.mod_pinned[entry.mod_name] = {
+          pinned = true,
+          backup_file = tostring(entry.backup_file or ""),
+          pinned_at = tostring(report.rolled_back_at or os.date("!%Y-%m-%dT%H:%M:%SZ")),
+          auto_rolled_back = true,
+        }
+        config.mod_update_enabled[entry.mod_name] = false
+      end
+    end
+  end
+  for _, n in ipairs(AMU_CRASH.as_list(report.kept)) do kept[#kept + 1] = tostring(n) end
+  return reverted, failed, kept
+end
+
+-- A put-back made while the game was closed ("Undo last update.bat") saved its pins only in autoupdater_config.json.
+-- Adopt them before anything rewrites that file from this mod's own settings (see write_ps1_config_overlay).
+function AMU_CRASH.adopt_report_pins_at_load()
+  local data = decode_json(read_all(AMU_CRASH.path("_crash_rollback_report.json")) or "")
+  if type(data) == "table" then AMU_CRASH.apply_report(data) end
 end
 
 ---------------------------------------------------------------------------
@@ -349,6 +535,9 @@ local function scan_mods_and_init_config()
 end
 
 pcall(scan_mods_and_init_config)
+-- A put-back made while the game was closed ("Undo last update.bat") saved its pins only in autoupdater_config.json.
+-- Adopt them now, before anything rewrites that file from this mod's own settings.
+pcall(AMU_CRASH.adopt_report_pins_at_load)
 
 ---------------------------------------------------------------------------
 -- WRITE SKIP LIST + MERGED CONFIG for the PowerShell script
@@ -674,8 +863,9 @@ end
 local MODS_PER_PAGE = 7
 local AMU_CONFIG_PAGE = 1
 -- Sort pill ("Now: ...") and button ("Next: ...") text, one pair per screen
-local amu_sort_label = { toggles_now = "A-Z", toggles_next = "Next: Recent", backups_now = "A-Z", backups_next = "Next: Recent" }
-local amu_nosrc_msg = amu_status_tbl(0.27, 9.4, "")
+local amu_sort_label = { toggles_now = "A-Z", toggles_next = "Next: Recent", backups_now = "A-Z", backups_next = "Next: Recent",
+  forks_now = "A-Z", forks_next = "Next: Recent" }
+local amu_nosrc_msg = amu_status_tbl(0.32, 14.4, "")
 local AMU_NOSRC_PAGE = 1
 
 -- Backup browser state (forward-declared; build_backup_mods_page defined after open_overlay)
@@ -693,9 +883,10 @@ local load_fork_suggestions  -- forward declaration; assigned after open_overlay
 local get_fork_mod_entries   -- forward declaration; assigned after open_overlay/close_overlay
 local build_fork_mods_page   -- forward declaration; assigned after close_overlay is defined
 -- Fixed list sizes: every page of a list is exactly this big, so tabs never grow, shrink or overflow.
-local AMU_BK_PER, AMU_BK_ROW_H, AMU_BK_W, AMU_BK_H = 6, 0.72, 11.9, 4.32
-local AMU_FORK_PER, AMU_FORK_ROW_H, AMU_FORK_W, AMU_FORK_H = 6, 0.5, 9.8, 3.24
-local AMU_NS_PER, AMU_NS_W, AMU_NS_H = 7, 9.6, 3.9
+local AMU_BK_PER, AMU_BK_ROW_H, AMU_BK_W, AMU_BK_H = 6, 0.78, 15.2, 6 * 0.78
+local AMU_FORK_PER, AMU_FORK_ROW_H, AMU_FORK_W, AMU_FORK_H = 6, 0.72, 15.2, 6 * 0.72
+local AMU_NS_ROW_H = 0.72
+local AMU_NS_PER, AMU_NS_W, AMU_NS_H = 6, 15.2, 6 * 0.72
 local amu_fork_filter_label = { text = "" }
 local amu_fork_filter_text    -- assigned with the Fork Finder code
 local amu_fork_tr_label = { text = "" }
@@ -833,6 +1024,173 @@ local function get_sorted_mod_entries(mode)
   return entries
 end
 
+---------------------------------------------------------------------------
+-- SEARCH on the Mod Toggles and Backups tabs (same idea as Balatro Mod Search and Sort):
+-- a text box next to the page selector, the list narrows while you type, every word has to match.
+-- S (keyboard) or R3 (press the right stick) jumps into the box; holding it clears the box.
+-- Everything lives in this ONE table because Lua allows only 200 top-level locals per file.
+---------------------------------------------------------------------------
+local AMU_FIND = {
+  MAX = 20,                                   -- longest search text
+  HOLD = 0.6,                                 -- seconds to hold S / R3 to clear the box
+  toggles = { text = "" },                    -- the text boxes write what you type into these
+  backups = { text = "" },
+  forks   = { text = "" },
+  KINDS   = { "toggles", "backups", "forks" },
+  applied = { toggles = "", backups = "", forks = "" },   -- (normalised) text the list is showing right now
+  info    = { toggles = { text = "" }, backups = { text = "" }, forks = { text = "" } },   -- "Found 3 of 71" / the hint
+  total   = { toggles = 0, backups = 0, forks = 0 },
+  shown   = { toggles = 0, backups = 0, forks = 0 },
+  pager   = {},                               -- the page selector's settings, per tab
+  pending = {},                               -- a list refresh is already queued
+  source  = {},                               -- which = function(mode) -> sorted list (default: all mods)
+  list_id = { toggles = "amu_mod_toggle_list", backups = "amu_backup_mod_list", forks = "amu_fork_mod_list" },
+  hold    = nil,                              -- { id = "s" | "rightstick", t0, fired, which }
+  installed = false,
+}
+
+function AMU_FIND.words(text)
+  local words = {}
+  for w in string.gmatch(tostring(text or ""):lower(), "%S+") do words[#words + 1] = w end
+  return words, table.concat(words, " ")
+end
+
+function AMU_FIND.active(which)
+  return #AMU_FIND.words(AMU_FIND[which].text) > 0
+end
+
+function AMU_FIND.set_info(which)
+  local i = AMU_FIND.info[which]
+  if AMU_FIND.active(which) then
+    i.text = "Found " .. AMU_FIND.shown[which] .. " of " .. AMU_FIND.total[which]
+  else
+    i.text = "S / R3 = search"
+  end
+end
+
+-- The mods this tab shows right now: sorted like before, then narrowed by the search.
+-- Every word typed has to appear in the mod's name or its folder name.
+function AMU_FIND.entries(which, mode)
+  local src = AMU_FIND.source[which]
+  local all = src and src(mode) or get_sorted_mod_entries(mode)
+  local words = AMU_FIND.words(AMU_FIND[which].text)
+  local out = all
+  if #words > 0 then
+    out = {}
+    for _, e in ipairs(all) do
+      local hay = (tostring(e.display or "") .. " " .. tostring(e.folder or "") .. " "
+        .. tostring(e.installed_repo or "")):lower()
+      local good = true
+      for _, w in ipairs(words) do
+        if not string.find(hay, w, 1, true) then good = false; break end
+      end
+      if good then out[#out + 1] = e end
+    end
+  end
+  AMU_FIND.total[which], AMU_FIND.shown[which] = #all, #out
+  AMU_FIND.set_info(which)
+  return out
+end
+
+function AMU_FIND.walk(node, fn)
+  if type(node) ~= "table" then return end
+  fn(node)
+  if type(node.nodes) == "table" then
+    for _, c in ipairs(node.nodes) do AMU_FIND.walk(c, fn) end
+  end
+end
+
+-- The page selector keeps its options in one table (its arrows read it every time they are used).
+function AMU_FIND.find_args(node)
+  local found
+  AMU_FIND.walk(node, function(n)
+    local c = n.config
+    if not found and type(c) == "table" and type(c.ref_table) == "table" and type(c.ref_table.options) == "table" then
+      found = c.ref_table
+    end
+  end)
+  return found
+end
+
+-- The search narrowed (or widened) the list: rewrite the "Page x/y" selector to match.
+function AMU_FIND.sync_pager(which, pages, page)
+  local a = AMU_FIND.pager[which]
+  if type(a) ~= "table" then return end
+  pages = math.max(1, pages)
+  page = math.max(1, math.min(tonumber(page) or 1, pages))
+  local opts = {}
+  for i = 1, pages do opts[i] = "Page " .. i .. "/" .. pages end
+  a.options = opts
+  a.current_option = page
+  a.current_option_val = opts[page]
+end
+
+function AMU_FIND.owns_hook(h)
+  if not (h and h.config and type(h.config.ref_table) == "table") then return false end
+  local r = h.config.ref_table.ref_table
+  return r ~= nil and (r == AMU_FIND.toggles or r == AMU_FIND.backups or r == AMU_FIND.forks)
+end
+
+function AMU_FIND.drop_hook()
+  local C = G and G.CONTROLLER
+  if C and AMU_FIND.owns_hook(C.text_input_hook) then C.text_input_hook = nil end
+end
+
+-- Leaving the Mods menu: start from an empty search next time (so mods never look like they went missing).
+function AMU_FIND.reset_all()
+  for _, w in ipairs(AMU_FIND.KINDS) do
+    AMU_FIND[w].text = ""
+    AMU_FIND.applied[w] = ""
+    AMU_FIND.pending[w] = nil
+  end
+  AMU_FIND.hold = nil
+end
+
+-- Which search row is on screen? (nil = none of our tabs is showing it)
+function AMU_FIND.which_open()
+  local om = G and G.OVERLAY_MENU
+  if not (om and om.get_UIE_by_ID) then return nil end
+  for _, w in ipairs(AMU_FIND.KINDS) do
+    local ok, row = pcall(om.get_UIE_by_ID, om, "amu_find_row_" .. w)
+    if ok and row then return w end
+  end
+  return nil
+end
+
+function AMU_FIND.available()
+  local C = G and G.CONTROLLER
+  if not C or C.text_input_hook or C.screen_keyboard or C.locked then return nil end
+  return AMU_FIND.which_open()
+end
+
+-- Tap = jump into the box; hold for AMU_FIND.HOLD seconds = clear it.
+function AMU_FIND.hold_begin(id)
+  local now = (G.TIMERS and G.TIMERS.REAL) or 0
+  local h = AMU_FIND.hold
+  if h and h.id == id and now - h.t0 < 10 then return true end    -- key repeat
+  local which = AMU_FIND.available()
+  if not which then return false end
+  AMU_FIND.hold = { id = id, t0 = now, fired = false, which = which }
+  return true
+end
+
+function AMU_FIND.hold_end(id)
+  local h = AMU_FIND.hold
+  if not (h and h.id == id) then return end
+  AMU_FIND.hold = nil
+  if not h.fired then pcall(AMU_FIND.focus, h.which) end
+end
+
+-- called once per frame (from the controller hook)
+function AMU_FIND.hold_tick()
+  local h = AMU_FIND.hold
+  if not h or h.fired then return end
+  local now = (G.TIMERS and G.TIMERS.REAL) or 0
+  if now - h.t0 < AMU_FIND.HOLD then return end
+  h.fired = true
+  pcall(AMU_FIND.clear, h.which)
+end
+
 local function amu_sort_name(mode)
   return (mode == "recent") and "Recent" or "A-Z"
 end
@@ -855,6 +1213,7 @@ local AMU_HOLD_B_SECS = 0.7
 
 -- Closes whatever menu is open (and saves mod settings first when we're in the Mods menu).
 local function amu_close_everything()
+  pcall(AMU_FIND.drop_hook)
   if G.ACTIVE_MOD_UI or (SMODS and SMODS.IN_MODS_TAB) then
     if G.FUNCS.exit_mods then pcall(G.FUNCS.exit_mods) end
   end
@@ -877,7 +1236,9 @@ end
 -- Rebuild the whole tab (pager included) when it is on screen. Used when the NUMBER of rows changes.
 local function amu_reopen_if_open(area_id)
   local om = G and G.OVERLAY_MENU
-  if om and om.get_UIE_by_ID and om:get_UIE_by_ID(area_id) then G.FUNCS.amu_back_to_menu() end
+  if om and om.get_UIE_by_ID and om:get_UIE_by_ID(area_id) then
+    if not AMU_FIND.swap_tab(area_id) then G.FUNCS.amu_back_to_menu() end
+  end
 end
 
 -- Is one of OUR screens the open overlay? (cached for a moment: it walks the node tree)
@@ -1032,6 +1393,7 @@ end
 
 -- Called once per frame (see the controller hook below).
 local function amu_hold_tick(ctl)
+  pcall(AMU_FIND.hold_tick)
   if amu_b_down(ctl) then
     if G.OVERLAY_MENU and not (ctl and ctl.text_input_hook) then
       if not amu_holdb.t0 then amu_holdb.t0 = amu_now() end
@@ -1084,6 +1446,11 @@ if Controller and not Controller._amu_hooked then
 
   local orig_press = Controller.button_press_update
   function Controller:button_press_update(button, dt)
+    -- The crash question is open but the cursor is still on the main menu behind it: move it onto the question first.
+    if button ~= "b" and not self.locks.frame and AMU_CRASH.ensure_focus then
+      local ok, moved = pcall(AMU_CRASH.ensure_focus, self)
+      if ok and moved then self.interrupt.focus = false; return end
+    end
     if (button == "triggerleft" or button == "triggerright") and not self.locks.frame and amu_screen_open() then
       if amu_cycle_tab(button == "triggerright" and 1 or -1) then
         self.held_button_times[button] = 0
@@ -1191,7 +1558,7 @@ do
 end
 
 -- The red "Close All Menus" button, with the shortcut hint underneath it.
-local function amu_close_all_node(minw)
+local function amu_close_all_node(minw, inline)
   local dim = RGBA(0.78, 0.8, 0.88, 1)
   local using_pad = G.CONTROLLER and G.CONTROLLER.HID and G.CONTROLLER.HID.controller
   local hint
@@ -1204,6 +1571,20 @@ local function amu_close_all_node(minw)
     }
   else
     hint = { { n = G.UIT.T, config = { text = "Hold B or press Esc", scale = 0.21, colour = dim } } }
+  end
+  if inline then
+    -- title row: the button and its hint sit side by side on one line
+    return { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = {
+      { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = {
+        { n = G.UIT.B, config = { id = "amu_marker", w = 0, h = 0 } },
+        { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = minw or 2.6, minh = 0.46, r = 0.09,
+            colour = G.C.RED, button = "amu_close_all", hover = true, shadow = true }, nodes = {
+          { n = G.UIT.T, config = { text = "Close All Menus", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
+        { n = G.UIT.B, config = { w = 0.16, h = 0.1 } },
+        { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = {
+          { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = hint } } },
+      }},
+    }}
   end
   return { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = {
     { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = {
@@ -1221,7 +1602,7 @@ local function amu_header_row(title, scale)
   return { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
     { n = G.UIT.T, config = { text = title, scale = scale or 0.5, colour = purple, shadow = true } },
     { n = G.UIT.B, config = { w = 0.5, h = 0.1 } },
-    amu_close_all_node(2.6),
+    amu_close_all_node(2.6, true),
   }}
 end
 
@@ -1346,20 +1727,21 @@ local function amu_tight_toggle(args)
   args.label = ""
   args.label_scale = 0.1
   args.w = 0
-  args.scale = 0.42
+  args.scale = args.scale or 0.42
   local t = create_toggle(args)
   if type(t) == "table" and type(t.config) == "table" then t.config.padding = 0.03 end
   return t
 end
 
-local AMU_TOG_ROW_H = 0.60
-local AMU_TOG_W, AMU_TOG_H = 10.1, 7 * 0.60
+local AMU_TOG_ROW_H = 0.66
+local AMU_TOG_W, AMU_TOG_H = 14.9, 7 * 0.66
 
 build_mod_toggles_page = function(page)
-  local entries = get_sorted_mod_entries(config.sort_toggles)
+  local entries = AMU_FIND.entries("toggles", config.sort_toggles)
   local total_pages = math.max(1, math.ceil(#entries / MODS_PER_PAGE))
   page = math.max(1, math.min(page or 1, total_pages))
   AMU_CONFIG_PAGE = page
+  AMU_FIND.sync_pager("toggles", total_pages, page)
 
   local rows = {}
   local start_i = (page - 1) * MODS_PER_PAGE + 1
@@ -1387,14 +1769,15 @@ build_mod_toggles_page = function(page)
 
       -- name on the left, the update status in the middle, toggle + Check together on the far right
       local row_nodes = {
-        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 4.3 }, nodes = {
-          { n = G.UIT.T, config = { text = amu_fit(entry.display, 0.44, 4.2), scale = 0.44, colour = G.C.UI.TEXT_LIGHT } }
+        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 6.6 }, nodes = {
+          { n = G.UIT.T, config = { text = amu_fit(entry.display, 0.5, 6.4), scale = 0.5, colour = G.C.UI.TEXT_LIGHT } }
         }},
-        { n = G.UIT.C, config = { align = "cl", padding = 0.04, minw = 3.3 }, nodes = {
-          { n = G.UIT.T, config = { ref_table = amu_per_mod_status, ref_value = folder, scale = 0.26, colour = G.C.UI.TEXT_LIGHT } }
+        { n = G.UIT.C, config = { align = "cl", padding = 0.04, minw = 4.6 }, nodes = {
+          { n = G.UIT.T, config = { ref_table = amu_per_mod_status, ref_value = folder, scale = 0.3, colour = G.C.UI.TEXT_LIGHT } }
         }},
-        { n = G.UIT.C, config = { align = "cm", padding = 0, minw = 0.9 }, nodes = {
+        { n = G.UIT.C, config = { align = "cm", padding = 0, minw = 1.2 }, nodes = {
           amu_tight_toggle {
+            scale = 0.5,
             ref_table = config.mod_update_enabled,
             ref_value = entry.folder,
             callback = function()
@@ -1402,9 +1785,9 @@ build_mod_toggles_page = function(page)
             end
           },
         }},
-        { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 1.5, minh = 0.44, r = 0.09,
+        { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 2.0, minh = 0.5, r = 0.09,
           colour = check_colour, button = "amu_check_mod_" .. row_i, hover = true, shadow = true }, nodes = {
-          { n = G.UIT.T, config = { text = "Check", scale = 0.34, colour = G.C.UI.TEXT_LIGHT } }
+          { n = G.UIT.T, config = { text = "Check", scale = 0.4, colour = G.C.UI.TEXT_LIGHT } }
         }},
       }
       rows[#rows+1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_TOG_ROW_H }, nodes = row_nodes }
@@ -1412,7 +1795,13 @@ build_mod_toggles_page = function(page)
   end
 
   local shown = math.max(0, end_i - start_i + 1)
-  for _ = shown + 1, MODS_PER_PAGE do rows[#rows+1] = amu_blank_row(AMU_TOG_W - 0.5, AMU_TOG_ROW_H) end
+  local blank_from = shown + 1
+  if shown == 0 and AMU_FIND.active("toggles") then
+    rows[#rows+1] = { n = G.UIT.R, config = { align = "cm", padding = 0.02, minh = AMU_TOG_ROW_H, minw = AMU_TOG_W - 0.5 }, nodes = {
+      { n = G.UIT.T, config = { text = "No mods match your search", scale = 0.4, colour = G.C.UI.TEXT_LIGHT } } } }
+    blank_from = 2
+  end
+  for _ = blank_from, MODS_PER_PAGE do rows[#rows+1] = amu_blank_row(AMU_TOG_W - 0.5, AMU_TOG_ROW_H) end
 
   return amu_list_root(rows, AMU_TOG_W, AMU_TOG_H)
 end
@@ -1435,6 +1824,13 @@ end
 -- Turn updates on/off for EVERY mod at once (pinned mods always stay off).
 -- The first time, the current on/off list is saved automatically so it can be restored.
 local function amu_set_all_updates(val)
+  -- While a search is active, only the mods it found are changed.
+  local only = nil
+  if AMU_FIND.active("toggles") then
+    only = {}
+    for _, e in ipairs(AMU_FIND.entries("toggles", config.sort_toggles)) do only[e.folder] = true end
+  end
+  local changed = 0
   local on, off = 0, 0
   for folder, v in pairs(config.mod_update_enabled or {}) do
     local pin = config.mod_pinned and config.mod_pinned[folder]
@@ -1451,15 +1847,23 @@ local function amu_set_all_updates(val)
   end
 
   for folder, _ in pairs(config.mod_update_enabled or {}) do
-    local pin = config.mod_pinned and config.mod_pinned[folder]
-    if type(pin) == "table" and pin.pinned then
-      config.mod_update_enabled[folder] = false
-    else
-      config.mod_update_enabled[folder] = val
+    if not only or only[folder] then
+      local pin = config.mod_pinned and config.mod_pinned[folder]
+      if type(pin) == "table" and pin.pinned then
+        config.mod_update_enabled[folder] = false
+      else
+        config.mod_update_enabled[folder] = val
+      end
+      changed = changed + 1
     end
   end
   pcall(write_ps1_config_overlay)
-  amu_snap_info.text = amu_snap_label()
+  if only then
+    amu_snap_info.text = "Updates turned " .. (val and "ON" or "OFF") .. " for the " .. changed
+      .. " mod(s) your search found (pinned mods stay off)."
+  else
+    amu_snap_info.text = amu_snap_label()
+  end
   amu_refresh_toggles()
 end
 G.FUNCS.amu_toggles_all_on  = function(e) amu_set_all_updates(true) end
@@ -1639,60 +2043,119 @@ SMODS.current_mod.config_tab = function()
 
   amu_nexus_display.text = mask_nexus_key(config.nexus_api_key)
 
-  local function trow(label, key, with_cb)
-    return { n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = {
-      create_toggle { label = label, ref_table = config, ref_value = key, w = 0, scale = 0.4,
-        callback = with_cb and function() write_ps1_config_overlay() end or nil },
-    }}
+  local function section(title, nodes, minw)
+    local rows = { { n = G.UIT.R, config = { align = "cm", padding = 0.05, minh = 0.6 }, nodes = {
+      { n = G.UIT.T, config = { text = title, scale = 0.52, colour = purple, shadow = true } } } } }
+    for _, nd in ipairs(nodes) do rows[#rows + 1] = nd end
+    return { n = G.UIT.C, config = { align = "tm", padding = 0.12, minw = minw, minh = 5.0, r = 0.12, colour = panel }, nodes = rows }
   end
 
-  -- LEFT: general settings
-  local left = { n = G.UIT.C, config = { align = "tm", padding = 0.06, minw = 5.0 }, nodes = {
-    { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
-      { n = G.UIT.T, config = { text = "General Settings", scale = 0.45, colour = purple, shadow = true } } } },
+  -- LEFT: general settings (big toggles, room for controller glyphs)
+  -- Controller: a toggle only answers Up/Down to the toggles in its own column ('tall' navigation), so Up/Down on the
+  -- right-hand buttons never jumps over to a toggle on the left.
+  local function tall(node)
+    if type(node) ~= "table" then return node end
+    if node.config and node.config.focus_args then node.config.focus_args.nav = "tall" end
+    for _, c in ipairs(node.nodes or {}) do tall(c) end
+    return node
+  end
+  local function trow(label, key, with_cb)
+    return { n = G.UIT.R, config = { align = "cl", padding = 0.045, minh = 0.62 }, nodes = {
+      { n = G.UIT.B, config = { w = 0.35, h = 0.1 } },
+      tall(create_toggle { label = label, ref_table = config, ref_value = key, w = 0, scale = 0.5,
+        callback = with_cb and function() write_ps1_config_overlay() end or nil }),
+    }}
+  end
+  local left = section("General Settings", {
     trow("Auto-check at startup", "auto_run", false),
     trow("Update Git repos", "cfg_update_git", true),
     trow("Update via update.json", "cfg_update_updatejson", true),
     trow("Make backups", "cfg_make_backups", true),
     trow("Update Steamodded", "cfg_update_steamodded", true),
     trow("Update Lovely Injector", "cfg_update_lovely", true),
-  }}
+  }, 7.2)
 
-  -- RIGHT: Nexus key, then the "check now" button with clear space above it
-  local right = { n = G.UIT.C, config = { align = "tm", padding = 0.06, minw = 5.0 }, nodes = {
-    { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
-      { n = G.UIT.T, config = { text = "Nexus API Key", scale = 0.45, colour = purple, shadow = true } } } },
-    { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
-      { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = 4.6, minh = 0.5, r = 0.1, colour = panel }, nodes = {
-        { n = G.UIT.T, config = { ref_table = amu_nexus_display, ref_value = "text", scale = 0.35, colour = G.C.UI.TEXT_LIGHT } } } } } },
-    { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
-      { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = 2.7, minh = 0.52, r = 0.1, colour = G.C.BLUE,
+  -- RIGHT: Nexus key, then the "check now" button
+  local rnodes = {
+    { n = G.UIT.R, config = { align = "cm", padding = 0.06 }, nodes = {
+      { n = G.UIT.C, config = { align = "cm", padding = 0.08, minw = 6.6, minh = 0.7, r = 0.1, colour = G.C.BLACK }, nodes = {
+        { n = G.UIT.T, config = { ref_table = amu_nexus_display, ref_value = "text", scale = 0.42, colour = G.C.UI.TEXT_LIGHT } } } } } },
+    { n = G.UIT.R, config = { align = "cm", padding = 0.06 }, nodes = {
+      { n = G.UIT.C, config = { align = "cm", padding = 0.08, minw = 3.9, minh = 0.7, r = 0.1, colour = G.C.BLUE,
           button = "amu_paste_nexus_key", hover = true, shadow = true }, nodes = {
-        { n = G.UIT.T, config = { text = "Paste from clipboard", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
-      { n = G.UIT.B, config = { h = 0.1, w = 0.12 } },
-      { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = 1.5, minh = 0.52, r = 0.1, colour = G.C.RED,
+        { n = G.UIT.T, config = { text = "Paste from clipboard", scale = 0.38, colour = G.C.UI.TEXT_LIGHT } } } },
+      { n = G.UIT.B, config = { h = 0.1, w = 0.2 } },
+      { n = G.UIT.C, config = { align = "cm", padding = 0.08, minw = 2.4, minh = 0.7, r = 0.1, colour = G.C.RED,
           button = "amu_clear_nexus_key", hover = true, shadow = true }, nodes = {
-        { n = G.UIT.T, config = { text = "Clear", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
+        { n = G.UIT.T, config = { text = "Clear", scale = 0.38, colour = G.C.UI.TEXT_LIGHT } } } },
     }},
-    -- space below the Nexus section
-    { n = G.UIT.B, config = { h = 0.45, w = 0.1 } },
     { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
-      { n = G.UIT.C, config = { align = "cm", padding = 0.08, minw = 4.4, minh = 0.7, r = 0.12, colour = G.C.GREEN,
+      { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = 6.6, minh = 0.55, r = 0.1, colour = G.C.BLUE,
+          button = "amu_nx_help_open", hover = true, shadow = true }, nodes = {
+        { n = G.UIT.T, config = { text = "How do I get a key?  (opens Nexus)", scale = 0.34, colour = G.C.UI.TEXT_LIGHT } } } } } },
+    { n = G.UIT.R, config = { align = "cm", padding = 0.06 }, nodes = {
+      { n = G.UIT.C, config = { align = "cm", padding = 0.1, minw = 6.6, minh = 0.95, r = 0.12, colour = G.C.GREEN,
           button = "amu_check_updates_now", hover = true, shadow = true }, nodes = {
-        { n = G.UIT.T, config = { text = "Check for updates now", scale = 0.4, colour = purple } } } },
+        { n = G.UIT.T, config = { text = "Check for updates now", scale = 0.52, colour = purple } } } },
     }},
-    { n = G.UIT.R, config = { align = "cm", padding = 0.02, minh = 0.32 }, nodes = {
-      { n = G.UIT.T, config = { ref_table = amu_check_status, ref_value = "text", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } },
-  }}
+    { n = G.UIT.R, config = { align = "cm", padding = 0.03, minh = 0.45 }, nodes = {
+      { n = G.UIT.T, config = { ref_table = amu_check_status, ref_value = "text", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
+  }
+  -- mods are waiting for an answer about a startup crash (after "Not now"): button to bring the question back
+  local n_waiting = #AMU_CRASH.read_pending()
+  if n_waiting > 0 then
+    rnodes[#rnodes + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
+      { n = G.UIT.C, config = { align = "cm", padding = 0.08, minw = 6.6, minh = 0.65, r = 0.1,
+          colour = G.C.ORANGE or purple, button = "amu_crash_review", hover = true, shadow = true }, nodes = {
+        { n = G.UIT.T, config = { text = "Startup crash: review " .. n_waiting .. " mod(s)", scale = 0.38, colour = G.C.UI.TEXT_LIGHT } } } } } }
+  end
+  local right = section("Nexus API Key", rnodes, 7.2)
 
   return {
     n = G.UIT.ROOT,
-    config = { align = "cm", padding = 0.08, colour = G.C.BLACK, r = 0.1, emboss = 0.05, minh = 5.6, minw = 10.6 },
+    config = { align = "cm", padding = 0.08, colour = G.C.BLACK, r = 0.1, emboss = 0.05, minh = 6.2, minw = 15.6 },
     nodes = {
-      amu_header_row("Mod Updater", 0.45),
-      { n = G.UIT.R, config = { align = "tm", padding = 0.02 }, nodes = { left, right } },
+      amu_header_row("Mod Updater", 0.5),
+      { n = G.UIT.R, config = { align = "tm", padding = 0.1 }, nodes = { left, { n = G.UIT.B, config = { w = 0.2, h = 0.1 } }, right } },
     }
   }
+end
+
+---------------------------------------------------------------------------
+-- DESCRIPTION PAGE (the first tab): short cards instead of one block of text
+---------------------------------------------------------------------------
+SMODS.current_mod.custom_ui = function(modNodes)
+  local ok, node = pcall(function()
+    local card_bg = RGBA(0.15, 0.15, 0.15, 0.95)
+    local light = G.C.UI.TEXT_LIGHT
+    local function card(title, col, lines)
+      local rows = { { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+        { n = G.UIT.T, config = { text = title, scale = 0.42, colour = col, shadow = true } } } } }
+      for _, ln in ipairs(lines) do
+        rows[#rows + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.015 }, nodes = {
+          { n = G.UIT.T, config = { text = ln, scale = 0.31, colour = light } } } }
+      end
+      return { n = G.UIT.C, config = { align = "cm", padding = 0.1, minw = 6.2, minh = 1.45, r = 0.12, colour = card_bg }, nodes = rows }
+    end
+    local gap = { n = G.UIT.B, config = { w = 0.2, h = 0.1 } }
+    local function row(a, b)
+      return { n = G.UIT.R, config = { align = "cm", padding = 0.07 }, nodes = { a, gap, b } }
+    end
+    return { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
+      { n = G.UIT.R, config = { align = "cm", padding = 0.06 }, nodes = {
+        { n = G.UIT.T, config = { text = "Keeps your Balatro mods up to date, safely.", scale = 0.42, colour = light, shadow = true } } } },
+      row(card("Updates", G.C.GREEN or light, { "Git, GitHub Releases and Nexus.", "A backup before every change." }),
+          card("Search & Sort", G.C.BLUE or light, { "Find mods fast on Toggles,", "Backups and Fork Finder." })),
+      row(card("Fork Finder", G.C.PURPLE or light, { "Original, parent and forks,", "newest first. Switch in one press." }),
+          card("Crash Protection", G.C.RED or light, { "Puts updated mods back if the", "game won't start." })),
+      { n = G.UIT.R, config = { align = "cm", padding = 0.06 }, nodes = {
+        { n = G.UIT.T, config = { text = "Works with mouse, keyboard and controller.", scale = 0.32, colour = light } } } },
+    }}
+  end)
+  if ok and node then
+    -- slot 1 is the author line, slot 2 the plain description text: swap that one
+    if modNodes[2] then modNodes[2] = node else modNodes[#modNodes + 1] = node end
+  end
 end
 
 ---------------------------------------------------------------------------
@@ -1762,10 +2225,10 @@ local function build_nosrc_page(page)
   local end_i = math.min(#entries, page * AMU_NS_PER)
 
   if #entries == 0 then
-    rows[1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_ROW_H }, nodes = {
-      { n = G.UIT.T, config = { text = "Every checked mod has an update source.", scale = 0.36, colour = purple } } } }
-    rows[2] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_ROW_H }, nodes = {
-      { n = G.UIT.T, config = { text = "(Run 'Check for updates now' to refresh this list.)", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } }
+    rows[1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_NS_ROW_H }, nodes = {
+      { n = G.UIT.T, config = { text = "Every checked mod has an update source.", scale = 0.5, colour = purple } } } }
+    rows[2] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_NS_ROW_H }, nodes = {
+      { n = G.UIT.T, config = { text = "(Run 'Check for updates now' to refresh this list.)", scale = 0.36, colour = G.C.UI.TEXT_LIGHT } } } }
   end
 
   for i = start_i, end_i do
@@ -1789,20 +2252,20 @@ local function build_nosrc_page(page)
         end
         amu_update_area("amu_nosrc_list", build_nosrc_page(AMU_NOSRC_PAGE))
       end
-      rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_ROW_H }, nodes = {
-        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 5.2 }, nodes = {
-          { n = G.UIT.T, config = { text = amu_fit(display, 0.44, 5.1), scale = 0.44, colour = G.C.UI.TEXT_LIGHT } } } },
-        { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.8, minh = 0.44, r = 0.09,
+      rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_NS_ROW_H }, nodes = {
+        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 10.4 }, nodes = {
+          { n = G.UIT.T, config = { text = amu_fit(display, 0.5, 10.2), scale = 0.5, colour = G.C.UI.TEXT_LIGHT } } } },
+        { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 3.6, minh = 0.56, r = 0.1,
           colour = G.C.BLUE, button = "amu_nosrc_paste_" .. row_i, hover = true, shadow = true }, nodes = {
-          { n = G.UIT.T, config = { text = "Paste link", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
+          { n = G.UIT.T, config = { text = "Paste link", scale = 0.4, colour = G.C.UI.TEXT_LIGHT } } } },
       }}
     end
   end
 
   local filled = (#entries == 0) and 2 or math.max(0, end_i - start_i + 1)
   for _ = filled + 1, AMU_NS_PER do
-    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_ROW_H }, nodes = {
-      { n = G.UIT.B, config = { h = AMU_ROW_H - 0.04, w = AMU_NS_W - 0.5 } } } }
+    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_NS_ROW_H }, nodes = {
+      { n = G.UIT.B, config = { h = AMU_NS_ROW_H - 0.04, w = AMU_NS_W - 0.5 } } } }
   end
 
   return amu_list_root(rows, AMU_NS_W, AMU_NS_H)
@@ -1812,6 +2275,258 @@ G.FUNCS.amu_nosrc_page = function(args)
   if not args or not args.cycle_config then return end
   AMU_NOSRC_PAGE = args.cycle_config.current_option or 1
   amu_update_areas({ ["amu_nosrc_list"] = build_nosrc_page(AMU_NOSRC_PAGE) })
+end
+
+---------------------------------------------------------------------------
+-- SEARCH: screen parts and actions (data side is near get_sorted_mod_entries)
+---------------------------------------------------------------------------
+
+-- Rebuild a tab's list for the new search, starting at page 1.
+function AMU_FIND.refresh(which)
+  if which == "toggles" then
+    AMU_CONFIG_PAGE = 1
+    amu_update_area(AMU_FIND.list_id.toggles, build_mod_toggles_page(1))
+  elseif which == "forks" then
+    AMU_FORK_PAGE = 1
+    amu_update_area(AMU_FIND.list_id.forks, build_fork_mods_page(1))
+  else
+    AMU_BACKUP_PAGE = 1
+    amu_update_area(AMU_FIND.list_id.backups, build_backup_mods_page(1))
+  end
+end
+
+-- Runs every frame on a node in the search row: re-filter when the text changed.
+function AMU_FIND.watch(which)
+  local _, norm = AMU_FIND.words(AMU_FIND[which].text)
+  if norm == AMU_FIND.applied[which] then return end
+  AMU_FIND.applied[which] = norm
+  if AMU_FIND.pending[which] then return end
+  AMU_FIND.pending[which] = true
+  G.E_MANAGER:add_event(Event({
+    blocking = false, blockable = false,
+    func = function()
+      AMU_FIND.pending[which] = nil
+      pcall(AMU_FIND.refresh, which)
+      return true
+    end
+  }))
+end
+G.FUNCS.amu_find_watch_toggles = function(_e) AMU_FIND.watch("toggles") end
+G.FUNCS.amu_find_watch_backups = function(_e) AMU_FIND.watch("backups") end
+G.FUNCS.amu_find_watch_forks = function(_e) AMU_FIND.watch("forks") end
+
+-- Find the text box of a tab's search row.
+function AMU_FIND.box(which)
+  local om = G and G.OVERLAY_MENU
+  local row = om and om.get_UIE_by_ID and om:get_UIE_by_ID("amu_find_row_" .. which)
+  return row and om:get_UIE_by_ID("text_input", row)
+end
+
+-- Jump into the box and start typing (on a controller the game opens its on-screen keyboard).
+function AMU_FIND.focus(which)
+  local C = G and G.CONTROLLER
+  if not C or C.text_input_hook or C.screen_keyboard or C.locked then return false end
+  local box = AMU_FIND.box(which)
+  if not box or not G.FUNCS.select_text_input then return false end
+  G.FUNCS.select_text_input(box)
+  return true
+end
+
+-- Build the open tab's contents again IN PLACE - exactly what the game does when you switch tabs, so nothing slides
+-- and the menu around it stays put. `any_id` = the id of any node on the tab. Returns true when it worked.
+function AMU_FIND.swap_tab(any_id)
+  local om = G and G.OVERLAY_MENU
+  local node = om and om.get_UIE_by_ID and om:get_UIE_by_ID(any_id)
+  local box = node and node.UIBox
+  local tc = box and box.config and box.config.parent
+  local def = AMU_FIND.current_def
+  if not (tc and tc.config and tc.config.id == "tab_contents" and tc.config.object == box and type(def) == "function") then
+    return false
+  end
+  local ok = pcall(function()
+    tc.config.object:remove()
+    tc.config.object = UIBox({
+      definition = def(),
+      config = { offset = { x = 0, y = 0 }, parent = tc, type = "cm" },
+    })
+    tc.UIBox:recalculate()
+  end)
+  if not ok then return false end
+  if AMU_FIND.last_fill then pcall(AMU_FIND.last_fill) end   -- fill the list now (no empty frame)
+  return true
+end
+
+-- Put the controller cursor on a button of the open menu (after its tab was rebuilt).
+function AMU_FIND.snap_to_button(button)
+  local C = G and G.CONTROLLER
+  if not (C and C.HID and C.HID.controller and C.snap_to) then return end
+  local function go()
+    local n = amu_find_node(function(c) return c.button == button end)
+    if n then
+      C:snap_to({ node = n })
+      if C.update_cursor then C:update_cursor() end
+    end
+  end
+  pcall(go)
+  if G.E_MANAGER and Event then
+    G.E_MANAGER:add_event(Event({ blocking = false, blockable = false, func = function() pcall(go); return true end }))
+  end
+end
+
+-- Clear: empty the search and rebuild only the tab's contents (no slide, the rest of the menu stays still).
+-- (Emptying the box through the game's own text-box code made the game lay the tab out twice in one frame, which
+-- pushed the whole tab to the right.) On a controller the cursor goes back onto Clear.
+function AMU_FIND.clear(which)
+  local st = AMU_FIND[which]
+  local C = G and G.CONTROLLER
+  if C and AMU_FIND.owns_hook(C.text_input_hook) then C.text_input_hook = nil end
+  if st.text == "" then return end
+  st.text = ""
+  AMU_FIND.applied[which] = ""
+  AMU_FIND.pending[which] = nil
+  if which == "toggles" then AMU_CONFIG_PAGE = 1 elseif which == "forks" then AMU_FORK_PAGE = 1 else AMU_BACKUP_PAGE = 1 end
+  if not AMU_FIND.swap_tab("amu_find_row_" .. which) then
+    if not (G.FUNCS.amu_back_to_menu and pcall(G.FUNCS.amu_back_to_menu)) then
+      pcall(AMU_FIND.refresh, which)
+      return
+    end
+  end
+  AMU_FIND.snap_to_button("amu_find_clear_" .. which)
+end
+G.FUNCS.amu_find_clear_toggles = function(_e) AMU_FIND.clear("toggles") end
+G.FUNCS.amu_find_clear_backups = function(_e) AMU_FIND.clear("backups") end
+G.FUNCS.amu_find_clear_forks = function(_e) AMU_FIND.clear("forks") end
+
+-- Hooks the search needs (installed the first time a search row is built, when Steamodded's menu exists).
+function AMU_FIND.install()
+  if AMU_FIND.installed then return end
+  AMU_FIND.installed = true
+
+  -- The game turns the key "0" into the letter "o" in every text box; searching for "v1.0" needs the real zero.
+  local old_key = G.FUNCS.text_input_key
+  if type(old_key) == "function" then
+    G.FUNCS.text_input_key = function(args)
+      local hook = G.CONTROLLER and G.CONTROLLER.text_input_hook
+      if args and args.key == "0" and AMU_FIND.owns_hook(hook)
+         and type(TRANSPOSE_TEXT_INPUT) == "function" and type(MODIFY_TEXT_INPUT) == "function" then
+        local cfg = hook.config.ref_table
+        local text = cfg.text
+        if cfg.max_length > string.len(text.ref_table[text.ref_value]) then
+          TRANSPOSE_TEXT_INPUT(0)
+          MODIFY_TEXT_INPUT{ letter = "0", text_table = text, pos = text.current_position + 1 }
+          TRANSPOSE_TEXT_INPUT(1)
+        end
+        return
+      end
+      return old_key(args)
+    end
+  end
+
+  -- Never leave our box hooked to a menu that is gone (every key would be swallowed).
+  for _, name in ipairs({ "overlay_menu", "exit_overlay_menu" }) do
+    local old_fn = G.FUNCS[name]
+    if type(old_fn) == "function" then
+      G.FUNCS[name] = function(...)
+        pcall(AMU_FIND.drop_hook)
+        return old_fn(...)
+      end
+    end
+  end
+
+  -- Esc while typing only leaves the box (the game does that itself right after this); it must not close the menu.
+  -- Leaving the Mods menu for real empties both searches.
+  local old_exit = G.FUNCS.exit_mods
+  if type(old_exit) == "function" then
+    G.FUNCS.exit_mods = function(e, ...)
+      if not e and G.CONTROLLER and AMU_FIND.owns_hook(G.CONTROLLER.text_input_hook) then return end
+      pcall(AMU_FIND.drop_hook)
+      AMU_FIND.reset_all()
+      return old_exit(e, ...)
+    end
+  end
+
+  -- S (keyboard) / R3 (right stick press): tap = jump into the box, hold = clear it.
+  if Controller and not Controller._amu_find_keys then
+    Controller._amu_find_keys = true
+    local kp, kr = Controller.key_press_update, Controller.key_release_update
+    if type(kp) == "function" then
+      Controller.key_press_update = function(self, key, ...)
+        if key == "s" and not self.text_input_hook then
+          local ok, done = pcall(AMU_FIND.hold_begin, "s")
+          if ok and done then return end
+        end
+        return kp(self, key, ...)
+      end
+    end
+    if type(kr) == "function" then
+      Controller.key_release_update = function(self, key, ...)
+        if key == "s" then pcall(AMU_FIND.hold_end, "s") end
+        return kr(self, key, ...)
+      end
+    end
+    local bp, br = Controller.button_press_update, Controller.button_release_update
+    if type(bp) == "function" then
+      Controller.button_press_update = function(self, button, ...)
+        if button == "rightstick" and not self.text_input_hook and not (self.locks and self.locks.frame) then
+          local ok, done = pcall(AMU_FIND.hold_begin, "rightstick")
+          if ok and done then return end
+        end
+        return bp(self, button, ...)
+      end
+    end
+    if type(br) == "function" then
+      Controller.button_release_update = function(self, button, ...)
+        if button == "rightstick" then pcall(AMU_FIND.hold_end, "rightstick") end
+        return br(self, button, ...)
+      end
+    end
+  end
+end
+
+-- Left of the page selector: "[ Search: ] [ type here ] [Clear]"
+function AMU_FIND.left(which, side_w, box_w, with_label)
+  local input = create_text_input({
+    w = box_w,
+    max_length = AMU_FIND.MAX,
+    text_scale = 0.34,
+    prompt_text = "Type to search...",
+    ref_table = AMU_FIND[which],
+    ref_value = "text",
+    extended_corpus = true,   -- allows spaces, - _ . and digits
+    colour = HEX and HEX("3A3550") or nil,
+    hooked_colour = HEX and HEX("5A2D82") or nil,
+  })
+  -- The blinking cursor is 0.4 tall by default; make it match the smaller text.
+  AMU_FIND.walk(input, function(n)
+    if n.config and n.config.id == "position" then n.config.h = 0.36 end
+  end)
+  local cells = {
+    -- this (tiny) node's func runs every frame and notices when the text changed
+    { n = G.UIT.C, config = { align = "cm", padding = 0, minw = 0.02, func = "amu_find_watch_" .. which }, nodes = {} },
+  }
+  if with_label then
+    cells[#cells + 1] = { n = G.UIT.C, config = { align = "cm", padding = 0.04 }, nodes = {
+      { n = G.UIT.T, config = { text = "Search:", scale = 0.34, colour = G.C.UI.TEXT_LIGHT, shadow = true } } } }
+  end
+  cells[#cells + 1] = input
+  cells[#cells + 1] = { n = G.UIT.C, config = { minw = 0.08 }, nodes = {} }
+  cells[#cells + 1] = { n = G.UIT.C, config = { align = "cm", padding = 0.05, r = 0.1, minw = 1.0, minh = 0.46,
+    colour = G.C.RED, hover = true, shadow = true, button = "amu_find_clear_" .. which }, nodes = {
+    { n = G.UIT.T, config = { text = "Clear", scale = 0.33, colour = G.C.UI.TEXT_LIGHT, shadow = true } } } }
+  return { n = G.UIT.C, config = { align = "cm", padding = 0, minw = side_w }, nodes = {
+    { n = G.UIT.R, config = { id = "amu_find_row_" .. which, align = "cm", padding = 0 }, nodes = cells } } }
+end
+
+-- Right of the page selector: "Found 3 of 71" (or the hotkey hint) and how to clear.
+function AMU_FIND.right(which, side_w)
+  local dim = RGBA(0.78, 0.8, 0.88, 1)
+  return { n = G.UIT.C, config = { align = "cm", padding = 0, minw = side_w }, nodes = {
+    { n = G.UIT.R, config = { align = "cm", padding = 0.01, minw = side_w }, nodes = {
+      { n = G.UIT.T, config = { ref_table = AMU_FIND.info[which], ref_value = "text", scale = 0.32,
+        colour = G.C.UI.TEXT_LIGHT, no_recalc = true } } } },
+    { n = G.UIT.R, config = { align = "cm", padding = 0.01, minw = side_w }, nodes = {
+      { n = G.UIT.T, config = { text = "Hold S / R3 = clear", scale = 0.26, colour = dim } } } },
+  }}
 end
 
 ---------------------------------------------------------------------------
@@ -1833,7 +2548,7 @@ local function amu_make_tab(o)
   -- the empty space ABOVE the page selector (below the last mod) and BELOW it (above the window edge) are kept equal
   local n_after = #(o.after or {})
   local above = 0.08 + n_after * 0.43 + gap_pager
-  local bottom_gap = math.max(0.02, above - 0.23)
+  local bottom_gap = math.max(0.02, above - 0.33)
 
   local col = {}
   for _, n in ipairs(o.top) do col[#col + 1] = n end
@@ -1842,19 +2557,42 @@ local function amu_make_tab(o)
     { n = G.UIT.O, config = { id = o.id, w = o.list_w, h = o.list_h, object = Moveable() } } } }
   for _, n in ipairs(o.after or {}) do col[#col + 1] = n end
   col[#col + 1] = spacer(gap_pager)
-  col[#col + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
-    create_option_cycle {
-      w = 3.8, scale = 0.55, options = page_options, current_option = page,
-      opt_callback = o.cb, cycle_shoulders = true, no_pips = true,
-    } } }
+  local cyc = {
+    w = 4.4, scale = 0.72, options = page_options, current_option = page,
+    opt_callback = o.cb, cycle_shoulders = true, no_pips = true,
+  }
+  local pager_node = create_option_cycle(cyc)
+  if o.find then
+    -- search box on the left of the page selector, "Found x of y" on the right (the selector stays centred)
+    AMU_FIND.install()
+    AMU_FIND.pager[o.find] = AMU_FIND.find_args(pager_node) or cyc
+    local _, norm = AMU_FIND.words(AMU_FIND[o.find].text)
+    AMU_FIND.applied[o.find] = norm
+    col[#col + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+      AMU_FIND.left(o.find, o.find_side, o.find_box, o.find_label),
+      { n = G.UIT.C, config = { minw = 0.75 }, nodes = {} },   -- room for the LB glyph next to the page selector
+      { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = { pager_node } },
+      { n = G.UIT.C, config = { minw = 0.75 }, nodes = {} },   -- room for the RB glyph
+      AMU_FIND.right(o.find, o.find_side),
+    } }
+  else
+    col[#col + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = { pager_node } }
+  end
   col[#col + 1] = spacer(bottom_gap)
 
   local static_def = { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
     { n = G.UIT.C, config = { align = "tm", padding = 0.03, minw = o.panel_w - 0.3 }, nodes = col } } }
 
-  -- fill the list on the next frame (the overlay has to exist first)
-  G.E_MANAGER:add_event(Event({ func = function()
+  -- fill the list on the next frame (the overlay has to exist first), or right away when the tab is swapped in place
+  local filled = { done = false }
+  local function fill()
+    if filled.done then return end
+    filled.done = true
     amu_update_area(o.id, o.build(page))
+  end
+  AMU_FIND.last_fill = fill
+  G.E_MANAGER:add_event(Event({ func = function()
+    fill()
     return true
   end }))
 
@@ -1889,37 +2627,39 @@ local function amu_sort_nodes(which, func, now_w, next_w)
   }
 end
 
-SMODS.current_mod.extra_tabs = function()
+local amu_extra_tabs_raw
+amu_extra_tabs_raw = function()
   local purple = (G.C and G.C.PURPLE) or RGBA(0.62, 0.33, 0.92, 1)
   return {
     {
       label = "Mod Toggles",
       tab_definition_function = function()
         amu_sort_set("toggles", config.sort_toggles)
-        local sn = amu_sort_nodes("toggles", "amu_sort_toggles", 1.75, 1.95)
+        local sn = amu_sort_nodes("toggles", "amu_sort_toggles", 2.2, 2.4)
         amu_snap_info.text = amu_snap_label()
         return amu_make_tab({
           id = "amu_mod_toggle_list", cb = "amu_mod_toggles_page", build = build_mod_toggles_page,
-          count = #get_sorted_mod_entries(config.sort_toggles), per_page = MODS_PER_PAGE,
+          count = #AMU_FIND.entries("toggles", config.sort_toggles), per_page = MODS_PER_PAGE,
+          find = "toggles", find_side = 4.7, find_box = 2.3, find_label = true,
           get_page = function() return AMU_CONFIG_PAGE end, set_page = function(p) AMU_CONFIG_PAGE = p end,
-          panel_w = 10.6, list_w = AMU_TOG_W, list_h = AMU_TOG_H, gap_top = 0.15,
+          panel_w = 15.6, list_w = AMU_TOG_W, list_h = AMU_TOG_H, gap_top = 0.18,
           top = {
             amu_header_row("Mod Update Toggles", 0.5),
             { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
               sn[1], sn[2], sn[3],
               amu_gap(0.12),
-              amu_btn("All on", "amu_toggles_all_on", G.C.GREEN, 1.1),
-              amu_gap(0.08),
-              amu_btn("All off", "amu_toggles_all_off", G.C.RED, 1.1),
-              amu_gap(0.15),
-              amu_btn("Save list", "amu_snap_save", G.C.PURPLE or purple, 1.5),
-              amu_gap(0.08),
-              amu_btn("Restore list", "amu_snap_restore", G.C.ORANGE or RGBA(0.85, 0.5, 0.05, 1), 1.8),
+              amu_btn("All on", "amu_toggles_all_on", G.C.GREEN, 1.5, 0.36),
+              amu_gap(0.12),
+              amu_btn("All off", "amu_toggles_all_off", G.C.RED, 1.5, 0.36),
+              amu_gap(0.25),
+              amu_btn("Save list", "amu_snap_save", G.C.PURPLE or purple, 2.0, 0.36),
+              amu_gap(0.12),
+              amu_btn("Restore list", "amu_snap_restore", G.C.ORANGE or RGBA(0.85, 0.5, 0.05, 1), 2.4, 0.36),
             }},
           },
           after = {
             { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.4 }, nodes = {
-              { n = G.UIT.T, config = { ref_table = amu_snap_info, ref_value = "text", scale = 0.27, colour = G.C.UI.TEXT_LIGHT } } } },
+              { n = G.UIT.T, config = { ref_table = amu_snap_info, ref_value = "text", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
           },
         })
       end
@@ -1928,12 +2668,13 @@ SMODS.current_mod.extra_tabs = function()
       label = "Backups",
       tab_definition_function = function()
         amu_sort_set("backups", config.sort_backups)
-        local sn = amu_sort_nodes("backups", "amu_sort_backups", 1.9, 2.2)
+        local sn = amu_sort_nodes("backups", "amu_sort_backups", 2.2, 2.4)
         return amu_make_tab({
           id = "amu_backup_mod_list", cb = "amu_backup_mods_page", build = build_backup_mods_page,
-          count = #get_sorted_mod_entries(config.sort_backups), per_page = AMU_BK_PER,
+          count = #AMU_FIND.entries("backups", config.sort_backups), per_page = AMU_BK_PER,
+          find = "backups", find_side = 4.7, find_box = 2.3, find_label = true,
           get_page = function() return AMU_BACKUP_PAGE end, set_page = function(p) AMU_BACKUP_PAGE = p end,
-          panel_w = 12.6, list_w = AMU_BK_W, list_h = AMU_BK_H, gap_top = 0.25,
+          panel_w = 15.6, list_w = AMU_BK_W, list_h = AMU_BK_H, gap_top = 0.25,
           top = {
             amu_header_row("Mod Backups & Pinning", 0.5),
             { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
@@ -1942,7 +2683,7 @@ SMODS.current_mod.extra_tabs = function()
           },
           after = {
             { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.4 }, nodes = {
-              { n = G.UIT.T, config = { ref_table = amu_backup_status, ref_value = "text", scale = 0.3, colour = purple } } } },
+              { n = G.UIT.T, config = { ref_table = amu_backup_status, ref_value = "text", scale = 0.32, colour = purple } } } },
           },
         })
       end
@@ -1953,35 +2694,40 @@ SMODS.current_mod.extra_tabs = function()
         if not amu_fork_suggestions then amu_fork_suggestions = load_fork_suggestions() end
         amu_fork_filter_label.text = amu_fork_filter_text()
         amu_fork_tr_label.text = amu_fork_tr_text()
+        amu_sort_set("forks", config.sort_forks)
+        local sn = amu_sort_nodes("forks", "amu_sort_forks", 1.8, 2.1)
         return amu_make_tab({
           id = "amu_fork_mod_list", cb = "amu_fork_mods_page", build = build_fork_mods_page,
-          count = #get_fork_mod_entries(), per_page = AMU_FORK_PER,
+          count = #AMU_FIND.entries("forks", config.sort_forks), per_page = AMU_FORK_PER,
+          find = "forks", find_side = 4.7, find_box = 2.3, find_label = true,
           get_page = function() return AMU_FORK_PAGE end, set_page = function(p) AMU_FORK_PAGE = p end,
-          panel_w = 10.6, list_w = AMU_FORK_W, list_h = AMU_FORK_H,
+          panel_w = 15.6, list_w = AMU_FORK_W, list_h = AMU_FORK_H, gap_top = 0.12,
           top = {
             amu_header_row("Fork Finder", 0.5),
             { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
-              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.7, minh = 0.46, r = 0.1,
+              sn[1], sn[2], sn[3],
+              amu_gap(0.2),
+              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.8, minh = 0.5, r = 0.1,
                 colour = amu_fork_scanning and RGBA(0.5, 0.5, 0.5, 0.9) or G.C.GREEN,
                 button = "amu_scan_forks", hover = true, shadow = true }, nodes = {
-                { n = G.UIT.T, config = { text = "Scan Now", scale = 0.3, colour = purple } } } },
-              amu_gap(0.1),
-              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 3.0, minh = 0.46, r = 0.1,
+                { n = G.UIT.T, config = { text = "Scan Now", scale = 0.34, colour = purple } } } },
+              amu_gap(0.12),
+              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 3.1, minh = 0.5, r = 0.1,
                 colour = G.C.BLUE, button = "amu_fork_filter", hover = true, shadow = true }, nodes = {
-                { n = G.UIT.T, config = { ref_table = amu_fork_filter_label, ref_value = "text", scale = 0.29, colour = G.C.UI.TEXT_LIGHT } } } },
-              amu_gap(0.1),
-              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.6, minh = 0.46, r = 0.1,
+                { n = G.UIT.T, config = { ref_table = amu_fork_filter_label, ref_value = "text", scale = 0.34, colour = G.C.UI.TEXT_LIGHT } } } },
+              amu_gap(0.12),
+              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 3.2, minh = 0.5, r = 0.1,
                 colour = G.C.BLUE, button = "amu_fork_tr_filter", hover = true, shadow = true }, nodes = {
-                { n = G.UIT.T, config = { ref_table = amu_fork_tr_label, ref_value = "text", scale = 0.29, colour = G.C.UI.TEXT_LIGHT } } } },
-              amu_gap(0.1),
-              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.9, minh = 0.46, r = 0.1,
+                { n = G.UIT.T, config = { ref_table = amu_fork_tr_label, ref_value = "text", scale = 0.34, colour = G.C.UI.TEXT_LIGHT } } } },
+              amu_gap(0.12),
+              { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.2, minh = 0.5, r = 0.1,
                 colour = G.C.BLUE, button = "amu_gh_help_open", hover = true, shadow = true }, nodes = {
-                { n = G.UIT.T, config = { text = "GitHub token", scale = 0.29, colour = G.C.UI.TEXT_LIGHT } } } },
+                { n = G.UIT.T, config = { text = "GitHub token", scale = 0.34, colour = G.C.UI.TEXT_LIGHT } } } },
             }},
+            { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.34 }, nodes = {
+              { n = G.UIT.T, config = { ref_table = amu_fork_status, ref_value = "text", scale = 0.33, colour = purple } } } },
             { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.3 }, nodes = {
-              { n = G.UIT.T, config = { ref_table = amu_fork_status, ref_value = "text", scale = 0.3, colour = purple } } } },
-            { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.28 }, nodes = {
-              { n = G.UIT.T, config = { ref_table = amu_gh_display, ref_value = "text", scale = 0.26, colour = G.C.UI.TEXT_LIGHT } } } },
+              { n = G.UIT.T, config = { ref_table = amu_gh_display, ref_value = "text", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
           },
         })
       end
@@ -1993,24 +2739,41 @@ SMODS.current_mod.extra_tabs = function()
           id = "amu_nosrc_list", cb = "amu_nosrc_page", build = build_nosrc_page,
           count = #read_untracked_list(), per_page = AMU_NS_PER,
           get_page = function() return AMU_NOSRC_PAGE end, set_page = function(p) AMU_NOSRC_PAGE = p end,
-          panel_w = 10.6, list_w = AMU_NS_W, list_h = AMU_NS_H,
+          panel_w = 15.6, list_w = AMU_NS_W, list_h = AMU_NS_H,
           top = {
-            amu_header_row("Mods With No Update Source", 0.46),
+            amu_header_row("Mods With No Update Source", 0.5),
             { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-              { n = G.UIT.T, config = { text = "Copy a mod's GitHub or Nexus page link, then press 'Paste link'.", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } },
+              { n = G.UIT.T, config = { text = "Copy a mod's GitHub or Nexus page link, then press 'Paste link'.", scale = 0.36, colour = G.C.UI.TEXT_LIGHT } } } },
             { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
               create_toggle { label = "Show the 'no update source' note after update checks",
-                ref_table = config, ref_value = "show_untracked_note", w = 0, scale = 0.34 },
+                ref_table = config, ref_value = "show_untracked_note", w = 0, scale = 0.4 },
             }},
           },
           after = {
             { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.4 }, nodes = {
-              { n = G.UIT.T, config = { ref_table = amu_nosrc_msg, ref_value = "text", scale = 0.27, colour = G.C.GREEN } } } },
+              { n = G.UIT.T, config = { ref_table = amu_nosrc_msg, ref_value = "text", scale = 0.32, colour = G.C.GREEN } } } },
           },
         })
       end
     },
   }
+end
+
+-- Every tab remembers that it is the one on screen, so a rebuild in place (AMU_FIND.swap_tab) knows what to build.
+SMODS.current_mod.extra_tabs = function(...)
+  local tabs = amu_extra_tabs_raw(...)
+  for _, t in ipairs(tabs or {}) do
+    local f = t.tab_definition_function
+    if type(f) == "function" then
+      local wrapped
+      wrapped = function(...)
+        AMU_FIND.current_def = wrapped
+        return f(...)
+      end
+      t.tab_definition_function = wrapped
+    end
+  end
+  return tabs
 end
 
 -- Write the config overlay once on startup
@@ -2181,6 +2944,89 @@ G.FUNCS.amu_gh_scan_now = function(e)
   end
   G.FUNCS.amu_back_to_menu()
   if amu_run_fork_scan then amu_run_fork_scan() end
+end
+
+---------------------------------------------------------------------------
+-- NEXUS API KEY HELP SCREEN (same idea as the GitHub token screen)
+---------------------------------------------------------------------------
+AMU_FIND.nx_msg = { text = "" }
+AMU_FIND.nx_url = "https://www.nexusmods.com/users/myaccount?tab=api"
+
+G.UIDEF.amu_nexus_key_help = function()
+  local purple = (G.C and G.C.PURPLE) or RGBA(0.62, 0.33, 0.92, 1)
+  local bg     = RGBA(0.08, 0.08, 0.08, 0.96)
+  local panel  = RGBA(0.15, 0.15, 0.15, 0.95)
+  amu_nexus_display.text = mask_nexus_key(config.nexus_api_key)
+  local function line(txt, colour)
+    return { n = G.UIT.R, config = { align = "cl", padding = 0.015 }, nodes = {
+      { n = G.UIT.T, config = { text = txt, scale = 0.33, colour = colour or G.C.UI.TEXT_LIGHT } } } }
+  end
+  local function button(label, func, colour, w)
+    return { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = w or 2.8, minh = 0.6, r = 0.1,
+      colour = colour, button = func, hover = true, shadow = true }, nodes = {
+      { n = G.UIT.T, config = { text = label, scale = 0.34, colour = G.C.UI.TEXT_LIGHT } } } }
+  end
+  local gap = { n = G.UIT.B, config = { h = 0.1, w = 0.15 } }
+  return {
+    n = G.UIT.ROOT,
+    config = { align = "cm", minw = 9.5, padding = 0.22, r = 0.2, colour = bg, shadow = true, hover = true },
+    nodes = {
+      { n = G.UIT.R, config = { align = "cm", padding = 0.06 }, nodes = {
+        { n = G.UIT.T, config = { text = "Get your Nexus Mods API key", scale = 0.5, colour = purple, shadow = true } } } },
+      line("Only needed for mods that update from Nexus Mods. It is free and stays on this computer.", purple),
+      { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
+      line("1.  Click 'Open Nexus page' (log in if Nexus asks)."),
+      line("2.  Scroll down: 'Personal API Key' is usually at the bottom of that page."),
+      line("3.  If it says 'Request', click it to create your key."),
+      line("4.  Copy the long key."),
+      line("5.  Come back here and click 'Paste key'."),
+      { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
+      { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
+        { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = 7.5, minh = 0.45, r = 0.1, colour = panel }, nodes = {
+          { n = G.UIT.T, config = { ref_table = amu_nexus_display, ref_value = "text", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } } } },
+      { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
+        { n = G.UIT.T, config = { ref_table = AMU_FIND.nx_msg, ref_value = "text", scale = 0.28, colour = G.C.GREEN } } } },
+      { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+        button("Open Nexus page", "amu_nx_open_page", G.C.BLUE, 3.2), gap,
+        button("Paste key", "amu_nx_paste_key", G.C.GREEN, 2.8), gap,
+        button("Clear", "amu_nx_clear_key", G.C.RED, 1.5) } },
+      { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+        button("Back", "amu_back_to_menu", panel, 2.0), gap,
+        button("Close All Menus", "amu_close_all", G.C.RED, 3.2) } },
+    }
+  }
+end
+
+G.FUNCS.amu_nx_help_open = function(e)
+  AMU_FIND.nx_msg.text = ""
+  open_overlay(G.UIDEF.amu_nexus_key_help())
+end
+
+G.FUNCS.amu_nx_open_page = function(e)
+  local ok = pcall(function() love.system.openURL(AMU_FIND.nx_url) end)
+  AMU_FIND.nx_msg.text = ok and "Opened Nexus Mods in your browser. Follow the steps, then come back."
+                        or "Couldn't open a browser. Go to nexusmods.com, then your account settings, API tab."
+end
+
+G.FUNCS.amu_nx_paste_key = function(e)
+  local clip = ""
+  pcall(function() clip = love.system.getClipboardText() or "" end)
+  clip = clip:gsub("%s+", "")
+  if clip == "" then
+    AMU_FIND.nx_msg.text = "Clipboard is empty. Copy your key on the Nexus page first."
+    return
+  end
+  if #clip < 20 then
+    AMU_FIND.nx_msg.text = "That looks too short to be a Nexus key. Copy the whole key."
+    return
+  end
+  G.FUNCS.amu_paste_nexus_key(e)
+  AMU_FIND.nx_msg.text = "Key saved."
+end
+
+G.FUNCS.amu_nx_clear_key = function(e)
+  G.FUNCS.amu_clear_nexus_key(e)
+  AMU_FIND.nx_msg.text = "Key removed."
 end
 
 -- Shown after a fork scan when the token is bad/expired or GitHub's hourly limit was hit.
@@ -2417,10 +3263,11 @@ end
 -- Paginated list of all mods with version, last-update date, pin state and buttons.
 -- NOTE: this is assigned to the forward-declared local 'build_backup_mods_page'.
 build_backup_mods_page = function(page)
-  local entries = get_sorted_mod_entries(config.sort_backups)
+  local entries = AMU_FIND.entries("backups", config.sort_backups)
   local total_pages = math.max(1, math.ceil(#entries / AMU_BK_PER))
   page = math.max(1, math.min(page or 1, total_pages))
   AMU_BACKUP_PAGE = page
+  AMU_FIND.sync_pager("backups", total_pages, page)
 
   local umap = build_last_update_map()
   local grey = RGBA(0.78, 0.78, 0.88, 1)
@@ -2450,7 +3297,7 @@ build_backup_mods_page = function(page)
       end
 
       -- Two lines to the right of the name: version, then last update / pin info
-      local line1 = amu_fit(mod_version_line(folder), 0.32, 3.55)
+      local line1 = amu_fit(mod_version_line(folder), 0.35, 4.6)
       local line2, line2_colour
       if is_pinned then
         local pd = fmt_date(parse_stamp(pin_info.backup_file or ""))
@@ -2461,44 +3308,44 @@ build_backup_mods_page = function(page)
         line2 = ud and ("Updated " .. ud) or "Never updated here"
         line2_colour = grey
       end
-      line2 = amu_fit(line2, 0.29, 3.55)
+      line2 = amu_fit(line2, 0.31, 4.6)
 
       local tip = { filler = { func = amu_changelog_tip, args = { folder = folder, display = display } } }
 
       local pin_badge
       if is_pinned then
-        pin_badge = { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 1.0, minh = 0.32, r = 0.08,
+        pin_badge = { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 1.2, minh = 0.36, r = 0.08,
           colour = RGBA(0.7, 0.45, 0.0, 0.95) }, nodes = {
-          { n = G.UIT.T, config = { text = "PINNED", scale = 0.25, colour = RGBA(1, 1, 1, 1) } } } }
+          { n = G.UIT.T, config = { text = "PINNED", scale = 0.28, colour = RGBA(1, 1, 1, 1) } } } }
       else
-        pin_badge = { n = G.UIT.B, config = { h = 0.1, w = 1.0 } }
+        pin_badge = { n = G.UIT.B, config = { h = 0.1, w = 1.2 } }
       end
 
       local unpin_node
       if is_pinned then
-        unpin_node = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.05, minh = 0.42, r = 0.09,
+        unpin_node = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.4, minh = 0.48, r = 0.09,
           colour = G.C.RED, button = "amu_unpin_mod_" .. row_i, hover = true, shadow = true }, nodes = {
-          { n = G.UIT.T, config = { text = "Unpin", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } }
+          { n = G.UIT.T, config = { text = "Unpin", scale = 0.36, colour = G.C.UI.TEXT_LIGHT } } } }
       else
-        unpin_node = { n = G.UIT.B, config = { h = 0.1, w = 1.05 } }
+        unpin_node = { n = G.UIT.B, config = { h = 0.1, w = 1.4 } }
       end
 
       local row_nodes = {
-        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 3.9 }, nodes = {
-          { n = G.UIT.T, config = { text = amu_fit(display, 0.44, 3.8), scale = 0.44, colour = G.C.UI.TEXT_LIGHT } } } },
-        { n = G.UIT.C, config = { align = "cl", padding = 0, minw = 3.7 }, nodes = {
+        { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 5.6 }, nodes = {
+          { n = G.UIT.T, config = { text = amu_fit(display, 0.5, 5.4), scale = 0.5, colour = G.C.UI.TEXT_LIGHT } } } },
+        { n = G.UIT.C, config = { align = "cl", padding = 0, minw = 4.8 }, nodes = {
           { n = G.UIT.R, config = { align = "cl", padding = 0 }, nodes = {
-            { n = G.UIT.T, config = { text = line1, scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
+            { n = G.UIT.T, config = { text = line1, scale = 0.35, colour = G.C.UI.TEXT_LIGHT } } } },
           { n = G.UIT.R, config = { align = "cl", padding = 0 }, nodes = {
-            { n = G.UIT.T, config = { text = line2, scale = 0.29, colour = line2_colour } } } },
+            { n = G.UIT.T, config = { text = line2, scale = 0.31, colour = line2_colour } } } },
         }},
         pin_badge,
-        { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
-        { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.45, minh = 0.42, r = 0.09,
+        { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
+        { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.9, minh = 0.48, r = 0.09,
           colour = G.C.BLUE, button = "amu_open_backups_" .. row_i, hover = true, shadow = true,
           on_demand_tooltip = tip }, nodes = {
-          { n = G.UIT.T, config = { text = "Backups", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
-        { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
+          { n = G.UIT.T, config = { text = "Backups", scale = 0.38, colour = G.C.UI.TEXT_LIGHT } } } },
+        { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
         unpin_node,
       }
 
@@ -2507,7 +3354,13 @@ build_backup_mods_page = function(page)
   end
 
   local shown = math.max(0, end_i - start_i + 1)
-  for _ = shown + 1, AMU_BK_PER do
+  local blank_from = shown + 1
+  if shown == 0 and AMU_FIND.active("backups") then
+    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.02, minh = AMU_BK_ROW_H, minw = AMU_BK_W - 0.5 }, nodes = {
+      { n = G.UIT.T, config = { text = "No mods match your search", scale = 0.4, colour = G.C.UI.TEXT_LIGHT } } } }
+    blank_from = 2
+  end
+  for _ = blank_from, AMU_BK_PER do
     rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_BK_ROW_H }, nodes = {
       { n = G.UIT.B, config = { h = AMU_BK_ROW_H - 0.04, w = AMU_BK_W - 0.5 } } } }
   end
@@ -2688,6 +3541,27 @@ get_fork_mod_entries = function(force_all, keep_tr)
   return entries
 end
 
+-- Fork Finder list for the search: A-Z, or "Recent" = the mods whose newest fork was pushed most recently first.
+AMU_FIND.source.forks = function(mode)
+  local list = get_fork_mod_entries()
+  if mode == "recent" then
+    table.sort(list, function(a, b)
+      local pa = tostring(a.forks and a.forks[1] and a.forks[1].pushed_at or "")
+      local pb = tostring(b.forks and b.forks[1] and b.forks[1].pushed_at or "")
+      if pa ~= pb then return pa > pb end
+      return a.display:lower() < b.display:lower()
+    end)
+  end
+  return list
+end
+
+G.FUNCS.amu_sort_forks = function(e)
+  config.sort_forks = (config.sort_forks == "recent") and "az" or "recent"
+  amu_sort_set("forks", config.sort_forks)
+  AMU_FORK_PAGE = 1
+  amu_update_area("amu_fork_mod_list", build_fork_mods_page(1))
+end
+
 amu_fork_filter_text = function()
   return (config.fork_newer_only ~= false) and "Show all forks" or "Show newer forks only"
 end
@@ -2729,6 +3603,7 @@ G.FUNCS.amu_fork_filter = function(e)
   AMU_FORK_PAGE = 1
   if not amu_fork_scanning then amu_fork_status.text = amu_fork_summary() end
   amu_reopen_if_open("amu_fork_mod_list")   -- the number of pages changes, so rebuild the tab
+  AMU_FIND.snap_to_button("amu_fork_filter")
 end
 
 G.FUNCS.amu_fork_tr_filter = function(e)
@@ -2737,6 +3612,7 @@ G.FUNCS.amu_fork_tr_filter = function(e)
   AMU_FORK_PAGE = 1
   if not amu_fork_scanning then amu_fork_status.text = amu_fork_summary() end
   amu_reopen_if_open("amu_fork_mod_list")
+  AMU_FIND.snap_to_button("amu_fork_tr_filter")
 end
 
 local function run_fork_scan()
@@ -3197,10 +4073,11 @@ end
 
 -- Paginated list of mods with fork suggestions.
 build_fork_mods_page = function(page)
-  local entries = get_fork_mod_entries()
+  local entries = AMU_FIND.entries("forks", config.sort_forks)
   local total_pages = math.max(1, math.ceil(#entries / AMU_FORK_PER))
   page = math.max(1, math.min(page or 1, total_pages))
   AMU_FORK_PAGE = page
+  AMU_FIND.sync_pager("forks", total_pages, page)
 
   local purple = (G.C and G.C.PURPLE) or RGBA(0.62, 0.33, 0.92, 1)
   local orange = (G.C and G.C.ORANGE) or RGBA(0.85, 0.5, 0.05, 1)
@@ -3210,11 +4087,13 @@ build_fork_mods_page = function(page)
     local msg = (amu_fork_suggestions and amu_fork_suggestions.suggestions)
       and ((config.fork_newer_only ~= false) and "No newer forks found." or "No forks found.")
       or "No fork data yet. Press 'Scan Now'."
+    local searching = AMU_FIND.active("forks") and AMU_FIND.total.forks > 0
+    if searching then msg = "No mods match your search" end
     rows[1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H }, nodes = {
-      { n = G.UIT.T, config = { text = msg, scale = 0.36, colour = purple } } } }
-    if amu_fork_suggestions and amu_fork_suggestions.suggestions and config.fork_newer_only ~= false then
+      { n = G.UIT.T, config = { text = msg, scale = 0.42, colour = purple } } } }
+    if not searching and amu_fork_suggestions and amu_fork_suggestions.suggestions and config.fork_newer_only ~= false then
       rows[2] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H }, nodes = {
-        { n = G.UIT.T, config = { text = "Press 'Show all forks' to see older ones too.", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } }
+        { n = G.UIT.T, config = { text = "Press 'Show all forks' to see older ones too.", scale = 0.36, colour = G.C.UI.TEXT_LIGHT } } } }
     end
     for _ = #rows + 1, AMU_FORK_PER do
       rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H }, nodes = {
@@ -3268,28 +4147,29 @@ build_fork_mods_page = function(page)
             end
           end
         end
-        local fork_label = amu_fit(table.concat(label_parts, " + "), 0.28, 3.4)
+        local fork_label = amu_fit(table.concat(label_parts, " + "), 0.34, 4.9)
         local label_colour = has_upstream and orange or (is_switched and G.C.GREEN or G.C.UI.TEXT_LIGHT)
 
         local action_btn
         if is_switched then
-          action_btn = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.8, minh = 0.4, r = 0.09,
+          action_btn = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.3, minh = 0.48, r = 0.09,
             colour = G.C.RED, button = "amu_switch_back_fork_" .. row_i, hover = true, shadow = true }, nodes = {
-            { n = G.UIT.T, config = { text = "Switch Back", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } }
+            { n = G.UIT.T, config = { text = "Switch Back", scale = 0.36, colour = G.C.UI.TEXT_LIGHT } } } }
         else
-          action_btn = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.8, minh = 0.4, r = 0.09,
+          action_btn = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.3, minh = 0.48, r = 0.09,
             colour = G.C.BLUE, button = "amu_view_forks_" .. row_i, hover = true, shadow = true }, nodes = {
-            { n = G.UIT.T, config = { text = "View Forks", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } }
+            { n = G.UIT.T, config = { text = "View Forks", scale = 0.36, colour = G.C.UI.TEXT_LIGHT } } } }
         end
 
         rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H }, nodes = {
-          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 3.2 }, nodes = {
-            { n = G.UIT.T, config = { text = amu_fit(display, 0.4, 3.1), scale = 0.4, colour = G.C.UI.TEXT_LIGHT } } } },
-          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 3.4 }, nodes = {
-            { n = G.UIT.T, config = { text = fork_label, scale = 0.28, colour = label_colour } } } },
-          { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.0, minh = 0.4, r = 0.09,
+          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 5.6 }, nodes = {
+            { n = G.UIT.T, config = { text = amu_fit(display, 0.5, 5.4), scale = 0.5, colour = G.C.UI.TEXT_LIGHT } } } },
+          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 5.0 }, nodes = {
+            { n = G.UIT.T, config = { text = fork_label, scale = 0.34, colour = label_colour } } } },
+          { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.3, minh = 0.48, r = 0.09,
             colour = G.C.BLUE, button = "amu_page_current_" .. row_i, hover = true, shadow = true }, nodes = {
-            { n = G.UIT.T, config = { text = "Page", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
+            { n = G.UIT.T, config = { text = "Page", scale = 0.36, colour = G.C.UI.TEXT_LIGHT } } } },
+          { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
           action_btn,
         }}
       end
@@ -3539,8 +4419,13 @@ function G.FUNCS.amu_restart_now(e)
   end
 
   if config.auto_relaunch_via_steam ~= false and config.steam_appid then
-    local url = "steam://rungameid/" .. tostring(config.steam_appid)
-    os.execute('start "" "' .. url .. '"')
+    -- The helper (crash_guard.lua) waits for the game to close and starts it again; a plain "start steam://..." from
+    -- inside the game is often ignored by Steam ("Game already running"). Fall back to that only if the helper can't run.
+    local okh, started = pcall(function() return AMU_CRASH_GUARD and AMU_CRASH_GUARD.relaunch_helper and AMU_CRASH_GUARD.relaunch_helper() end)
+    if not (okh and started) then
+      local url = "steam://rungameid/" .. tostring(config.steam_appid)
+      os.execute('start "" "' .. url .. '"')
+    end
   end
   love.event.quit()
 end
@@ -3551,6 +4436,526 @@ local function read_summary(mod_path)
   local data = read_all(summary_path)
   if not data then return nil end
   return decode_json(data)
+end
+
+---------------------------------------------------------------------------
+-- CRASH RECOVERY - screens and actions
+--   1. "Crash Detected": put them all back / choose which / not now
+--   2. the picker: one check box per mod, then Revert selected / Revert all / Keep all
+-- Mouse, keyboard and controller all work: every button is a normal game button, so D-pad / stick move between
+-- them and A presses; B (or Esc) is the screen's Back button; holding B closes every menu (see the navigation
+-- section above). The picker's page selector answers LB / RB.
+---------------------------------------------------------------------------
+AMU_CRASH.PER, AMU_CRASH.ROW_H = 6, 0.60
+AMU_CRASH.W, AMU_CRASH.H = 9.6, 6 * 0.60
+AMU_CRASH.status = amu_status_tbl(0.32, 9.0, "")
+AMU_CRASH.count  = amu_status_tbl(0.3, 4.2, "")
+
+function AMU_CRASH.colours()
+  return {
+    purple = (G.C and G.C.PURPLE) or RGBA(0.62, 0.33, 0.92, 1),
+    bg     = RGBA(0.08, 0.08, 0.08, 0.96),
+    panel  = RGBA(0.12, 0.12, 0.12, 0.96),
+    grey   = RGBA(0.27, 0.27, 0.31, 1),
+    light  = G.C.UI.TEXT_LIGHT,
+  }
+end
+
+function AMU_CRASH.ticked()
+  local out = {}
+  for _, e in ipairs(AMU_CRASH.mods) do
+    if AMU_CRASH.sel[e.mod_name] then out[#out + 1] = e.mod_name end
+  end
+  return out
+end
+
+function AMU_CRASH.all_names()
+  local out = {}
+  for _, e in ipairs(AMU_CRASH.mods) do out[#out + 1] = e.mod_name end
+  return out
+end
+
+function AMU_CRASH.refresh_count()
+  AMU_CRASH.count.text = "Ticked: " .. #AMU_CRASH.ticked() .. " of " .. #AMU_CRASH.mods
+end
+
+-- A big button for the question screen. `id` marks the Back button (B / Esc press it).
+function AMU_CRASH.big_btn(label, func, colour, minw, id)
+  return { n = G.UIT.C, config = { id = id, align = "cm", padding = 0.1, minw = minw, minh = 0.72, r = 0.14,
+      colour = colour, button = func, hover = true, shadow = true }, nodes = {
+    { n = G.UIT.T, config = { text = label, scale = 0.46, colour = G.C.UI.TEXT_LIGHT, shadow = true } } } }
+end
+
+-- Text lines of the question: what was updated, and what the choices do.
+function AMU_CRASH.prompt_lines()
+  local lines = {}
+  local function add(text, kind)
+    for _, part in ipairs(wrap_line(text, 76)) do lines[#lines + 1] = { text = part, kind = kind or "t" } end
+  end
+  add("Balatro did not start properly after the last update.", "h")
+  add("These mods were updated just before it:", "t")
+  local mods = AMU_CRASH.mods
+  for i = 1, math.min(#mods, 8) do
+    lines[#lines + 1] = { text = "    " .. amu_fit(AMU_CRASH.label(mods[i]), 0.36, 9.6), kind = "t" }
+  end
+  if #mods > 8 then lines[#lines + 1] = { text = "    ...and " .. (#mods - 8) .. " more", kind = "t" } end
+  lines[#lines + 1] = { text = "", kind = "t" }
+  add("Put them back to the versions you had before? They are pinned afterwards, so they are not updated again until you unpin them (Mod Updater > Backups).", "t")
+  if AMU_CRASH.extra_note then add(AMU_CRASH.extra_note, "t") end
+  return lines
+end
+
+G.UIDEF.amu_crash_prompt = function()
+  local c = AMU_CRASH.colours()
+  AMU_CRASH.load()
+  AMU_CRASH.status.text = ""
+
+  local text_rows = {}
+  for _, ln in ipairs(AMU_CRASH.prompt_lines()) do
+    text_rows[#text_rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.012, minh = 0.3 }, nodes = {
+      { n = G.UIT.T, config = { text = (ln.text ~= "" and ln.text or " "), scale = 0.36,
+          colour = (ln.kind == "h") and c.purple or c.light } } } }
+  end
+
+  return {
+    n = G.UIT.ROOT,
+    config = { align = "cm", minw = 11.4, padding = 0.22, r = 0.2, colour = c.bg, shadow = true, hover = true },
+    nodes = {
+      { n = G.UIT.R, config = { align = "cm", padding = 0.06 }, nodes = {
+        { n = G.UIT.B, config = { id = "amu_marker", w = 0, h = 0 } },
+        { n = G.UIT.B, config = { id = "amu_crash_marker", w = 0, h = 0 } },
+        { n = G.UIT.T, config = { text = "Crash Detected", scale = 0.66, colour = c.purple, shadow = true } } } },
+      { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
+        { n = G.UIT.C, config = { align = "cl", padding = 0.12, minw = 10.4, r = 0.16, colour = c.panel }, nodes = text_rows } } },
+      { n = G.UIT.R, config = { align = "cm", padding = 0.04, minh = 0.4 }, nodes = {
+        { n = G.UIT.T, config = { ref_table = AMU_CRASH.status, ref_value = "text", scale = 0.32, colour = c.purple } } } },
+      { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
+        AMU_CRASH.big_btn("Yes, put them all back", "amu_crash_revert_all", G.C.GREEN, 4.2),
+        { n = G.UIT.B, config = { w = 0.25, h = 0.1 } },
+        AMU_CRASH.big_btn("Choose mods...", "amu_crash_choose", G.C.BLUE, 3.4),
+        { n = G.UIT.B, config = { w = 0.25, h = 0.1 } },
+        AMU_CRASH.big_btn("Not now", "amu_crash_later", c.grey, 2.4, "overlay_menu_back_button"),
+      } },
+      { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
+        { n = G.UIT.T, config = { text = "Not now: nothing changes, and you are asked again the next time you start the game.",
+            scale = 0.26, colour = c.light } } } },
+    },
+  }
+end
+
+---------------------------------------------------------------------------
+-- The picker
+---------------------------------------------------------------------------
+
+function AMU_CRASH.build_page(page)
+  local mods, per = AMU_CRASH.mods, AMU_CRASH.PER
+  local total_pages = math.max(1, math.ceil(#mods / per))
+  page = math.max(1, math.min(page or 1, total_pages))
+  AMU_CRASH.page = page
+
+  local c = AMU_CRASH.colours()
+  local rows = {}
+  local first, last = (page - 1) * per + 1, math.min(#mods, page * per)
+  for i = first, last do
+    local e = mods[i]
+    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_CRASH.ROW_H }, nodes = {
+      { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 4.4 }, nodes = {
+        { n = G.UIT.T, config = { text = amu_fit(e.mod_name, 0.44, 4.3), scale = 0.44, colour = c.light } } } },
+      { n = G.UIT.C, config = { align = "cl", padding = 0.04, minw = 3.9 }, nodes = {
+        { n = G.UIT.T, config = { text = amu_fit(AMU_CRASH.detail(e), 0.27, 3.8), scale = 0.27, colour = c.light } } } },
+      { n = G.UIT.C, config = { align = "cm", padding = 0, minw = 0.9 }, nodes = {
+        amu_tight_toggle {
+          ref_table = AMU_CRASH.sel,
+          ref_value = e.mod_name,
+          callback = function() AMU_CRASH.refresh_count() end,
+        },
+      } },
+    } }
+  end
+  local shown = math.max(0, last - first + 1)
+  for _ = shown + 1, per do rows[#rows + 1] = amu_blank_row(AMU_CRASH.W - 0.5, AMU_CRASH.ROW_H) end
+  return amu_list_root(rows, AMU_CRASH.W, AMU_CRASH.H)
+end
+
+G.FUNCS.amu_crash_pick_page = function(args)
+  if not args or not args.cycle_config then return end
+  amu_update_area("amu_crash_list", AMU_CRASH.build_page(args.cycle_config.current_option or 1))
+end
+
+G.UIDEF.amu_crash_picker = function()
+  local c = AMU_CRASH.colours()
+  AMU_CRASH.load()
+  AMU_CRASH.refresh_count()
+  AMU_CRASH.status.text = ""
+
+  local tab = amu_make_tab({
+    id = "amu_crash_list", cb = "amu_crash_pick_page", build = AMU_CRASH.build_page,
+    count = #AMU_CRASH.mods, per_page = AMU_CRASH.PER,
+    get_page = function() return AMU_CRASH.page end, set_page = function(p) AMU_CRASH.page = p end,
+    panel_w = 10.4, list_w = AMU_CRASH.W, list_h = AMU_CRASH.H, gap_top = 0.1,
+    top = {
+      { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+        { n = G.UIT.B, config = { id = "amu_marker", w = 0, h = 0 } }, { n = G.UIT.B, config = { id = "amu_crash_marker", w = 0, h = 0 } },
+        { n = G.UIT.T, config = { text = "Choose what to put back", scale = 0.5, colour = c.purple, shadow = true } } } },
+      { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
+        { n = G.UIT.T, config = { text = "Ticked mods go back to the version from before the update, and are pinned.",
+            scale = 0.3, colour = c.light } } } },
+      { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+        amu_btn("Revert selected", "amu_crash_revert_selected", G.C.GREEN, 2.6, 0.34),
+        amu_gap(0.1),
+        amu_btn("Revert all", "amu_crash_pick_revert_all", G.C.ORANGE or RGBA(0.85, 0.5, 0.05, 1), 1.9, 0.34),
+        amu_gap(0.1),
+        amu_btn("Keep all", "amu_crash_keep_all", G.C.BLUE, 1.8, 0.34),
+      } },
+      { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
+        amu_btn("Tick all", "amu_crash_sel_all", c.grey, 1.5, 0.3),
+        amu_gap(0.1),
+        amu_btn("Untick all", "amu_crash_sel_none", c.grey, 1.7, 0.3),
+        amu_gap(0.15),
+        { n = G.UIT.C, config = { align = "cm", minw = 3.0 }, nodes = {
+          { n = G.UIT.T, config = { ref_table = AMU_CRASH.count, ref_value = "text", scale = 0.3, colour = c.light } } } },
+      } },
+    },
+    after = {
+      { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.4 }, nodes = {
+        { n = G.UIT.T, config = { ref_table = AMU_CRASH.status, ref_value = "text", scale = 0.3, colour = c.purple } } } },
+    },
+  })
+
+  return {
+    n = G.UIT.ROOT,
+    config = { align = "cm", padding = 0.16, r = 0.2, colour = c.bg, shadow = true, hover = true },
+    nodes = {
+      tab.nodes[1],
+      { n = G.UIT.R, config = { align = "cm", padding = 0.06 }, nodes = {
+        AMU_CRASH.big_btn("Back", "amu_crash_pick_back", c.grey, 2.6, "overlay_menu_back_button"),
+      } },
+    },
+  }
+end
+
+---------------------------------------------------------------------------
+-- Actions
+---------------------------------------------------------------------------
+
+-- Tick / untick everything and redraw the visible page
+function AMU_CRASH.set_all(value)
+  for _, e in ipairs(AMU_CRASH.mods) do AMU_CRASH.sel[e.mod_name] = value and true or false end
+  AMU_CRASH.refresh_count()
+  amu_update_area("amu_crash_list", AMU_CRASH.build_page(AMU_CRASH.page))
+end
+G.FUNCS.amu_crash_sel_all  = function(e) AMU_CRASH.set_all(true) end
+G.FUNCS.amu_crash_sel_none = function(e) AMU_CRASH.set_all(false) end
+
+-- Show a text window (the same one the update results use). `restart` adds the Restart now / Later buttons.
+function AMU_CRASH.show_lines(title, lines, restart)
+  AMU_PROMPT.title = title
+  AMU_PROMPT.lines = wrap_lines(lines, 46)
+  AMU_PROMPT.page = 1
+  AMU_PROMPT.has_updates = restart and true or false
+  open_overlay(G.UIDEF.amu_restart_prompt(AMU_PROMPT))
+end
+
+-- Tell the player what was put back (and pinned), what stayed as it is, and what could not be put back.
+-- `fresh` = it just happened in this session (so the game still has to be restarted to load the old versions).
+function AMU_CRASH.show_result(reverted, failed, kept, fresh)
+  local lines = {}
+  local function add(s) lines[#lines + 1] = s end
+  if #reverted > 0 then
+    add("Put back to the version from before the update, and pinned (" .. #reverted .. "):")
+    for i = 1, math.min(#reverted, 14) do add("    " .. reverted[i]) end
+    if #reverted > 14 then add("    ...and " .. (#reverted - 14) .. " more") end
+    add("")
+    add("Pinned mods are not updated again until you unpin them (Mod Updater > Backups).")
+  end
+  if #kept > 0 then
+    if #lines > 0 then add("") end
+    add("Kept as they are (" .. #kept .. "):")
+    for i = 1, math.min(#kept, 10) do add("    " .. kept[i]) end
+    if #kept > 10 then add("    ...and " .. (#kept - 10) .. " more") end
+    add("If the game crashes again, you are asked again.")
+  end
+  if #failed > 0 then
+    if #lines > 0 then add("") end
+    add("Could not be put back (" .. #failed .. "):")
+    for i = 1, math.min(#failed, 8) do add("    " .. failed[i]) end
+  end
+  if #reverted > 0 and fresh then
+    add("")
+    add("Restart Balatro so it loads the old versions.")
+  end
+  AMU_CRASH.show_lines("Mod Updater - Crash Recovery", lines, fresh and #reverted > 0)
+end
+
+-- Read (and delete) the put-back report. Returns the lists from AMU_CRASH.apply_report.
+function AMU_CRASH.process_report()
+  local report_path = AMU_CRASH.path("_crash_rollback_report.json")
+  if not file_exists(report_path) then return {}, {}, {} end
+  local data = read_all(report_path)
+  pcall(os.remove, report_path)
+  local reverted, failed, kept = AMU_CRASH.apply_report(data and decode_json(data))
+  if #reverted > 0 then pcall(write_ps1_config_overlay) end
+  return reverted, failed, kept
+end
+
+-- autoupdate.ps1 finished a put-back: say what happened.
+function AMU_CRASH.finish()
+  local reverted, failed, kept = AMU_CRASH.process_report()
+  local waiting = AMU_CRASH.load()
+  if #reverted > 0 or #failed > 0 then
+    AMU_CRASH.show_result(reverted, failed, kept, true)
+  elseif waiting > 0 then
+    -- the script could not do it (see last_run.json): put the question back so the player can try again
+    AMU_CRASH.shown = true
+    open_overlay(G.UIDEF.amu_crash_prompt())
+    AMU_CRASH.status.text = "The put-back did not run. Details: last_run.json"
+  else
+    AMU_CRASH.show_lines("Mod Updater - Crash Recovery", { "Nothing was changed.", "", "Details: last_run.json" }, false)
+  end
+end
+
+-- Put the previous version of these mods back (autoupdate.ps1 does the work in the background).
+function AMU_CRASH.run_revert(names)
+  if AMU_CRASH.busy then return end
+  if #names == 0 then
+    AMU_CRASH.status.text = "Nothing is ticked. Tick a mod, or press Keep all."
+    return
+  end
+  if not is_windows() then AMU_CRASH.status.text = "Windows only"; return end
+  if not (love and love.thread and love.thread.newThread and love.thread.getChannel) then
+    AMU_CRASH.status.text = "No thread support"
+    return
+  end
+
+  -- No trailing slash on the folders: Windows reads a backslash right before a closing quote as an escaped quote,
+  -- which would swallow the arguments after it (the older commands get away with it because -SelfDir is their last one).
+  local mods_dir = (join_path(love.filesystem.getSaveDirectory(), "Mods"):gsub("[/\\]+$", ""))
+  local mod_path = (amu_mod_path():gsub("[/\\]+$", ""))
+  local ps1 = join_path(mod_path, "autoupdate.ps1")
+  if not file_exists(ps1) then AMU_CRASH.status.text = "autoupdate.ps1 is missing"; return end
+
+  -- which mods: a small file next to the script (mod names can hold spaces and brackets, so not on the command line)
+  if not AMU_CRASH.write_json("_crash_selection.json", { mods = names }) then
+    AMU_CRASH.status.text = "Could not write _crash_selection.json"
+    return
+  end
+  pcall(write_ps1_config_overlay)
+
+  local cmd = table.concat({
+    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+    "-File", safe_quote(winpath(ps1)),
+    "-ModsDir", safe_quote(winpath(mods_dir)),
+    "-SelfDir", safe_quote(winpath(mod_path)),
+    "-RollbackRecent",
+    "-SelectionFile", safe_quote(winpath(AMU_CRASH.path("_crash_selection.json"))),
+  }, " ")
+
+  AMU_CRASH.busy = true
+  AMU_CRASH.status.text = "Putting the old versions back... please wait."
+
+  local channel = love.thread.getChannel("amu_crash_revert")
+  channel:clear()
+  local thread_code = [[
+    local cmd = ...
+    local ok = pcall(function() os.execute(cmd) end)
+    love.thread.getChannel("amu_crash_revert"):push(ok and "done" or "error")
+  ]]
+  love.thread.newThread(thread_code):start(cmd)
+
+  G.E_MANAGER:add_event(Event({
+    blockable = false,
+    blocking = false,
+    no_delete = true,   -- survive the event-queue wipe when a run starts
+    func = function()
+      if not channel:pop() then return false end
+      AMU_CRASH.busy = false
+      AMU_CRASH.finish()
+      return true
+    end
+  }))
+end
+
+-- "Keep all": nothing is changed, but the mods stay suspects until the game has started fine once.
+function AMU_CRASH.keep_all()
+  if AMU_CRASH.busy then return end
+  AMU_CRASH.load()
+  local mods = AMU_CRASH.mods
+  AMU_CRASH.rearm(mods)
+  pcall(os.remove, AMU_CRASH.path("_crash_pending.json"))
+  pcall(os.remove, AMU_CRASH.path("_crash_selection.json"))
+  AMU_CRASH.mods, AMU_CRASH.sel = {}, {}
+  AMU_CRASH.show_lines("Mod Updater - Crash Recovery", {
+    "Keeping all " .. #mods .. " updated mod(s) as they are.",
+    "",
+    "If the game crashes again at start, you are asked again. You can also close the game and run 'Undo last update.bat' in the Mod Updater folder.",
+  }, false)
+end
+
+G.FUNCS.amu_crash_revert_all = function(e) AMU_CRASH.run_revert(AMU_CRASH.all_names()) end
+G.FUNCS.amu_crash_pick_revert_all = function(e) AMU_CRASH.run_revert(AMU_CRASH.all_names()) end
+G.FUNCS.amu_crash_revert_selected = function(e) AMU_CRASH.run_revert(AMU_CRASH.ticked()) end
+G.FUNCS.amu_crash_keep_all = function(e) AMU_CRASH.keep_all() end
+
+G.FUNCS.amu_crash_choose = function(e)
+  if AMU_CRASH.busy then return end
+  open_overlay(G.UIDEF.amu_crash_picker())
+end
+
+-- Back from the picker: back to the question
+G.FUNCS.amu_crash_pick_back = function(e)
+  if AMU_CRASH.busy then return end
+  open_overlay(G.UIDEF.amu_crash_prompt())
+end
+
+-- Not now: nothing changes; the question comes back the next time the game starts.
+G.FUNCS.amu_crash_later = function(e)
+  if AMU_CRASH.busy then return end
+  AMU_CRASH.answered = true   -- asked again the next time the game starts
+  amu_close_everything()
+end
+
+-- Button in the Mod Updater settings: bring the question back (after a "Not now").
+G.FUNCS.amu_crash_review = function(e)
+  if AMU_CRASH.load() == 0 then return end
+  AMU_CRASH.shown = true
+  AMU_CRASH.answered = false
+  if open_overlay(G.UIDEF.amu_crash_prompt()) then AMU_CRASH.start_poller() end
+end
+
+-- Is the main menu showing, with nothing on top of it?
+function AMU_CRASH.menu_idle()
+  if not (G and G.STAGES and G.STAGE == G.STAGES.MAIN_MENU) or G.OVERLAY_MENU then return false end
+  return (G.MAIN_MENU_UI or (G.STATES and G.STATE == G.STATES.MENU)) and true or false
+end
+
+-- A short note for troubleshooting when the question has been waiting a long time (written at most twice).
+function AMU_CRASH.note_wait(secs)
+  pcall(function()
+    local f = io.open(AMU_CRASH.path("_crash_poller.log"), "ab")
+    if not f then return end
+    f:write(string.format("%s waiting %ds: STAGE=%s STATE=%s MAIN_MENU_UI=%s OVERLAY=%s in_flight=%s answered=%s busy=%s\n",
+      os.date("%Y-%m-%d %H:%M:%S"), secs, tostring(G.STAGE), tostring(G.STATE), tostring(G.MAIN_MENU_UI ~= nil),
+      tostring(G.OVERLAY_MENU ~= nil and G.OVERLAY_MENU ~= false), tostring(AMU_CRASH.in_flight),
+      tostring(AMU_CRASH.answered), tostring(AMU_CRASH.busy)))
+    f:close()
+  end)
+end
+
+-- Is the question (or the picker) the open menu?
+function AMU_CRASH.prompt_on_screen()
+  local om = G and G.OVERLAY_MENU
+  if not (om and om.get_UIE_by_ID) then return false end
+  local ok, n = pcall(om.get_UIE_by_ID, om, "amu_crash_marker")
+  return (ok and n) and true or false
+end
+
+function AMU_CRASH.has_work()
+  return #AMU_CRASH.read_pending() > 0 or file_exists(AMU_CRASH.path("_crash_rollback_report.json"))
+end
+
+-- On a controller, the cursor must start on the question, not on something behind it on the main menu.
+-- Returns true when it had to move the cursor.
+function AMU_CRASH.ensure_focus(ctrl)
+  ctrl = ctrl or (G and G.CONTROLLER)
+  if not (ctrl and ctrl.HID and ctrl.HID.controller and ctrl.snap_to) then return false end
+  local om = G.OVERLAY_MENU
+  if not (om and AMU_CRASH.prompt_on_screen()) then return false end
+  local t = ctrl.focused and ctrl.focused.target
+  if t and t.UIBox == om then return false end
+  -- the picker's check boxes are in their own box inside the menu: that counts as inside too
+  local par = t and t.UIBox and t.UIBox.config and t.UIBox.config.parent
+  if par and par.UIBox == om then return false end
+  local n = amu_find_node(function(c) return c.button == "amu_crash_revert_all" end)
+         or amu_find_node(function(c) return c.button == "amu_crash_revert_selected" end)
+  if not n then return false end
+  ctrl:snap_to({ node = n })
+  if ctrl.update_cursor then ctrl:update_cursor() end
+  return true
+end
+
+-- Watches over the question until it is answered:
+--   * waits for the main menu (with nothing on top of it) before asking, and for any running update check
+--   * keeps the controller cursor on the question
+--   * if the question vanished before the player could see it (the game rebuilt the menu), asks again
+--   * if it was on screen and then closed (Not now, B, Esc), that was the answer for this session
+function AMU_CRASH.start_poller()
+  if AMU_CRASH.polling or not (G and G.E_MANAGER and Event) then return end
+  AMU_CRASH.polling = true
+  local since, opened_at, seen = nil, nil, false
+  local started, noted = amu_now(), 0
+  G.E_MANAGER:add_event(Event({
+    blockable = false,
+    blocking = false,
+    no_delete = true,   -- survive the event-queue wipe when a run starts
+    func = function()
+      local now = amu_now()
+      if AMU_CRASH.prompt_on_screen() then
+        opened_at = opened_at or now
+        if now - opened_at >= 1.0 then seen = true end
+        pcall(AMU_CRASH.ensure_focus)
+        return false
+      end
+      opened_at = nil
+      if AMU_CRASH.busy then return false end     -- a put-back is running; its result window comes next
+      if seen then
+        seen = false
+        if #AMU_CRASH.read_pending() > 0 then AMU_CRASH.answered = true end
+      end
+      local crash_done = not AMU_CRASH.has_work()
+        or (AMU_CRASH.answered and not file_exists(AMU_CRASH.path("_crash_rollback_report.json")))
+      if crash_done then
+        if not AMU_CRASH.later_summary then
+          AMU_CRASH.polling = false
+          return true
+        end
+        -- the update check finished while the crash question was up: show its results now, on the main menu
+        if not AMU_CRASH.menu_idle() then since = nil; return false end
+        since = since or now
+        if (now - since) < 0.5 then return false end
+        local sm = AMU_CRASH.later_summary
+        AMU_CRASH.later_summary = nil
+        pcall(show_prompt, sm)
+        AMU_CRASH.polling = false
+        return true
+      end
+      if noted < 2 and (now - started) > (noted == 0 and 30 or 120) then
+        noted = noted + 1
+        AMU_CRASH.note_wait(math.floor(now - started))
+      end
+      if not AMU_CRASH.menu_idle() then since = nil; return false end
+      since = since or now
+      if (now - since) < 1.5 then return false end   -- let the menu finish sliding in
+      since = nil
+      pcall(AMU_CRASH.startup_check, nil)
+      return false
+    end
+  }))
+end
+
+-- Put the question (or the result of a put-back made while the game was closed) on screen, if there is one.
+-- Only on the main menu with nothing on top of it; otherwise the watcher above asks as soon as it is.
+-- Returns true when something was shown.
+function AMU_CRASH.startup_check(summary)
+  if summary then
+    local n = #(summary.updated_mods or {})
+    AMU_CRASH.extra_note = (n > 0) and ("Also updated " .. n .. " other mod(s) just now.") or nil
+  end
+  if AMU_CRASH.busy then return false end
+  if not AMU_CRASH.menu_idle() then
+    if AMU_CRASH.has_work() then AMU_CRASH.start_poller() end
+    return false
+  end
+  local reverted, failed, kept = AMU_CRASH.process_report()
+  if #reverted > 0 or #failed > 0 then
+    AMU_CRASH.show_result(reverted, failed, kept, false)
+    return true
+  end
+  if AMU_CRASH.answered then return false end
+  if AMU_CRASH.load() == 0 then return false end
+  AMU_CRASH.shown = true
+  local ok = open_overlay(G.UIDEF.amu_crash_prompt()) and true or false
+  if ok then AMU_CRASH.start_poller() end
+  return ok
 end
 
 -- Write the launch sentinel so PS1 knows the game started successfully after
@@ -3568,76 +4973,24 @@ local function write_launch_sentinel(mod_path)
 end
 
 -- Called after every full (non-single-mod) PS1 run completes.
--- Writes the launch sentinel, processes any crash rollback report, and shows
--- the appropriate in-game notification to the user.
+-- Shows what a put-back did, or asks about a startup crash, or shows the usual update results.
 on_full_update_done = function(mod_path)
-  -- (The sentinel is now written when the main menu is reached, not here.)
-
-  -- Process crash rollback report (written by PS1 when it detects a crash)
-  local rollback_mods = {}
-  local report_path = join_path(mod_path, "_crash_rollback_report.json")
-  if file_exists(report_path) then
-    local data = read_all(report_path)
-    pcall(function() os.remove(report_path) end)
-    local report = data and decode_json(data)
-    if report and report.mods then
-      for _, entry in ipairs(report.mods) do
-        if entry.mod_name then
-          if not entry.error then
-            rollback_mods[#rollback_mods + 1] = tostring(entry.mod_name)
-            -- Sync the rollback pin into the Lua runtime config so the UI
-            -- shows the correct pinned state and write_ps1_config_overlay
-            -- preserves it on the next write.
-            config.mod_pinned = config.mod_pinned or {}
-            config.mod_update_enabled = config.mod_update_enabled or {}
-            config.mod_pinned[entry.mod_name] = {
-              pinned = true,
-              backup_file = tostring(entry.backup_file or ""),
-              pinned_at = tostring(report.rolled_back_at or os.date("!%Y-%m-%dT%H:%M:%SZ")),
-              auto_rolled_back = true,
-            }
-            config.mod_update_enabled[entry.mod_name] = false
-          end
-        end
-      end
-      if #rollback_mods > 0 then
-        pcall(write_ps1_config_overlay)
-      end
-    end
-  end
-
+  AMU_CRASH.in_flight = false
   local summary = read_summary(mod_path)
-
-  if #rollback_mods > 0 then
-    -- Show crash notification (with optional update info appended)
-    local lines = {
-      "Crash detected! The following mod(s) caused",
-      "a startup crash and were reverted to their",
-      "previous version and pinned:",
-      "",
-    }
-    for _, name in ipairs(rollback_mods) do
-      lines[#lines + 1] = "  " .. name
-    end
-    lines[#lines + 1] = ""
-    lines[#lines + 1] = "These mods won't update until you manually"
-    lines[#lines + 1] = "unpin them in Mod Updater settings."
-    if summary and #(summary.updated_mods or {}) > 0 then
-      lines[#lines + 1] = ""
-      lines[#lines + 1] = "Also updated " .. #summary.updated_mods .. " other mod(s)."
-    end
-    if summary and #(summary.errors or {}) > 0 then
-      lines[#lines + 1] = ""
-      lines[#lines + 1] = "Update errors: " .. #(summary.errors or {})
-    end
-    AMU_PROMPT.title    = "Mod Updater - Crash Detected"
-    AMU_PROMPT.lines    = wrap_lines(lines, 46)
-    AMU_PROMPT.page = 1
-    AMU_PROMPT.has_updates = (summary ~= nil and (#(summary.updated_mods or {}) > 0 or summary.framework_staged == true))
-    open_overlay(G.UIDEF.amu_restart_prompt(AMU_PROMPT))
-  elseif summary then
-    show_prompt(summary)
+  -- the crash question (or its result) is on screen or still to come: show the update results after it
+  if AMU_CRASH.polling or AMU_CRASH.busy or AMU_CRASH.prompt_on_screen() then
+    AMU_CRASH.later_summary = summary
+    AMU_CRASH.start_poller()
+    return
   end
+  if AMU_CRASH.startup_check(summary) then return end
+  if summary then show_prompt(summary) end
+end
+
+-- Something is waiting (a startup crash to ask about, or a put-back made while the game was closed): watch for the
+-- main menu and ask there. Works the same with "Auto-check at startup" on or off.
+if is_windows() and G and G.E_MANAGER and Event then
+  pcall(function() if AMU_CRASH.has_work() then AMU_CRASH.start_poller() end end)
 end
 
 ---------------------------------------------------------------------------
@@ -3863,6 +5216,8 @@ local function run_update_async(mods_dir, mod_path)
     amu_show_loading(ref)
   end
 
+  AMU_CRASH.in_flight = true   -- the startup-crash question (if any) waits for this run
+
   local start_time = love.timer and love.timer.getTime and love.timer.getTime() or 0
   local dots = 0
 
@@ -3881,7 +5236,9 @@ local function run_update_async(mods_dir, mod_path)
 
       if love.timer and love.timer.getTime and (love.timer.getTime() - start_time) > (tonumber(config.ui_timeout_seconds) or 300) then
         amu_hide_loading()
+        AMU_CRASH.in_flight = false
         show_msg("Mod Updater", "Updater timed out waiting for PowerShell.\nYou can still play.", {"OK"}, "warning")
+        pcall(AMU_CRASH.startup_check, nil)
         return true
       end
       return false

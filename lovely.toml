@@ -1,0 +1,13 @@
+# Mod Updater: crash recovery screen.
+# Puts crash_guard.lua at the top of the game's main.lua so that, if the game crashes while starting right after
+# the Mod Updater updated some mods, you get "put them back?" instead of only the crash report.
+[manifest]
+version = "1.0.0"
+dump_lua = true
+priority = -100
+
+[[patches]]
+[patches.copy]
+target = "main.lua"
+position = "prepend"
+sources = ["crash_guard.lua"]
