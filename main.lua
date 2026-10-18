@@ -1,4 +1,4 @@
--- Mod Updater (Steamodded) v0.8.3
+-- Mod Updater (Steamodded) v0.8.4
 -- In-game config with two tabs: Settings (general + Nexus key + check now) and Mod Toggles (paginated).
 -- Uses Steamodded's DynamicUIManager for proper pagination.
 -- Git pull mode: rebase (default and recommended).
@@ -1164,11 +1164,30 @@ function AMU_FIND.available()
 end
 
 -- Tap = jump into the box; hold for AMU_FIND.HOLD seconds = clear it.
+-- A few log lines in _hold_s.log (capped, only when AMU_FIND.DEBUG is on) so a hotkey that does nothing can be traced.
+AMU_FIND.DEBUG = false   -- set to true to write _hold_s.log while tracing the search hotkeys
+AMU_FIND.dbg_n = 0
+function AMU_FIND.dbg(msg)
+  if not AMU_FIND.DEBUG then return end
+  if AMU_FIND.dbg_n >= 30 then return end
+  AMU_FIND.dbg_n = AMU_FIND.dbg_n + 1
+  pcall(function()
+    local dir = AMU_CRASH_GUARD and AMU_CRASH_GUARD.mod_dir
+    if not dir then return end
+    local f = io.open(dir .. "/_hold_s.log", "a")
+    if f then
+      f:write(string.format("%.2f %s\n", (G.TIMERS and G.TIMERS.REAL) or 0, msg))
+      f:close()
+    end
+  end)
+end
+
 function AMU_FIND.hold_begin(id)
   local now = (G.TIMERS and G.TIMERS.REAL) or 0
   local h = AMU_FIND.hold
   if h and h.id == id and now - h.t0 < 10 then return true end    -- key repeat
   local which = AMU_FIND.available()
+  AMU_FIND.dbg("press " .. tostring(id) .. " row=" .. tostring(which))
   if not which then return false end
   AMU_FIND.hold = { id = id, t0 = now, fired = false, which = which }
   return true
@@ -1183,12 +1202,106 @@ end
 
 -- called once per frame (from the controller hook)
 function AMU_FIND.hold_tick()
-  local h = AMU_FIND.hold
-  if not h or h.fired then return end
   local now = (G.TIMERS and G.TIMERS.REAL) or 0
-  if now - h.t0 < AMU_FIND.HOLD then return end
-  h.fired = true
-  pcall(AMU_FIND.clear, h.which)
+  local h = AMU_FIND.hold
+  if h and not h.fired and now - h.t0 >= AMU_FIND.HOLD then
+    h.fired = true
+    AMU_FIND.dbg("hold fired (" .. tostring(h.id) .. ")")
+    pcall(AMU_FIND.clear, h.which)
+  end
+  -- Keyboard safety net: ask the keyboard itself whether S is still down. If another mod swallowed the key events
+  -- (so the press/release hooks above never saw the hold), this still clears the box after AMU_FIND.HOLD seconds.
+  local down = false
+  if love and love.keyboard and love.keyboard.isDown then
+    local ok, d = pcall(love.keyboard.isDown, "s")
+    down = (ok and d) and true or false
+  end
+  local p = AMU_FIND.poll
+  local C = G and G.CONTROLLER
+  if not down then
+    AMU_FIND.poll = nil
+  elseif not p then
+    -- which == nil: S went down on a screen that has no search row -> ignore it until it is released.
+    -- While the cursor is still IN our search box, S types an "s"; holding it for AMU_FIND.HOLD seconds clears the box.
+    local w = AMU_FIND.available()
+    if not w and C and AMU_FIND.owns_hook(C.text_input_hook) then w = AMU_FIND.which_open() end
+    AMU_FIND.poll = { t0 = now, which = w, fired = false }
+    AMU_FIND.dbg("S down row=" .. tostring(w) .. " typing=" .. tostring(C and C.text_input_hook ~= nil))
+  elseif p.which and not p.fired and now - p.t0 >= AMU_FIND.HOLD then
+    p.fired = true
+    local h2 = AMU_FIND.hold
+    if h2 and h2.fired then return end            -- the normal path already cleared it
+    if h2 then h2.fired = true end                -- so letting go does not jump into the box
+    AMU_FIND.dbg("poll fired (keyboard S)")
+    pcall(AMU_FIND.clear, p.which)
+  end
+  pcall(AMU_FIND.heal_tick)
+end
+
+-- The tab box of the open search tab (the box that sits inside the Mods menu's tab area).
+function AMU_FIND.tab_box(which)
+  local om = G and G.OVERLAY_MENU
+  if not (om and om.get_UIE_by_ID and which) then return nil end
+  local ok, row = pcall(om.get_UIE_by_ID, om, "amu_find_row_" .. which)
+  return ok and row and row.UIBox or nil
+end
+
+-- Leaving the search box (B on a controller, Enter, Esc) makes the game lay the tab out again, and a tab that sits
+-- inside another box then lands too far to the right. Remember where the tab was while the cursor was in the box;
+-- when the box is let go, watch for about a second and rebuild just the tab (like Clear does) if it moved.
+-- The controller's on-screen keyboard. The game removes it from the search box's own per-frame update; if that box is
+-- rebuilt first, the keyboard (and the extra cursor layer it adds) is left behind and the keyboard and controller go
+-- dead while the mouse still works. Close it the same way the game does.
+function AMU_FIND.close_osk()
+  local C = G and G.CONTROLLER
+  local osk = C and C.screen_keyboard
+  if not osk then return false end
+  local par = osk.config and osk.config.parent
+  if par and par.children and par.children.controller_keyboard == osk then par.children.controller_keyboard = nil end
+  pcall(function() osk:remove() end)
+  C.screen_keyboard = nil
+  if C.mod_cursor_context_layer then pcall(C.mod_cursor_context_layer, C, -1) end
+  AMU_FIND.dbg("closed a stale on-screen keyboard")
+  return true
+end
+
+function AMU_FIND.heal_tick()
+  local C = G and G.CONTROLLER
+  local now = (G.TIMERS and G.TIMERS.REAL) or 0
+  -- safety net: an on-screen keyboard with no text box to type into for over half a second is left over
+  if C and C.screen_keyboard and not C.text_input_hook then
+    AMU_FIND.osk_t0 = AMU_FIND.osk_t0 or now
+    if now - AMU_FIND.osk_t0 > 0.5 then AMU_FIND.osk_t0 = nil; pcall(AMU_FIND.close_osk) end
+  else
+    AMU_FIND.osk_t0 = nil
+  end
+  local owned = C and AMU_FIND.owns_hook(C.text_input_hook)
+  if owned then
+    if not AMU_FIND.hooked then
+      local w = AMU_FIND.which_open()
+      local b = AMU_FIND.tab_box(w)
+      if b and b.T then AMU_FIND.hooked = { which = w, x = b.T.x, y = b.T.y } end
+    end
+    AMU_FIND.heal = nil
+    return
+  end
+  if AMU_FIND.hooked then
+    AMU_FIND.heal = { which = AMU_FIND.hooked.which, x = AMU_FIND.hooked.x, y = AMU_FIND.hooked.y, t0 = now }
+    AMU_FIND.hooked = nil
+  end
+  local h = AMU_FIND.heal
+  if not h then return end
+  if now - h.t0 > 1.2 then AMU_FIND.heal = nil return end
+  if AMU_FIND.which_open() ~= h.which then AMU_FIND.heal = nil return end
+  local b = AMU_FIND.tab_box(h.which)
+  if not (b and b.T) then return end
+  if math.abs(b.T.x - h.x) > 0.05 or math.abs(b.T.y - h.y) > 0.05 then
+    AMU_FIND.heal = nil
+    AMU_FIND.dbg(string.format("tab moved (%.2f,%.2f) -> rebuilding", b.T.x - h.x, b.T.y - h.y))
+    if AMU_FIND.swap_tab("amu_find_row_" .. h.which) then
+      AMU_FIND.snap_to_button("amu_find_clear_" .. h.which)
+    end
+  end
 end
 
 local function amu_sort_name(mode)
@@ -1599,11 +1712,15 @@ end
 
 local function amu_header_row(title, scale)
   local purple = (G.C and G.C.PURPLE) or RGBA(0.62, 0.33, 0.92, 1)
-  return { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
-    { n = G.UIT.T, config = { text = title, scale = scale or 0.5, colour = purple, shadow = true } },
-    { n = G.UIT.B, config = { w = 0.5, h = 0.1 } },
-    amu_close_all_node(2.6, true),
-  }}
+  -- a little air under the title row so it is not flush with the buttons below it (the lists give that space back)
+  return { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = { { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = {
+    { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
+      { n = G.UIT.T, config = { text = title, scale = scale or 0.5, colour = purple, shadow = true } },
+      { n = G.UIT.B, config = { w = 0.5, h = 0.1 } },
+      amu_close_all_node(2.6, true),
+    }},
+    { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = { { n = G.UIT.B, config = { w = 0.1, h = 0.14 } } } },
+  }}}}
 end
 
 local function amu_update_area(id, def)
@@ -2335,6 +2452,7 @@ end
 -- Build the open tab's contents again IN PLACE - exactly what the game does when you switch tabs, so nothing slides
 -- and the menu around it stays put. `any_id` = the id of any node on the tab. Returns true when it worked.
 function AMU_FIND.swap_tab(any_id)
+  if G and G.CONTROLLER and G.CONTROLLER.screen_keyboard and not G.CONTROLLER.text_input_hook then pcall(AMU_FIND.close_osk) end
   local om = G and G.OVERLAY_MENU
   local node = om and om.get_UIE_by_ID and om:get_UIE_by_ID(any_id)
   local box = node and node.UIBox
@@ -2642,7 +2760,7 @@ amu_extra_tabs_raw = function()
           count = #AMU_FIND.entries("toggles", config.sort_toggles), per_page = MODS_PER_PAGE,
           find = "toggles", find_side = 4.7, find_box = 2.3, find_label = true,
           get_page = function() return AMU_CONFIG_PAGE end, set_page = function(p) AMU_CONFIG_PAGE = p end,
-          panel_w = 15.6, list_w = AMU_TOG_W, list_h = AMU_TOG_H, gap_top = 0.18,
+          panel_w = 15.6, list_w = AMU_TOG_W, list_h = AMU_TOG_H, gap_top = 0.1,
           top = {
             amu_header_row("Mod Update Toggles", 0.5),
             { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
@@ -2674,7 +2792,7 @@ amu_extra_tabs_raw = function()
           count = #AMU_FIND.entries("backups", config.sort_backups), per_page = AMU_BK_PER,
           find = "backups", find_side = 4.7, find_box = 2.3, find_label = true,
           get_page = function() return AMU_BACKUP_PAGE end, set_page = function(p) AMU_BACKUP_PAGE = p end,
-          panel_w = 15.6, list_w = AMU_BK_W, list_h = AMU_BK_H, gap_top = 0.25,
+          panel_w = 15.6, list_w = AMU_BK_W, list_h = AMU_BK_H, gap_top = 0.17,
           top = {
             amu_header_row("Mod Backups & Pinning", 0.5),
             { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
@@ -2701,7 +2819,7 @@ amu_extra_tabs_raw = function()
           count = #AMU_FIND.entries("forks", config.sort_forks), per_page = AMU_FORK_PER,
           find = "forks", find_side = 4.7, find_box = 2.3, find_label = true,
           get_page = function() return AMU_FORK_PAGE end, set_page = function(p) AMU_FORK_PAGE = p end,
-          panel_w = 15.6, list_w = AMU_FORK_W, list_h = AMU_FORK_H, gap_top = 0.12,
+          panel_w = 15.6, list_w = AMU_FORK_W, list_h = AMU_FORK_H, gap_top = 0.06,
           top = {
             amu_header_row("Fork Finder", 0.5),
             { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
@@ -2739,7 +2857,7 @@ amu_extra_tabs_raw = function()
           id = "amu_nosrc_list", cb = "amu_nosrc_page", build = build_nosrc_page,
           count = #read_untracked_list(), per_page = AMU_NS_PER,
           get_page = function() return AMU_NOSRC_PAGE end, set_page = function(p) AMU_NOSRC_PAGE = p end,
-          panel_w = 15.6, list_w = AMU_NS_W, list_h = AMU_NS_H,
+          panel_w = 15.6, list_w = AMU_NS_W, list_h = AMU_NS_H, gap_top = 0.04,
           top = {
             amu_header_row("Mods With No Update Source", 0.5),
             { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
@@ -4241,6 +4359,17 @@ local function build_prompt_lines(summary)
     for i = 1, math.min(#errors, 20) do table.insert(lines, "    " .. tostring(errors[i])) end
     if #errors > 20 then table.insert(lines, "    ...") end
     table.insert(lines, "")
+    -- Nexus answered 401: the key is missing, wrong, or was replaced on the Nexus site
+    local nexus_401 = false
+    for _, e in ipairs(errors) do
+      local t = tostring(e)
+      if t:find("(nexus)", 1, true) and (t:find("401", 1, true) or t:lower():find("unauthorized", 1, true)) then nexus_401 = true break end
+    end
+    if nexus_401 then
+      table.insert(lines, "Nexus did not accept your API key. Get a new one:")
+      table.insert(lines, "    Mods > Mod Updater > Config > How do I get a key?")
+      table.insert(lines, "")
+    end
   end
 
   local available = summary.available_updates or {}

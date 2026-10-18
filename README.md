@@ -9,10 +9,17 @@ It notices changes to a mod you installed from its Git page, its GitHub Releases
 
 Auto-checking at startup is off by default. Turn it on in the mod's config tab.
 
+## What's new in 0.8.4
+- **Hold S clears the search, even while you are typing.** On Mod Toggles, Backups and Fork Finder, holding **S** on the keyboard for about half a second now empties the search box. Before, it only worked when the cursor was outside the box. A quick tap of S still jumps into the box, and holding **R3** on a controller still clears it.
+- **No more sideways jump after leaving the search box with a controller.** Pressing **B** (or Enter, or Esc) in the search box could push the whole tab to the right. The tab is now put back.
+- **No more frozen keyboard and controller.** If the controller's on-screen keyboard was left behind after the search box closed, the keyboard and controller stopped responding while the mouse still worked. A leftover keyboard is now closed automatically.
+
 ## What's new in 0.8.3
 - **Bigger Config page.** The settings now fill the whole window: two panels with larger toggles, text and buttons, and room for the controller button hints.
 - **Easier Nexus key.** The Config page has a **How do I get a key?** button. It shows the steps and opens your Nexus account's API tab in the browser, and **Paste key** saves it. (Nexus only offers one-click sign-in to apps it has registered itself, so the key is still copied by hand.)
 - **Config page controller fix.** Up and Down on the right-hand buttons no longer jump to a toggle on the left.
+- **Clearer Nexus errors.** If Nexus rejects your API key (error 401), the results screen now says so and points to Config > How do I get a key?
+- **A little more room under each tab title**, so it no longer touches the buttons below it.
 - **Close All Menus on the title line.** On every tab the red button now sits next to the page title with its "Hold B or press Esc" hint beside it, instead of in the corner.
 - **Bigger page selector** on every list tab, matching the size of the search box and Clear button.
 - **Bigger No Source tab**, sized like the other tabs.
