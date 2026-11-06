@@ -349,8 +349,9 @@ end
 
 function AMU_CRASH.label(e)
   local d = AMU_CRASH.detail(e)
-  if d == "" then return e.mod_name end
-  return e.mod_name .. "   (" .. d .. ")"
+  local nm = (e.mod_name == "smods" and "Steamodded") or (e.mod_name == "lovely" and "Lovely") or e.mod_name
+  if d == "" then return nm end
+  return nm .. "   (" .. d .. ")"
 end
 
 -- Apply a put-back report (_crash_rollback_report.json) to this mod's own settings: the put-back mods are pinned and
@@ -366,18 +367,50 @@ function AMU_CRASH.apply_report(report)
         failed[#failed + 1] = tostring(entry.mod_name) .. " - " .. tostring(entry.error)
       else
         reverted[#reverted + 1] = tostring(entry.mod_name)
-        config.mod_pinned[entry.mod_name] = {
-          pinned = true,
-          backup_file = tostring(entry.backup_file or ""),
-          pinned_at = tostring(report.rolled_back_at or os.date("!%Y-%m-%dT%H:%M:%SZ")),
-          auto_rolled_back = true,
-        }
-        config.mod_update_enabled[entry.mod_name] = false
+        if entry.mod_name == "smods" or entry.mod_name == "lovely" then
+          -- Steamodded / Lovely are pinned in their own list (they are not normal mods)
+          config.framework_pins = config.framework_pins or {}
+          config.framework_pins[entry.mod_name] = {
+            pinned = true,
+            backup_file = tostring(entry.backup_file or ""),
+            pinned_at = tostring(report.rolled_back_at or os.date("!%Y-%m-%dT%H:%M:%SZ")),
+            auto_rolled_back = true,
+          }
+        else
+          config.mod_pinned[entry.mod_name] = {
+            pinned = true,
+            backup_file = tostring(entry.backup_file or ""),
+            pinned_at = tostring(report.rolled_back_at or os.date("!%Y-%m-%dT%H:%M:%SZ")),
+            auto_rolled_back = true,
+          }
+          config.mod_update_enabled[entry.mod_name] = false
+        end
       end
     end
   end
   for _, n in ipairs(AMU_CRASH.as_list(report.kept)) do kept[#kept + 1] = tostring(n) end
   return reverted, failed, kept
+end
+
+-- autoupdate.ps1 releases a pin when the mod's source serves a version other than the one that was put back (_pin_released.json).
+-- Drop those pins from this mod's own lists so the mod is updated (to the latest version) again.
+function AMU_CRASH.adopt_pin_releases()
+  local pth = AMU_CRASH.path("_pin_released.json")
+  local data = decode_json(read_all(pth) or "")
+  if type(data) ~= "table" then return end
+  config.mod_update_enabled = config.mod_update_enabled or {}
+  for _, e in ipairs(AMU_CRASH.as_list(data)) do
+    if type(e) == "table" and e.mod_name then
+      local n = tostring(e.mod_name)
+      if n == "smods" or n == "lovely" then
+        if config.framework_pins then config.framework_pins[n] = nil end
+      else
+        if config.mod_pinned then config.mod_pinned[n] = nil end
+        config.mod_update_enabled[n] = true
+      end
+    end
+  end
+  pcall(os.remove, pth)
 end
 
 -- A put-back made while the game was closed ("Undo last update.bat") saved its pins only in autoupdater_config.json.
@@ -472,6 +505,7 @@ G.FUNCS = G.FUNCS or {}
 
 local always_skip = {
   ["smods"] = true,
+  ["lovely"] = true,        -- Lovely's own data folder (dumps, logs), not a mod
   [mod_folder_name] = true,
   ["_Balatro-Mod-Updater_Backups"] = true,
 }
@@ -480,6 +514,7 @@ local always_skip = {
 -- The updater's own folder is excluded so it can self-update via git/GitHub releases.
 local config_always_skip = {
   ["smods"] = true,
+  ["lovely"] = true,
   ["_Balatro-Mod-Updater_Backups"] = true,
 }
 
@@ -540,6 +575,7 @@ local function scan_mods_and_init_config()
   end
 end
 
+pcall(AMU_CRASH.adopt_pin_releases)   -- before scan_mods_and_init_config, which keeps pinned mods switched off
 pcall(scan_mods_and_init_config)
 -- A put-back made while the game was closed ("Undo last update.bat") saved its pins only in autoupdater_config.json.
 -- Adopt them now, before anything rewrites that file from this mod's own settings.
@@ -602,6 +638,31 @@ local function write_ps1_config_overlay()
     update_steamodded = config.cfg_update_steamodded == true,
     update_lovely = config.cfg_update_lovely == true,
     pinned_mods = pinned_mods,
+    framework_pins = (function()
+      local out = {}
+      for name, info in pairs(config.framework_pins or {}) do
+        if type(info) == "table" and info.pinned then
+          if name ~= "_game" then out[name] = { pinned = true, backup_file = info.backup_file or "", pinned_at = info.pinned_at or "" } end
+        end
+      end
+      return out
+    end)(),
+    pin_retry_newer = config.cfg_pin_retry ~= false,
+    game_backup = config.cfg_game_backup ~= false,
+    game_auto_switch = config.cfg_game_auto_switch ~= false,
+    allow_updates_on_backup_game = config.cfg_allow_updates_on_backup == true,
+    fork_ignore_mods = (function()
+      local out = {}
+      for name, on in pairs(config.fork_ignored_mods or {}) do if on == true then out[#out + 1] = tostring(name) end end
+      table.sort(out)
+      return out
+    end)(),
+    fork_ignore = (function()
+      local out = {}
+      for repo, on in pairs(config.fork_ignored or {}) do if on == true then out[#out + 1] = tostring(repo) end end
+      table.sort(out)
+      return out
+    end)(),
     balatro_game_dir = "",
     check_forks = config.check_forks == true,
     mod_fork_source = config.mod_fork_source or {},
@@ -662,6 +723,10 @@ local function write_ps1_config_overlay()
       f:close()
     end
   end)
+  -- Every change that matters (a pin, an unpin, a toggle, a fork switch) passes through here: also save this mod's
+  -- Steamodded config right now. Steamodded only does that when the Mods menu is left, so a pin made just before
+  -- "Restart now" (which closes the game) was lost and the mod showed no PINNED badge after the restart.
+  pcall(function() AMU_UI.save_config() end)
 end
 
 ---------------------------------------------------------------------------
@@ -681,18 +746,77 @@ local amu_nexus_display = { text = mask_nexus_key(config.nexus_api_key) }
 ---------------------------------------------------------------------------
 
 -- Opens GitHub's "new fine-grained token" page with the name and 90-day expiry filled in.
-local AMU_GH_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
-  .. "?name=Balatro+Mod+Updater"
-  .. "&description=Lets+Balatro+Mod+Updater+scan+mod+forks+%28read-only%2C+public+data%29"
-  .. "&expires_in=90"
+-- GitHub does not allow two tokens with the same name, so every new token gets the next number:
+-- "Balatro Mod Updater Token 2", "... Token 3" and so on (the first token, made before numbering, counts as 1).
+local function amu_gh_next_serial()
+  local have = config.github_token and config.github_token ~= ""
+  return (tonumber(config.github_token_serial) or (have and 1 or 0)) + 1
+end
+local function amu_gh_token_name() return "Balatro Mod Updater Token " .. tostring(amu_gh_next_serial()) end
+local function amu_gh_token_url()
+  return "https://github.com/settings/personal-access-tokens/new"
+    .. "?name=" .. amu_gh_token_name():gsub(" ", "+")
+    .. "&description=Lets+Balatro+Mod+Updater+scan+mod+forks+%28read-only%2C+public+data%29"
+    .. "&expires_in=90"
+end
 
 local function mask_gh_token(tok)
   if not tok or tok == "" then return "GitHub token: not set (limit 60 checks/hour)" end
+  if AMU_TOKEN_UI and AMU_TOKEN_UI.bad_for == tok then return "GitHub token: EXPIRED - press GitHub token to replace it" end
   return "GitHub token: " .. tok:sub(1, 11) .. string.rep("*", 8) .. "  (set)"
 end
 
 local amu_gh_display = { text = mask_gh_token(config.github_token) }
 local amu_gh_msg = { text = "" }
+
+-- Fork Finder token status: no token = flashing red, token set = solid green, token expired = flashing orange.
+-- The memo line and the "GitHub token" button read these colour tables; G.FUNCS.amu_token_flash changes them every frame.
+AMU_TOKEN_UI = AMU_TOKEN_UI or { memo_col = { 1, 1, 1, 1 }, btn_col = { 0.2, 0.4, 0.9, 1 } }
+do
+  local U = AMU_TOKEN_UI
+  function U.state()
+    local tok = config.github_token
+    if not tok or tok == "" then return "none" end
+    if U.bad_for and U.bad_for == tok then return "expired" end
+    return "ok"
+  end
+  -- called when an update check or a fork scan learns whether GitHub accepted the saved token
+  function U.set_bad(is_bad)
+    local tok = config.github_token
+    if not tok or tok == "" then return end
+    U.bad_for = is_bad and tok or nil
+    amu_gh_display.text = mask_gh_token(config.github_token)
+  end
+  function U.on_summary(summary)
+    if type(summary) == "table" then U.set_bad(summary.github_token_bad == true) end
+  end
+  function U.init()
+    if U.inited then return end
+    U.inited = true
+    local tok = config.github_token
+    if tok and tok ~= "" then
+      local d = decode_json(read_all(join_path(amu_mod_path(), "last_run.json")) or "")
+      if type(d) == "table" and d.github_token_bad == true then U.bad_for = tok end
+    end
+    amu_gh_display.text = mask_gh_token(config.github_token)
+  end
+  local function lerp3(a, c, k) return { a[1] + (c[1] - a[1]) * k, a[2] + (c[2] - a[2]) * k, a[3] + (c[3] - a[3]) * k } end
+  function G.FUNCS.amu_token_flash(e)
+    local s = U.state()
+    local t = (G.TIMERS and G.TIMERS.REAL) or 0
+    local k = 0.5 + 0.5 * math.sin(t * 6.3)
+    local m, bt
+    if s == "none" then
+      m = lerp3({ 0.5, 0.08, 0.08 }, { 1, 0.25, 0.25 }, k); bt = lerp3({ 0.42, 0.05, 0.05 }, { 0.92, 0.15, 0.15 }, k)
+    elseif s == "expired" then
+      m = lerp3({ 0.6, 0.3, 0.03 }, { 1, 0.62, 0.1 }, k); bt = lerp3({ 0.5, 0.24, 0.02 }, { 1, 0.55, 0.05 }, k)
+    else
+      m = { 0.35, 0.95, 0.45 }; bt = { 0.2, 0.65, 0.3 }
+    end
+    for i = 1, 3 do U.memo_col[i] = m[i]; U.btn_col[i] = bt[i] end
+    U.memo_col[4] = 1; U.btn_col[4] = 1
+  end
+end
 
 ---------------------------------------------------------------------------
 -- CHECK FOR UPDATES NOW (manual trigger)
@@ -773,6 +897,8 @@ local function run_manual_check()
             amu_check_status.text = "Done! " .. #updated .. " mod(s) updated."
           elseif #errors > 0 then
             amu_check_status.text = "Done with " .. #errors .. " error(s)."
+          elseif summary.game_updates_frozen == true then
+            amu_check_status.text = "Updates paused: playing a saved game copy"
           else
             amu_check_status.text = "All mods up to date!"
           end
@@ -791,7 +917,7 @@ end
 local amu_per_mod_status = {}
 local amu_per_mod_checking = {}
 
-local function run_single_mod_check(folder_name)
+local function run_single_mod_check(folder_name, on_done)
   if amu_per_mod_checking[folder_name] then return end
   if not is_windows() then
     amu_per_mod_status[folder_name] = "Windows only"
@@ -863,6 +989,7 @@ local function run_single_mod_check(folder_name)
         else
           amu_per_mod_status[folder_name] = msg == "done" and "Done" or "Error"
         end
+        if on_done then pcall(on_done, amu_per_mod_status[folder_name], summary) end
         return true
       end
       return false
@@ -891,6 +1018,7 @@ local build_backup_mods_page  -- forward declaration; assigned after close_overl
 -- Fork Finder state (forward-declared; build_fork_mods_page defined after open_overlay)
 local AMU_FORK_PAGE = 1
 local amu_fork_status = amu_status_tbl(0.3, 9.8, "")
+
 local amu_fork_scanning = false
 local amu_fork_suggestions = nil
 local load_fork_suggestions  -- forward declaration; assigned after open_overlay/close_overlay
@@ -1061,6 +1189,12 @@ local AMU_FIND = {
   list_id = { toggles = "amu_mod_toggle_list", backups = "amu_backup_mod_list", forks = "amu_fork_mod_list" },
   hold    = nil,                              -- { id = "s" | "rightstick", t0, fired, which }
   installed = false,
+  filter  = { toggles = "all", backups = "all" },   -- the "Show:" button on those two tabs (all / on / off / pinned)
+  filter_now  = { toggles = { text = "All" }, backups = { text = "All" } },                 -- "Show: <this>" pill
+  filter_nxt  = { toggles = { text = "Next: ON" }, backups = { text = "Next: Pinned" } },   -- the button
+  pg      = {},                               -- the page selector of each list (for the << and >> buttons), by list id
+  sh      = { btn = nil, fired = false, t0 = nil, ticked = false },   -- LB / RB being held on a page screen (hold LB = first page, RB = last)
+  HOLD_SH = 0.45,                             -- seconds to hold LB / RB to jump to the first / last page
 }
 
 function AMU_FIND.words(text)
@@ -1073,9 +1207,31 @@ function AMU_FIND.active(which)
   return #AMU_FIND.words(AMU_FIND[which].text) > 0
 end
 
+-- Is the "Show:" filter of this tab on (anything but All)?
+function AMU_FIND.filtering(which)
+  local f = AMU_FIND.filter[which]
+  return f ~= nil and f ~= "all"
+end
+
+-- Does this row pass the "Show:" filter? Toggles: updates ON / OFF. Backups: pinned only.
+function AMU_FIND.filter_pass(which, e)
+  local f = AMU_FIND.filter[which]
+  if f == nil or f == "all" then return true end
+  if which == "toggles" then
+    local v = config.mod_update_enabled and config.mod_update_enabled[e.folder]
+    if f == "on" then return v ~= false end
+    return v == false
+  end
+  local info
+  if e.folder == "_game" then info = AMU_GAME.pin_info()
+  elseif AMU_FRAMEWORKS[e.folder] then info = config.framework_pins and config.framework_pins[e.folder]
+  else info = config.mod_pinned and config.mod_pinned[e.folder] end
+  return type(info) == "table" and info.pinned == true
+end
+
 function AMU_FIND.set_info(which)
   local i = AMU_FIND.info[which]
-  if AMU_FIND.active(which) then
+  if AMU_FIND.active(which) or AMU_FIND.filtering(which) then
     i.text = "Found " .. AMU_FIND.shown[which] .. " of " .. AMU_FIND.total[which]
   else
     i.text = "S / R3 = search"
@@ -1086,7 +1242,14 @@ end
 -- Every word typed has to appear in the mod's name or its folder name.
 function AMU_FIND.entries(which, mode)
   local src = AMU_FIND.source[which]
-  local all = src and src(mode) or get_sorted_mod_entries(mode)
+  local everything = src and src(mode) or get_sorted_mod_entries(mode)
+  local all = everything
+  if AMU_FIND.filtering(which) then
+    all = {}
+    for _, e in ipairs(everything) do
+      if AMU_FIND.filter_pass(which, e) then all[#all + 1] = e end
+    end
+  end
   local words = AMU_FIND.words(AMU_FIND[which].text)
   local out = all
   if #words > 0 then
@@ -1101,9 +1264,23 @@ function AMU_FIND.entries(which, mode)
       if good then out[#out + 1] = e end
     end
   end
-  AMU_FIND.total[which], AMU_FIND.shown[which] = #all, #out
+  AMU_FIND.total[which], AMU_FIND.shown[which] = #everything, #out
   AMU_FIND.set_info(which)
   return out
+end
+
+AMU_FIND.source.backups = function(mode)
+  local list = get_sorted_mod_entries(mode)
+  for _, key in ipairs({ "smods", "lovely", "_game" }) do
+    list[#list + 1] = { folder = key, display = AMU_FRAMEWORKS[key].display, updated = AMU_FRAMEWORKS.updated(), framework = true }
+  end
+  table.sort(list, function(a, b)
+    if mode == "recent" and a.updated ~= b.updated then return a.updated > b.updated end
+    local al, bl = a.display:lower(), b.display:lower()
+    if al ~= bl then return al < bl end
+    return a.folder < b.folder
+  end)
+  return list
 end
 
 function AMU_FIND.walk(node, fn)
@@ -1158,6 +1335,9 @@ function AMU_FIND.reset_all()
     AMU_FIND.pending[w] = nil
   end
   AMU_FIND.hold = nil
+  -- (the Show: filters are NOT reset here any more - they are remembered, see AMU_UI)
+  pcall(AMU_FIND.filter_sync, "toggles")
+  pcall(AMU_FIND.filter_sync, "backups")
 end
 
 -- Which search row is on screen? (nil = none of our tabs is showing it)
@@ -1312,9 +1492,7 @@ function AMU_FIND.heal_tick()
   if math.abs(b.T.x - h.x) > 0.05 or math.abs(b.T.y - h.y) > 0.05 then
     AMU_FIND.heal = nil
     AMU_FIND.dbg(string.format("tab moved (%.2f,%.2f) -> rebuilding", b.T.x - h.x, b.T.y - h.y))
-    if AMU_FIND.swap_tab("amu_find_row_" .. h.which) then
-      AMU_FIND.snap_to_button("amu_find_clear_" .. h.which)
-    end
+    AMU_FIND.swap_tab("amu_find_row_" .. h.which)
   end
 end
 
@@ -1491,6 +1669,93 @@ local function amu_row_nav(ctrl, dir)
   return true
 end
 
+-- Is this gamepad button physically down? Checks the game's held-button list AND the gamepad itself (see amu_b_down).
+function AMU_FIND.pad_down(ctl, name)
+  if ctl and ctl.held_buttons and ctl.held_buttons[name] then return true end
+  if love and love.joystick and love.joystick.getJoysticks then
+    local raw = name
+    if G and G.button_mapping then
+      for k, v in pairs(G.button_mapping) do if v == name then raw = k end end
+    end
+    local ok, down = pcall(function()
+      for _, j in ipairs(love.joystick.getJoysticks()) do
+        if j.isGamepad and j:isGamepad() and j:isGamepadDown(raw) then return true end
+      end
+      return false
+    end)
+    if ok and down then return true end
+  end
+  return false
+end
+
+-- The list id of the page selector that is on screen right now (every tab registers its own in AMU_FIND.pg).
+function AMU_FIND.active_pager()
+  local om = G and G.OVERLAY_MENU
+  if not (om and om.get_UIE_by_ID) then return nil end
+  for id in pairs(AMU_FIND.pg) do
+    local ok, el = pcall(om.get_UIE_by_ID, om, id)
+    if ok and el then return id end
+  end
+  return nil
+end
+
+-- The page the on-screen selector shows (nil when there is none).
+function AMU_FIND.cur_page()
+  local id = AMU_FIND.active_pager()
+  local r = id and AMU_FIND.pg[id]
+  local a = r and r.args
+  return a and a.current_option
+end
+
+-- A tap of LB / RB: click the < or > arrow, exactly what the game itself does for these buttons (controller.lua:
+-- cycle_shoulders.children[1].children[1 or 3]:click()). Skipped when the page already changed since the press,
+-- so a press that the game handled itself is never turned twice.
+function AMU_FIND.shoulder_tap(btn, page0)
+  local cur = AMU_FIND.cur_page()
+  if page0 ~= nil and cur ~= nil and cur ~= page0 then return end
+  local om = G and G.OVERLAY_MENU
+  local cs = om and om.get_UIE_by_ID and om:get_UIE_by_ID('cycle_shoulders')
+  local t = cs and cs.children and cs.children[1]
+  local arrow = t and t.children and t.children[btn == "leftshoulder" and 1 or 3]
+  AMU_FIND.dbg("shoulder " .. tostring(btn) .. " tap: page " .. tostring(cur) .. ", arrow " .. tostring(arrow ~= nil))
+  if arrow and arrow.click then arrow:click() end
+end
+
+-- Once per frame: LB / RB held long enough = jump to the first / last page. (A tap is handled on release.)
+function AMU_FIND.shoulder_tick(ctl)
+  local sh = AMU_FIND.sh
+  local now = (love and love.timer and love.timer.getTime and love.timer.getTime()) or os.clock()
+  if not sh.btn then
+    -- Not started by the press hook: another mod (Better Mouse and Gamepad) can swallow the press before it reaches us,
+    -- exactly like for Hold-B. So also start timing from the pad itself: LB / RB physically down on a page screen.
+    if not ctl then return end
+    for _, name in ipairs({ "leftshoulder", "rightshoulder" }) do
+      if AMU_FIND.pad_down(ctl, name) then
+        local om = G and G.OVERLAY_MENU
+        if ctl.text_input_hook or ctl.screen_keyboard or not amu_screen_open()
+           or not (om and om.get_UIE_by_ID and om:get_UIE_by_ID('cycle_shoulders')) then return end
+        sh.btn, sh.fired, sh.t0, sh.ticked, sh.page0 = name, false, now, true, AMU_FIND.cur_page()
+        AMU_FIND.dbg("shoulder " .. name .. " down (seen by polling)")
+        return
+      end
+    end
+    return
+  end
+  if not AMU_FIND.pad_down(ctl, sh.btn) then
+    -- let go without the release event reaching us: a short press is still a page turn
+    local b, fired, p0 = sh.btn, sh.fired, sh.page0
+    sh.btn, sh.fired, sh.t0, sh.ticked, sh.page0 = nil, false, nil, false, nil
+    if not fired then pcall(AMU_FIND.shoulder_tap, b, p0) end
+    return
+  end
+  if sh.fired then return end
+  if now - (sh.t0 or now) < AMU_FIND.HOLD_SH then return end
+  sh.fired = true
+  local id = AMU_FIND.active_pager()
+  AMU_FIND.dbg("shoulder " .. tostring(sh.btn) .. " held: jump on list " .. tostring(id))
+  if id then AMU_FIND.jump(id, sh.btn == "rightshoulder") end
+end
+
 -- Hold-B state. t0 = when the current hold started (real clock), fired = the hold already closed everything,
 -- pending = the press was swallowed and a quick tap still has to be turned into the normal Back on release.
 local amu_holdb = { pending = false, fired = false, t0 = nil }
@@ -1521,6 +1786,7 @@ end
 -- Called once per frame (see the controller hook below).
 local function amu_hold_tick(ctl)
   pcall(AMU_FIND.hold_tick)
+  pcall(AMU_FIND.shoulder_tick, ctl)
   if amu_b_down(ctl) then
     if G.OVERLAY_MENU and not (ctl and ctl.text_input_hook) then
       if not amu_holdb.t0 then amu_holdb.t0 = amu_now() end
@@ -1592,6 +1858,18 @@ if Controller and not Controller._amu_hooked then
         self.held_button_times[button] = 0
         return
       end
+      -- On a page screen a TAP still turns the page (done when you let go, in the release hook below);
+      -- HOLDING LB goes to the first page and RB to the last (timed in amu_hold_tick).
+      if not self.text_input_hook and not self.screen_keyboard then
+        local sh = AMU_FIND.sh
+        if not sh.btn then
+          sh.btn, sh.fired, sh.t0, sh.ticked, sh.page0 = button, false, amu_now(), false, AMU_FIND.cur_page()
+          AMU_FIND.dbg("shoulder " .. button .. " down (seen by the press hook)")
+        end
+        self.held_button_times[button] = 0
+        self.interrupt.focus = false
+        return
+      end
     end
     -- B: a quick tap is the normal Back button (done when you let go), holding it closes ALL menus.
     -- The hold itself is timed in Controller:update below, so it no longer depends on this press getting through.
@@ -1618,6 +1896,12 @@ if Controller and not Controller._amu_hooked then
           orig_press(self, "b", dt) -- the normal Back action
         end
       end
+    end
+    if (button == "leftshoulder" or button == "rightshoulder") and AMU_FIND.sh.btn == button then
+      local sh = AMU_FIND.sh
+      local was_tap, p0 = not sh.fired, sh.page0
+      sh.btn, sh.fired, sh.t0, sh.ticked, sh.page0 = nil, false, nil, false, nil
+      if was_tap and G.OVERLAY_MENU then pcall(AMU_FIND.shoulder_tap, button, p0) end   -- the page turn
     end
     return orig_release(self, button, dt)
   end
@@ -1817,6 +2101,114 @@ end
 -- Order: the fork you switched to, then update.json (what the updater or a pasted link set), then the mod's own
 -- git remote, then Nexus. Kept in a table (not locals) because main.lua is close to Lua's local variable limit.
 ---------------------------------------------------------------------------
+-- Steamodded and Lovely are not normal mods (they are updated after you quit the game), but they have fixed homes.
+AMU_FRAMEWORKS = {
+  smods  = { display = "Steamodded",      repo = "Steamodded/smods",               tag_key = "steamodded_tag",
+             note = "Pick an earlier Steamodded to go back to it (applied on restart)." },
+  lovely = { display = "Lovely Injector", repo = "ethangreen-dev/lovely-injector", tag_key = "lovely_tag",
+             note = "Pick an earlier Lovely to go back to it (applied on restart)." },
+}
+local function amu_fw_log_time()
+  local info = love.filesystem.getInfo("Mods/" .. mod_folder_name .. "/pending_apply_log.json")
+  return info and info.modtime or 0
+end
+-- the two lines shown in the Backups list: version, then last applied update
+function AMU_FRAMEWORKS.lines(folder)
+  if folder == "_game" then return AMU_GAME.lines() end
+  local fw = AMU_FRAMEWORKS[folder]
+  if type(fw) ~= "table" then return nil end
+  local tag
+  local st = decode_json(read_all(join_path(amu_mod_path(), ".framework_state.json")) or "")
+  if type(st) == "table" and type(st[fw.tag_key]) == "string" and st[fw.tag_key] ~= "" then tag = st[fw.tag_key] end
+  local d = fmt_date(amu_fw_log_time())
+  return tag or "version unknown", d and ("Updated " .. d) or "Never updated here"
+end
+function AMU_FRAMEWORKS.updated() return amu_fw_log_time() end
+
+-- Saved copies of the Balatro game files (made by autoupdate.ps1 into <save folder>\AMU_GameBackups).
+-- Shown as a third row in the Backups tab. Kept in global tables (main.lua is close to Lua's limit of local variables).
+AMU_FRAMEWORKS._game = { display = "Balatro game files", game = true,
+  note = "Pick a saved copy of the game to play (applied on restart). Mod and framework updates pause while one is installed." }
+AMU_GAME = AMU_GAME or {}
+function AMU_GAME.state()
+  return decode_json(read_all(join_path(amu_mod_path(), ".game_state.json")) or "") or {}
+end
+function AMU_GAME.copies()
+  local out = {}
+  local ok, items = pcall(love.filesystem.getDirectoryItems, "AMU_GameBackups")
+  if ok and type(items) == "table" then
+    for _, n in ipairs(items) do
+      if n:sub(1, 5) ~= "_tmp_" and love.filesystem.getInfo("AMU_GameBackups/" .. n .. "/amu_backup.json") then out[#out + 1] = n end
+    end
+  end
+  table.sort(out, function(a, b) return a > b end)   -- newest first
+  return out
+end
+-- what a staged swap (waiting for the game to close) will do: nil, "steam", or the saved copy's name
+function AMU_GAME.pending_swap()
+  local d = decode_json(read_all(join_path(amu_mod_path(), "pending_apply.json")) or "")
+  if type(d) ~= "table" or type(d.tasks) ~= "table" then return nil end
+  for _, t in ipairs(d.tasks) do
+    if type(t) == "table" and t.type == "swap_game" then
+      if t.make_active == true then return tostring(t.name or "") end
+      return "steam"
+    end
+  end
+  return nil
+end
+-- The pin shown in the Backups tab comes from the real state of the game files, never from the saved config
+-- (a config saved before a restart used to leave PINNED showing after going back to Steam's version).
+function AMU_GAME.pin_info()
+  local st = AMU_GAME.state()
+  local act = type(st.active_backup) == "string" and st.active_backup or ""
+  if AMU_GAME.pending_swap() == "steam" then return nil end
+  if act ~= "" or st.frozen == true then return { pinned = true, backup_file = act } end
+  return nil
+end
+function AMU_GAME.lines()
+  local st = AMU_GAME.state()
+  local act = type(st.active_backup) == "string" and st.active_backup or ""
+  local frozen = st.frozen == true
+  local pend = AMU_GAME.pending_swap()
+  local n = #AMU_GAME.copies()
+  local l1, l2
+  if pend == "steam" then
+    return "Steam's newest version comes back on restart", "Mod updates ON after the restart"
+  elseif pend and pend ~= "" then
+    return "Saved copy plays on restart: " .. AMU_FRAMEWORKS.label(pend), "Mod updates paused"
+  end
+  if act ~= "" then l1 = "Playing saved copy " .. AMU_FRAMEWORKS.label(act)
+  elseif frozen then l1 = "Earlier saved copy comes back on restart"
+  else l1 = "Steam's own version" end
+  if act ~= "" or frozen then
+    l2 = (config.cfg_allow_updates_on_backup == true) and "Mod updates ON (you allowed them)" or "Mod updates paused"
+  else
+    l2 = n .. " saved " .. (n == 1 and "copy" or "copies")
+  end
+  return l1, l2
+end
+-- keep the Backups-tab pin for the game in step with what the last update check found
+-- Line under "Check for updates now": says so when mod updates are paused because of the game copy (also after the startup check).
+function AMU_GAME.status_text()
+  local pin = AMU_GAME.pin_info()
+  if not pin then return nil end
+  local why = (pin.backup_file and pin.backup_file ~= "") and "playing a saved game copy" or "Steam updated the game"
+  if config.cfg_allow_updates_on_backup == true then return "Mod updates ON (allowed): " .. why end
+  return "Updates paused: " .. why
+end
+function AMU_GAME.sync_status()
+  local cur = tostring(amu_check_status.text or "")
+  local s = AMU_GAME.status_text()
+  if s then
+    if cur == "" or cur == "All mods up to date!" or cur:find("^Updates paused") or cur:find("^Mod updates ON") then amu_check_status.text = s end
+  elseif cur:find("^Updates paused") or cur:find("^Mod updates ON") then
+    amu_check_status.text = ""
+  end
+end
+function AMU_GAME.reconcile(sum)
+  if config.framework_pins then config.framework_pins._game = nil end   -- the game pin is read from .game_state.json instead
+end
+
 AMU_WEB = AMU_WEB or {}
 
 -- "git@github.com:owner/repo.git", "https://user:pw@host/owner/repo.git" and friends -> a clean https address
@@ -1853,6 +2245,17 @@ end
 -- Returns a list of { label, url, name }. The first one is what the "Webpage" buttons open.
 function AMU_WEB.links(folder, installed_repo)
   local links = {}
+  local fw = AMU_FRAMEWORKS[folder]
+  if folder == "_game" then
+    -- Balatro itself: its update history (every build and patch note), then the official Steam news
+    links[1] = { label = "Balatro update history", url = "https://steamdb.info/app/2379780/patchnotes/", name = "SteamDB: Balatro patch notes" }
+    links[2] = { label = "Steam news", url = "https://store.steampowered.com/news/app/2379780", name = "Balatro news on Steam" }
+    return links
+  end
+  if type(fw) == "table" and fw.repo then
+    links[1] = { label = "GitHub webpage", url = "https://github.com/" .. fw.repo, name = fw.repo }
+    return links
+  end
   local src = config.mod_fork_source and config.mod_fork_source[folder]
   local repo = src and src.fork_repo or nil
   local nexus_id = nil
@@ -2027,9 +2430,9 @@ build_mod_toggles_page = function(page)
 
   local shown = math.max(0, end_i - start_i + 1)
   local blank_from = shown + 1
-  if shown == 0 and AMU_FIND.active("toggles") then
+  if shown == 0 and (AMU_FIND.active("toggles") or AMU_FIND.filtering("toggles")) then
     rows[#rows+1] = { n = G.UIT.R, config = { align = "cm", padding = 0.02, minh = AMU_TOG_ROW_H, minw = AMU_TOG_W - 0.5 }, nodes = {
-      { n = G.UIT.T, config = { text = "No mods match your search", scale = 0.4, colour = G.C.UI.TEXT_LIGHT } } } }
+      { n = G.UIT.T, config = { text = "No mods match your search or filter", scale = 0.4, colour = G.C.UI.TEXT_LIGHT } } } }
     blank_from = 2
   end
   for _ = blank_from, MODS_PER_PAGE do rows[#rows+1] = amu_blank_row(AMU_TOG_W - 0.5, AMU_TOG_ROW_H) end
@@ -2048,6 +2451,7 @@ end
 -- Sort button on the Mod Toggles screen (A-Z <-> Recently updated)
 G.FUNCS.amu_sort_toggles = function(e)
   config.sort_toggles = (config.sort_toggles == "recent") and "az" or "recent"
+  pcall(AMU_UI.save)
   amu_sort_set("toggles", config.sort_toggles)
   amu_refresh_toggles()
 end
@@ -2057,7 +2461,7 @@ end
 local function amu_set_all_updates(val)
   -- While a search is active, only the mods it found are changed.
   local only = nil
-  if AMU_FIND.active("toggles") then
+  if AMU_FIND.active("toggles") or AMU_FIND.filtering("toggles") then
     only = {}
     for _, e in ipairs(AMU_FIND.entries("toggles", config.sort_toggles)) do only[e.folder] = true end
   end
@@ -2091,7 +2495,7 @@ local function amu_set_all_updates(val)
   pcall(write_ps1_config_overlay)
   if only then
     amu_snap_info.text = "Updates turned " .. (val and "ON" or "OFF") .. " for the " .. changed
-      .. " mod(s) your search found (pinned mods stay off)."
+      .. " mod(s) shown (pinned mods stay off)."
   else
     amu_snap_info.text = amu_snap_label()
   end
@@ -2244,6 +2648,15 @@ local function revert_and_pin_mod(folder_name, backup_file)
           amu_restore_in_progress = false; amu_restore_folder = nil
           amu_backup_status.text = folder_name ..
             (msg == "done" and " restored. Restart to apply." or " restore error. See last_run.json.")
+          if msg == "done" then
+            local ok, shown, why = pcall(function()
+              return AMU_CRASH.ask_restart({
+                folder_name .. " was put back to the saved copy and pinned.",
+                "Pinned mods are not updated again until you unpin them (Mod Updater > Backups).",
+              })
+            end)
+            if ok and shown == false then amu_backup_status.text = folder_name .. " restore error: " .. amu_fit(tostring(why or "see last_run.json"), 0.3, 8.5) end
+          end
           return true
         end
         return false
@@ -2253,6 +2666,12 @@ local function revert_and_pin_mod(folder_name, backup_file)
     AMU_RUN(cmd)
     amu_restore_in_progress = false; amu_restore_folder = nil
     amu_backup_status.text = folder_name .. " restored. Restart to apply."
+    pcall(function()
+      AMU_CRASH.ask_restart({
+        folder_name .. " was put back to the saved copy and pinned.",
+        "Pinned mods are not updated again until you unpin them (Mod Updater > Backups).",
+      })
+    end)
   end
 end
 
@@ -2262,17 +2681,257 @@ local function unpin_mod(folder_name)
   if config.mod_update_enabled then config.mod_update_enabled[folder_name] = true end
   pcall(write_ps1_config_overlay)
   amu_backup_status.text = folder_name .. " unpinned. Updates will resume."
+  -- Check this one mod right away: if the source has a newer version it is updated now and the usual results window
+  -- (with Restart now / Later) opens. Nothing changes on disk when it is already the newest, so no restart is needed then.
+  amu_backup_status.text = folder_name .. " unpinned. Checking for a newer version..."
+  run_single_mod_check(folder_name, function(status, summary)
+    local text
+    if type(summary) == "table" and summary.game_updates_frozen == true then
+      text = " unpinned. Updates are paused while a saved game copy is installed, so it was not updated."
+    elseif status == "Updated!" then
+      text = " unpinned and updated to the newest version. Restart to apply."
+    elseif status == "Error" then
+      text = " unpinned, but the check had an error. See last_run.json."
+    else
+      text = " unpinned. It is already on the newest version."
+    end
+    amu_backup_status.text = folder_name .. text
+    pcall(function() amu_update_area("amu_backup_mod_list", build_backup_mods_page(AMU_BACKUP_PAGE)) end)
+  end)
+  if not amu_per_mod_checking[folder_name] then   -- the check could not start (not Windows, script missing, ...)
+    amu_backup_status.text = folder_name .. " unpinned. Updates will resume."
+  end
+end
+
+-- Steamodded / Lovely backups: smods-<date>.zip and lovely-<date>-winmm.dll in the Updater's _framework_backups folder.
+-- (Kept on the AMU_FRAMEWORKS table: main.lua is close to Lua's limit of local variables.)
+function AMU_FRAMEWORKS.backups(folder)
+  if folder == "_game" then return AMU_GAME.copies() end
+  local out = {}
+  local ok, items = pcall(love.filesystem.getDirectoryItems, "Mods/" .. mod_folder_name .. "/_framework_backups")
+  if not (ok and type(items) == "table") then return out end
+  local prefix = folder .. "-"
+  for _, name in ipairs(items) do
+    local low = name:lower()
+    if name:sub(1, #prefix) == prefix and name:sub(#prefix + 1):match("^%d%d%d%d%d%d%d%d_%d%d%d%d%d%d") then
+      if (folder == "smods" and low:sub(-4) == ".zip") or (folder == "lovely" and low:sub(-4) == ".dll") then
+        out[#out + 1] = name
+      end
+    end
+  end
+  table.sort(out, function(a, b) return a > b end)   -- newest first
+  return out
+end
+
+function AMU_FRAMEWORKS.label(file)
+  local y, mo, d, h, mi, sec = tostring(file):match("(%d%d%d%d)(%d%d)(%d%d)_(%d%d)(%d%d)(%d%d)")
+  local text = y and (y .. "-" .. mo .. "-" .. d .. "  " .. h .. ":" .. mi .. ":" .. sec) or tostring(file)
+  if tostring(file):lower():find("version%.dll$") then text = text .. "  (old file name)" end
+  local build = tostring(file):match("_b(%d+)$")
+  if build then text = text .. "  (build " .. build .. ")" end
+  return text
+end
+
+function AMU_FRAMEWORKS.unpin(folder)
+  if folder == "_game" then return AMU_FRAMEWORKS.game_run("steam") end
+  local fw = AMU_FRAMEWORKS[folder]
+  if config.framework_pins then config.framework_pins[folder] = nil end
+  pcall(write_ps1_config_overlay)
+  amu_backup_status.text = ((fw and fw.display) or folder) .. " unpinned. It updates again on the next check."
+end
+
+-- Put an earlier Steamodded / Lovely back: autoupdate.ps1 stages it (and pins it), the game then offers Restart now.
+-- Nothing is changed until the game restarts, because both are in use while the game runs.
+function AMU_FRAMEWORKS.revert(folder, file)
+  if folder == "_game" then return AMU_FRAMEWORKS.game_run(file) end
+  local fw = AMU_FRAMEWORKS[folder]
+  if not fw then return end
+  local name = fw.display
+  if not is_windows() then amu_backup_status.text = "Windows only"; return end
+  local mods_dir = join_path(love.filesystem.getSaveDirectory(), "Mods")
+  local mod_path = (SMODS.current_mod and SMODS.current_mod.path) or join_path(mods_dir, mod_folder_name)
+  local ps1 = join_path(mod_path, "autoupdate.ps1")
+  if not file_exists(ps1) then amu_backup_status.text = "autoupdate.ps1 is missing, " .. name .. " was not changed."; return end
+
+  config.framework_pins = config.framework_pins or {}
+  local had_pin = config.framework_pins[folder]
+  config.framework_pins[folder] = { pinned = true, backup_file = file, pinned_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
+  pcall(write_ps1_config_overlay)
+
+  local cmd = table.concat({
+    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+    "-File", safe_quote(winpath(ps1)),
+    "-ModsDir", safe_quote(winpath(mods_dir)),
+    "-SelfDir", safe_quote(winpath(mod_path)),
+    "-RestoreFrameworkName", safe_quote(folder),
+    "-RestoreFrameworkFile", safe_quote(file),
+  }, " ")
+  amu_backup_status.text = "Getting " .. name .. " ready to go back..."
+
+  local function finish()
+    local sum = decode_json(read_all(join_path(mod_path, "last_run.json")) or "")
+    local errs = type(sum) == "table" and sum.errors or nil
+    if type(errs) == "string" then errs = { errs } end
+    if type(sum) == "table" and sum.framework_staged == true and not (type(errs) == "table" and #errs > 0) then
+      amu_backup_status.text = name .. " goes back to " .. AMU_FRAMEWORKS.label(file) .. " when the game restarts."
+      if type(show_prompt) == "function" then pcall(show_prompt, sum) end
+    else
+      config.framework_pins[folder] = had_pin
+      pcall(write_ps1_config_overlay)
+      local why = (type(errs) == "table" and errs[1]) and tostring(errs[1]) or "see last_run.json"
+      amu_backup_status.text = name .. " was not changed: " .. amu_fit(why, 0.3, 8.5)
+    end
+  end
+
+  if love and love.thread and love.thread.newThread and love.thread.getChannel then
+    local channel = love.thread.getChannel("amu_fw_restore")
+    channel:clear()
+    local thread_code = AMU_HIDE_SRC .. [[
+      local cmd = ...
+      local ok = pcall(function() amu_run(cmd) end)
+      love.thread.getChannel("amu_fw_restore"):push(ok and "done" or "error")
+    ]]
+    love.thread.newThread(thread_code):start(cmd)
+    G.E_MANAGER:add_event(Event({ blockable = false, blocking = false, func = function()
+      local msg = channel:pop()
+      if not msg then return false end
+      if msg == "done" then finish() else
+        config.framework_pins[folder] = had_pin
+        pcall(write_ps1_config_overlay)
+        amu_backup_status.text = name .. " was not changed (the helper did not run)."
+      end
+      return true
+    end }))
+  else
+    AMU_RUN(cmd)
+    finish()
+  end
+end
+
+-- Play a saved copy of the game (which = its folder name) or go back to Steam's newest version ("steam", which also turns
+-- mod and framework updates back on). autoupdate.ps1 -UseGameBackup stages it; apply_pending.ps1 swaps the files after the
+-- game quits and starts the game through Steam.
+function AMU_FRAMEWORKS.game_run(which)
+  if not is_windows() then amu_backup_status.text = "Windows only"; return end
+  local mods_dir = join_path(love.filesystem.getSaveDirectory(), "Mods")
+  local mod_path = (SMODS.current_mod and SMODS.current_mod.path) or join_path(mods_dir, mod_folder_name)
+  local ps1 = join_path(mod_path, "autoupdate.ps1")
+  if not file_exists(ps1) then amu_backup_status.text = "autoupdate.ps1 is missing, the game was not changed."; return end
+  local going_steam = (which == "steam")
+  pcall(write_ps1_config_overlay)
+  local cmd = table.concat({
+    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+    "-File", safe_quote(winpath(ps1)),
+    "-ModsDir", safe_quote(winpath(mods_dir)),
+    "-SelfDir", safe_quote(winpath(mod_path)),
+    "-UseGameBackup", safe_quote(which),
+  }, " ")
+  amu_backup_status.text = "Getting the game files ready..."
+
+  local function finish()
+    local sum = decode_json(read_all(join_path(mod_path, "last_run.json")) or "")
+    local errs = type(sum) == "table" and sum.errors or nil
+    if type(errs) == "string" then errs = { errs } end
+    if type(sum) == "table" and sum.framework_staged == true and not (type(errs) == "table" and #errs > 0) then
+      if going_steam then
+        amu_backup_status.text = "Steam's newest game version comes back and updates turn on when the game restarts."
+      else
+        amu_backup_status.text = "That saved game copy is played when the game restarts. Mod updates stay paused."
+      end
+      pcall(function() amu_update_area("amu_backup_mod_list", build_backup_mods_page(AMU_BACKUP_PAGE)) end)
+      if type(show_prompt) == "function" then pcall(show_prompt, sum) end
+    elseif going_steam and type(sum) == "table" and not (type(errs) == "table" and #errs > 0) then
+      amu_backup_status.text = "Already on Steam's version. Mod and framework updates are on."
+      pcall(function() amu_update_area("amu_backup_mod_list", build_backup_mods_page(AMU_BACKUP_PAGE)) end)
+    else
+      local why = (type(errs) == "table" and errs[1]) and tostring(errs[1]) or "see last_run.json"
+      amu_backup_status.text = "The game was not changed: " .. amu_fit(why, 0.3, 8.5)
+    end
+  end
+
+  if love and love.thread and love.thread.newThread and love.thread.getChannel then
+    local channel = love.thread.getChannel("amu_game_run")
+    channel:clear()
+    local thread_code = AMU_HIDE_SRC .. [[
+      local cmd = ...
+      local ok = pcall(function() amu_run(cmd) end)
+      love.thread.getChannel("amu_game_run"):push(ok and "done" or "error")
+    ]]
+    love.thread.newThread(thread_code):start(cmd)
+    G.E_MANAGER:add_event(Event({ blockable = false, blocking = false, func = function()
+      local msg = channel:pop()
+      if not msg then return false end
+      if msg == "done" then finish() else amu_backup_status.text = "The game was not changed (the helper did not run)." end
+      return true
+    end }))
+  else
+    AMU_RUN(cmd)
+    finish()
+  end
 end
 
 ---------------------------------------------------------------------------
 -- CONFIG TAB: Settings (general toggles + Nexus key + check now)
 ---------------------------------------------------------------------------
 
+-- Remembers the sorting and the Fork Finder's list filters in ui_state.json the moment they change. Steamodded only saves
+-- its config when the Mods menu is left, so a choice was lost when the game was closed (or restarted) any other way.
+AMU_UI = { keys = { "sort_toggles", "sort_backups", "sort_forks", "fork_newer_only", "fork_hide_translations", "fork_show_ignored" } }
+AMU_UI.ready = false
+function AMU_UI.save_config()
+  if not AMU_UI.ready then return end   -- not while this mod is still loading
+  local m = mod or (SMODS and SMODS.current_mod)
+  if not m then return end
+  if type(m.save_mod_config) == "function" then pcall(m.save_mod_config, m)
+  elseif SMODS and type(SMODS.save_mod_config) == "function" then pcall(SMODS.save_mod_config, m) end
+end
+function AMU_UI.path()
+  local d = amu_mod_path()
+  if d == "" then return nil end
+  return join_path(d, "ui_state.json")
+end
+function AMU_UI.save()
+  local path = AMU_UI.path()
+  if not path then return end
+  local out = {}
+  for _, k in ipairs(AMU_UI.keys) do
+    if config[k] ~= nil then out[k] = config[k] end
+  end
+  out.filter_toggles = AMU_FIND.filter.toggles
+  out.filter_backups = AMU_FIND.filter.backups
+  local f = io.open(path, "wb")
+  if f then f:write(encode_json(out)); f:close() end
+end
+function AMU_UI.load()
+  local path = AMU_UI.path()
+  local d = path and decode_json(read_all(path) or "")
+  if type(d) ~= "table" then return end
+  -- the Show: filters (the pill and button text is rebuilt from AMU_FIND.filter when the tab is drawn)
+  local valid = { toggles = { all = true, on = true, off = true }, backups = { all = true, pinned = true } }
+  for w, ok in pairs(valid) do
+    local v = d["filter_" .. w]
+    if type(v) == "string" and ok[v] then AMU_FIND.filter[w] = v end
+  end
+  for _, k in ipairs(AMU_UI.keys) do
+    local v = d[k]
+    if v ~= nil then
+      if string.sub(k, 1, 5) == "sort_" then
+        if v == "az" or v == "recent" then config[k] = v end
+      elseif type(v) == "boolean" then
+        config[k] = v
+      end
+    end
+  end
+end
+pcall(AMU_UI.load)
+AMU_UI.ready = true
+
 SMODS.current_mod.config_tab = function()
   local purple = (G.C and G.C.PURPLE) or RGBA(0.62, 0.33, 0.92, 1)
   local panel = RGBA(0.15, 0.15, 0.15, 0.95)
 
   amu_nexus_display.text = mask_nexus_key(config.nexus_api_key)
+  pcall(AMU_GAME.sync_status)
 
   local function section(title, nodes, minw)
     local rows = { { n = G.UIT.R, config = { align = "cm", padding = 0.05, minh = 0.6 }, nodes = {
@@ -2291,7 +2950,7 @@ SMODS.current_mod.config_tab = function()
     return node
   end
   local function trow(label, key, with_cb)
-    return { n = G.UIT.R, config = { align = "cl", padding = 0.045, minh = 0.62 }, nodes = {
+    return { n = G.UIT.R, config = { align = "cl", padding = 0.03, minh = 0.5 }, nodes = {
       { n = G.UIT.B, config = { w = 0.35, h = 0.1 } },
       tall(create_toggle { label = label, ref_table = config, ref_value = key, w = 0, scale = 0.5,
         callback = with_cb and function() write_ps1_config_overlay() end or nil }),
@@ -2304,6 +2963,9 @@ SMODS.current_mod.config_tab = function()
     trow("Make backups", "cfg_make_backups", true),
     trow("Update Steamodded", "cfg_update_steamodded", true),
     trow("Update Lovely Injector", "cfg_update_lovely", true),
+    trow("Say when frameworks current", "cfg_show_framework_current", false),
+    trow("Retry pinned mods when newer", "cfg_pin_retry", true),
+    trow("Auto-switch to saved game", "cfg_game_auto_switch", true),
   }, 7.2)
 
   -- RIGHT: Nexus key, then the "check now" button
@@ -2526,6 +3188,113 @@ function AMU_FIND.refresh(which)
   end
 end
 
+-- The "Show:" button: All -> ON -> OFF (Mod Toggles), All -> Pinned (Backups). Not remembered after the menu closes
+-- (like the search box, so mods never look like they went missing).
+AMU_FIND.FILTER_ORDER = { toggles = { "all", "on", "off" }, backups = { "all", "pinned" } }
+AMU_FIND.FILTER_TEXT = {
+  toggles = { all = "All", on = "ON", off = "OFF" },
+  backups = { all = "All", pinned = "Pinned" },
+}
+-- Same idea as the sort control: a "Show: <what is shown now>" pill and a "Next: <what the button switches to>" button.
+function AMU_FIND.filter_after(which, cur)
+  local order = AMU_FIND.FILTER_ORDER[which]
+  local idx = 1
+  for i, v in ipairs(order) do if v == cur then idx = i end end
+  return order[(idx % #order) + 1]
+end
+function AMU_FIND.filter_sync(which)
+  local cur = AMU_FIND.filter[which]
+  local names = AMU_FIND.FILTER_TEXT[which]
+  AMU_FIND.filter_now[which].text = names[cur] or "All"
+  AMU_FIND.filter_nxt[which].text = "Next: " .. (names[AMU_FIND.filter_after(which, cur)] or "All")
+end
+function AMU_FIND.filter_node(which, now_w, next_w)
+  AMU_FIND.filter_sync(which)
+  local pill = HEX and HEX("2B2B35") or { 0.17, 0.17, 0.21, 1 }
+  local dim  = HEX and HEX("A9A9B8") or { 0.66, 0.66, 0.72, 1 }
+  return { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = {
+    { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = {
+      { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = now_w, minh = 0.44, r = 0.1, colour = pill }, nodes = {
+        { n = G.UIT.T, config = { text = "Show: ", scale = 0.28, colour = dim } },
+        { n = G.UIT.T, config = { ref_table = AMU_FIND.filter_now[which], ref_value = "text", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } },
+      { n = G.UIT.B, config = { w = 0.08, h = 0.1 } },
+      { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = next_w, minh = 0.44, r = 0.1,
+          colour = G.C.BLUE, button = "amu_filter_" .. which, hover = true, shadow = true }, nodes = {
+        { n = G.UIT.T, config = { ref_table = AMU_FIND.filter_nxt[which], ref_value = "text", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } },
+    } } } }
+end
+function AMU_FIND.filter_next(which, _e)
+  AMU_FIND.filter[which] = AMU_FIND.filter_after(which, AMU_FIND.filter[which])
+  AMU_FIND.filter_sync(which)
+  pcall(AMU_UI.save)
+  pcall(AMU_FIND.refresh, which)
+end
+G.FUNCS.amu_filter_toggles = function(e) AMU_FIND.filter_next("toggles", e) end
+G.FUNCS.amu_filter_backups = function(e) AMU_FIND.filter_next("backups", e) end
+
+-- Runs every frame on the glyph cell inside << and >>: shows the "hold" label only while a controller is the active input.
+G.FUNCS.amu_pg_pip = function(e)
+  local pad = (G.CONTROLLER and G.CONTROLLER.HID and G.CONTROLLER.HID.controller) and true or false
+  local par = e.parent
+  if par and par.children then
+    for _, ch in pairs(par.children) do
+      if type(ch) == "table" and ch.config and ch.config.id == "amu_pg_hold" and type(ch.config.colour) == "table" then
+        ch.config.colour[4] = pad and 1 or 0
+      end
+    end
+  end
+  return G.FUNCS.set_button_pip(e)
+end
+
+-- Runs every frame on the << / >> label: the button reserves a row above it for "hold [LB]"; with no controller that row is
+-- invisible, so the label is drawn that much higher (AMU_FIND.SKIP_DY, game units) to sit in the middle of its button.
+-- Only the drawn position changes (no re-layout). A fresh layout offset is detected and used as the new base.
+AMU_FIND.SKIP_DY = 0.085
+G.FUNCS.amu_pg_label = function(e)
+  local c = e.config
+  local off = e.role and e.role.offset
+  if not off then return end
+  local pad = (G.CONTROLLER and G.CONTROLLER.HID and G.CONTROLLER.HID.controller) and true or false
+  c.refresh_movement = true
+  if c._amu_off ~= off or off.y ~= c._amu_y then c._amu_base = off.y end
+  local target = c._amu_base - (pad and 0 or AMU_FIND.SKIP_DY)
+  off.y = target
+  c._amu_off, c._amu_y = off, target
+end
+
+-- Runs every frame on the < and > page arrows: the game draws them a little higher than the middle of the Page box, so
+-- their drawn position gets a small push down (AMU_FIND.ARROW_DY, in game units). A re-layout hands the arrow a fresh
+-- offset, which is pushed down once more; the counter stops any runaway.
+AMU_FIND.ARROW_DY = 0.06
+G.FUNCS.amu_pg_arrow = function(e)
+  local c = e.config
+  local off = e.role and e.role.offset
+  if not off then return end
+  c.refresh_movement = true
+  if c._amu_off ~= off or off.y ~= c._amu_y then
+    c._amu_n = (c._amu_n or 0) + 1
+    if c._amu_n <= 40 then
+      off.y = off.y + AMU_FIND.ARROW_DY
+      c._amu_off, c._amu_y = off, off.y
+    end
+  end
+end
+
+-- The << and >> buttons next to the page selector: first page / last page of that list.
+function AMU_FIND.jump(id, last)
+  local r = AMU_FIND.pg[id]
+  if not r then return end
+  local a = r.args
+  local n = (type(a) == "table" and type(a.options) == "table") and #a.options or 1
+  local target = last and math.max(1, n) or 1
+  if type(a) == "table" and type(a.options) == "table" then
+    a.current_option = target
+    a.current_option_val = a.options[target]
+  end
+  pcall(r.set_page, target)
+  amu_update_area(id, r.build(target))
+end
+
 -- Runs every frame on a node in the search row: re-filter when the text changed.
 function AMU_FIND.watch(which)
   local _, norm = AMU_FIND.words(AMU_FIND[which].text)
@@ -2572,7 +3341,12 @@ function AMU_FIND.swap_tab(any_id)
   local box = node and node.UIBox
   local tc = box and box.config and box.config.parent
   local def = AMU_FIND.current_def
-  if not (tc and tc.config and tc.config.id == "tab_contents" and tc.config.object == box and type(def) == "function") then
+  if node and not (tc and tc.config and tc.config.id == "tab_contents" and tc.config.object == box) then
+    -- the node sits in a nested box: use the menu's own tab area instead
+    local t2 = om and om.get_UIE_by_ID and om:get_UIE_by_ID("tab_contents")
+    tc = (t2 and t2.config and t2.config.object and t2.UIBox) and t2 or nil
+  end
+  if not (tc and tc.config and tc.config.object and type(def) == "function") then
     return false
   end
   local ok = pcall(function()
@@ -2592,22 +3366,52 @@ end
 function AMU_FIND.snap_to_button(button)
   local C = G and G.CONTROLLER
   if not (C and C.HID and C.HID.controller and C.snap_to) then return end
+  -- Returns true once the cursor is on the button. The game can drop the focus for a few frames after a rebuild (and
+  -- after the on-screen keyboard closes), so this is repeated each frame for up to about 0.7 s until it sticks.
   local function go()
     local n = amu_find_node(function(c) return c.button == button end)
-    if n then
-      C:snap_to({ node = n })
-      if C.update_cursor then C:update_cursor() end
-    end
+    if not n then return false end
+    if C.focused and C.focused.target == n then return true end
+    if C.interrupt then C.interrupt.focus = false end
+    C:snap_to({ node = n })
+    if C.update_cursor then C:update_cursor() end
+    return C.focused and C.focused.target == n
   end
-  pcall(go)
+  if pcall(go) and C.focused and C.focused.target and C.focused.target.config and C.focused.target.config.button == button then
+    return
+  end
   if G.E_MANAGER and Event then
-    G.E_MANAGER:add_event(Event({ blocking = false, blockable = false, func = function() pcall(go); return true end }))
+    local t0 = (G.TIMERS and G.TIMERS.REAL) or 0
+    G.E_MANAGER:add_event(Event({ blocking = false, blockable = false, no_delete = true, func = function()
+      local ok, done = pcall(go)
+      if ok and done then return true end
+      return ((G.TIMERS and G.TIMERS.REAL) or 0) - t0 > 0.7
+    end }))
   end
+end
+
+-- Empty the text box's own letters (used when the tab cannot be rebuilt in place) so the box shows its prompt again.
+function AMU_FIND.reset_box(which)
+  local om = G and G.OVERLAY_MENU
+  local row = om and om.get_UIE_by_ID and om:get_UIE_by_ID("amu_find_row_" .. which)
+  if not row then return end
+  local seen = {}
+  local function rec(n, depth)
+    if type(n) ~= "table" or seen[n] or depth > 12 then return end
+    seen[n] = true
+    local rt = n.config and n.config.ref_table
+    if type(rt) == "table" and type(rt.text) == "table" and type(rt.text.letters) == "table" then
+      for k in pairs(rt.text.letters) do rt.text.letters[k] = "" end
+      rt.text.current_position = 0
+    end
+    if type(n.children) == "table" then for _, c in pairs(n.children) do rec(c, depth + 1) end end
+  end
+  rec(row, 0)
 end
 
 -- Clear: empty the search and rebuild only the tab's contents (no slide, the rest of the menu stays still).
 -- (Emptying the box through the game's own text-box code made the game lay the tab out twice in one frame, which
--- pushed the whole tab to the right.) On a controller the cursor goes back onto Clear.
+-- pushed the whole tab to the right.) The controller cursor is left to the game (no forced jump to Clear).
 function AMU_FIND.clear(which)
   local st = AMU_FIND[which]
   local C = G and G.CONTROLLER
@@ -2618,12 +3422,11 @@ function AMU_FIND.clear(which)
   AMU_FIND.pending[which] = nil
   if which == "toggles" then AMU_CONFIG_PAGE = 1 elseif which == "forks" then AMU_FORK_PAGE = 1 else AMU_BACKUP_PAGE = 1 end
   if not AMU_FIND.swap_tab("amu_find_row_" .. which) then
-    if not (G.FUNCS.amu_back_to_menu and pcall(G.FUNCS.amu_back_to_menu)) then
-      pcall(AMU_FIND.refresh, which)
-      return
-    end
+    -- never reopen the whole menu (that is the slide-up reload): update the list and the box where they are
+    pcall(AMU_FIND.reset_box, which)
+    pcall(AMU_FIND.refresh, which)
+    return
   end
-  AMU_FIND.snap_to_button("amu_find_clear_" .. which)
 end
 G.FUNCS.amu_find_clear_toggles = function(_e) AMU_FIND.clear("toggles") end
 G.FUNCS.amu_find_clear_backups = function(_e) AMU_FIND.clear("backups") end
@@ -2790,10 +3593,64 @@ local function amu_make_tab(o)
   for _, n in ipairs(o.after or {}) do col[#col + 1] = n end
   col[#col + 1] = spacer(gap_pager)
   local cyc = {
-    w = 4.4, scale = 0.72, options = page_options, current_option = page,
+    w = 3.4, scale = 0.72, options = page_options, current_option = page,
     opt_callback = o.cb, cycle_shoulders = true, no_pips = true,
   }
   local pager_node = create_option_cycle(cyc)
+  -- the selector reserves ~0.7 of empty room on each side (for the LB / RB controller icons); shrink it so << and >> sit close
+  -- (the game's own columns: minw 0.7 with func = 'set_button_pip', and the 'cycle_shoulders' column with padding 0.1 around the selector)
+  AMU_FIND.walk(pager_node, function(n)
+    local c = n.config
+    if n.n == G.UIT.C and type(c) == "table" then
+      if c.func == "set_button_pip" and type(c.minw) == "number" then
+        c.minw = 0.01
+        -- no glyph here any more: this thin, the game draws it ON TOP of the << and >> buttons.
+        -- The LB / RB glyphs now sit inside those two buttons (pg_btn below), where they cannot overlap anything.
+        c.func, c.focus_args = nil, nil
+      end
+      if c.ref_table and (c.ref_value == "l" or c.ref_value == "r") then c.func = "amu_pg_arrow" end   -- the < and > arrows
+      if c.id == "cycle_shoulders" then
+        c.padding = 0
+        local inner = n.nodes and n.nodes[1]   -- the selector itself, which has its own padding 0.1
+        if inner and type(inner.config) == "table" then inner.config.padding = 0 end
+      end
+    end
+  end)
+  -- << (first page) and >> (last page), one on each side; the gaps keep the LB / RB glyph room next to the arrows
+  AMU_FIND.pg[o.id] = { args = AMU_FIND.find_args(pager_node) or cyc, build = o.build, set_page = o.set_page }
+  G.FUNCS["amu_pg_first_" .. o.id] = function(_e) AMU_FIND.jump(o.id, false) end
+  G.FUNCS["amu_pg_last_" .. o.id]  = function(_e) AMU_FIND.jump(o.id, true) end
+  -- (wrapped in a column + row so the button keeps its own small height instead of stretching to the page selector's)
+  -- With a controller the button also shows "hold [LB]" / "hold [RB]" above the arrows: holding that bumper does the same
+  -- as pressing the button. The glyph is a layout cell inside the button (not an overlay), so nothing can overlap.
+  local pad_now = (G.CONTROLLER and G.CONTROLLER.HID and G.CONTROLLER.HID.controller) and true or false
+  local function pg_btn(label, func, pad_button)
+    local content = {}
+    if pad_button then
+      -- The label + glyph row always takes the same room (so the layout never has to be recalculated, which shifted the
+      -- text of the whole tab); G.FUNCS.amu_pg_pip (below) only makes the label invisible unless a controller is the
+      -- input being used right now. The game removes / adds the glyph itself.
+      content[#content + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = {
+        { n = G.UIT.T, config = { id = "amu_pg_hold", text = "hold ", scale = 0.2, colour = RGBA(0.86, 0.88, 0.95, pad_now and 1 or 0) } },
+        { n = G.UIT.C, config = { minw = 0.34, minh = 0.15, align = "cm", func = "amu_pg_pip",
+            focus_args = { button = pad_button, type = "none", orientation = "cm", scale = 0.34, offset = { x = 0, y = 0 } } }, nodes = {} },
+      } }
+    end
+    content[#content + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = {
+      { n = G.UIT.T, config = { text = label, scale = 0.4, colour = G.C.UI.TEXT_LIGHT, func = pad_button and "amu_pg_label" or nil } } } }
+    return { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = {
+      { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = {
+        { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 0.7, minh = 0.5, r = 0.12, colour = G.C.RED,
+          button = func, hover = true, shadow = true }, nodes = content } } } } }
+  end
+  local function pg_pad() return { n = G.UIT.C, config = { minw = 0 }, nodes = {} } end
+  local pg_first = pg_btn("<<", "amu_pg_first_" .. o.id, "leftshoulder")
+  local pg_last  = pg_btn(">>", "amu_pg_last_" .. o.id, "rightshoulder")
+  if total_pages <= 1 then
+    -- a single page: nothing to skip to, so no << / >> buttons at all
+    pg_first = { n = G.UIT.C, config = { minw = 0 }, nodes = {} }
+    pg_last  = { n = G.UIT.C, config = { minw = 0 }, nodes = {} }
+  end
   if o.find then
     -- search box on the left of the page selector, "Found x of y" on the right (the selector stays centred)
     AMU_FIND.install()
@@ -2802,13 +3659,16 @@ local function amu_make_tab(o)
     AMU_FIND.applied[o.find] = norm
     col[#col + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
       AMU_FIND.left(o.find, o.find_side, o.find_box, o.find_label),
-      { n = G.UIT.C, config = { minw = 0.75 }, nodes = {} },   -- room for the LB glyph next to the page selector
+      { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = { pg_first } },
+      pg_pad(),
       { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = { pager_node } },
-      { n = G.UIT.C, config = { minw = 0.75 }, nodes = {} },   -- room for the RB glyph
+      pg_pad(),
+      { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = { pg_last } },
       AMU_FIND.right(o.find, o.find_side),
     } }
   else
-    col[#col + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = { pager_node } }
+    col[#col + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+      pg_first, pg_pad(), pager_node, pg_pad(), pg_last } }
   end
   col[#col + 1] = spacer(bottom_gap)
 
@@ -2867,7 +3727,7 @@ amu_extra_tabs_raw = function()
       label = "Mod Toggles",
       tab_definition_function = function()
         amu_sort_set("toggles", config.sort_toggles)
-        local sn = amu_sort_nodes("toggles", "amu_sort_toggles", 2.2, 2.4)
+        local sn = amu_sort_nodes("toggles", "amu_sort_toggles", 1.8, 2.0)
         amu_snap_info.text = amu_snap_label()
         return amu_make_tab({
           id = "amu_mod_toggle_list", cb = "amu_mod_toggles_page", build = build_mod_toggles_page,
@@ -2880,13 +3740,15 @@ amu_extra_tabs_raw = function()
             { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
               sn[1], sn[2], sn[3],
               amu_gap(0.12),
+              AMU_FIND.filter_node("toggles", 1.5, 1.6),
+              amu_gap(0.12),
               amu_btn("All on", "amu_toggles_all_on", G.C.GREEN, 1.5, 0.36),
               amu_gap(0.12),
               amu_btn("All off", "amu_toggles_all_off", G.C.RED, 1.5, 0.36),
-              amu_gap(0.25),
-              amu_btn("Save list", "amu_snap_save", G.C.PURPLE or purple, 2.0, 0.36),
+              amu_gap(0.15),
+              amu_btn("Save list", "amu_snap_save", G.C.PURPLE or purple, 1.8, 0.36),
               amu_gap(0.12),
-              amu_btn("Restore list", "amu_snap_restore", G.C.ORANGE or RGBA(0.85, 0.5, 0.05, 1), 2.4, 0.36),
+              amu_btn("Restore list", "amu_snap_restore", G.C.ORANGE or RGBA(0.85, 0.5, 0.05, 1), 2.2, 0.36),
             }},
           },
           after = {
@@ -2911,6 +3773,8 @@ amu_extra_tabs_raw = function()
             amu_header_row("Mod Backups & Pinning", 0.5),
             { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
               sn[1], sn[2], sn[3],
+              amu_gap(0.12),
+              AMU_FIND.filter_node("backups", 1.8, 2.3),
             }},
           },
           after = {
@@ -2924,8 +3788,11 @@ amu_extra_tabs_raw = function()
       label = "Fork Finder",
       tab_definition_function = function()
         if not amu_fork_suggestions then amu_fork_suggestions = load_fork_suggestions() end
+        AMU_TOKEN_UI.init()
+        G.FUNCS.amu_token_flash()
         amu_fork_filter_label.text = amu_fork_filter_text()
         amu_fork_tr_label.text = amu_fork_tr_text()
+        AMU_FORKIGN.label_ref.text = AMU_FORKIGN.label()
         amu_sort_set("forks", config.sort_forks)
         local sn = amu_sort_nodes("forks", "amu_sort_forks", 1.8, 2.1)
         return amu_make_tab({
@@ -2953,13 +3820,17 @@ amu_extra_tabs_raw = function()
                 { n = G.UIT.T, config = { ref_table = amu_fork_tr_label, ref_value = "text", scale = 0.34, colour = G.C.UI.TEXT_LIGHT } } } },
               amu_gap(0.12),
               { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.2, minh = 0.5, r = 0.1,
-                colour = G.C.BLUE, button = "amu_gh_help_open", hover = true, shadow = true }, nodes = {
+                colour = AMU_TOKEN_UI.btn_col, func = "amu_token_flash", button = "amu_gh_help_open", hover = true, shadow = true }, nodes = {
                 { n = G.UIT.T, config = { text = "GitHub token", scale = 0.34, colour = G.C.UI.TEXT_LIGHT } } } },
             }},
             { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.34 }, nodes = {
-              { n = G.UIT.T, config = { ref_table = amu_fork_status, ref_value = "text", scale = 0.33, colour = purple } } } },
+              { n = G.UIT.T, config = { ref_table = amu_fork_status, ref_value = "text", scale = 0.33, colour = purple } },
+              amu_gap(0.2),
+              { n = G.UIT.C, config = { align = "cm", padding = 0.02, minw = 2.3, minh = 0.36, r = 0.09,
+                colour = G.C.BLUE, button = "amu_fork_ign_filter", hover = true, shadow = true }, nodes = {
+                { n = G.UIT.T, config = { ref_table = AMU_FORKIGN.label_ref, ref_value = "text", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } } } },
             { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.3 }, nodes = {
-              { n = G.UIT.T, config = { ref_table = amu_gh_display, ref_value = "text", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
+              { n = G.UIT.T, config = { ref_table = amu_gh_display, ref_value = "text", scale = 0.3, colour = AMU_TOKEN_UI.memo_col } } } },
           },
         })
       end
@@ -3071,7 +3942,7 @@ end
 ---------------------------------------------------------------------------
 
 G.FUNCS.amu_gh_open_page = function(e)
-  local ok = pcall(function() love.system.openURL(AMU_GH_TOKEN_URL) end)
+  local ok = pcall(function() love.system.openURL(amu_gh_token_url()) end)
   amu_gh_msg.text = ok and "Opened GitHub in your browser. Follow the steps, then come back."
                         or "Couldn't open a browser. Go to github.com/settings/personal-access-tokens/new"
 end
@@ -3088,9 +3959,16 @@ G.FUNCS.amu_gh_paste_token = function(e)
     amu_gh_msg.text = "That doesn't look like a GitHub token (should start with github_pat_)."
     return
   end
+  local old_tok = config.github_token
+  if old_tok ~= clip then config.github_token_serial = amu_gh_next_serial() end
   config.github_token = clip
   amu_gh_display.text = mask_gh_token(clip)
   amu_gh_msg.text = "Token saved! Click Scan Now to look for forks."
+  -- GitHub gives programs no way to delete a token, so the old one has to be deleted by hand on github.com
+  -- (Settings > Developer settings > Personal access tokens). The numbered names keep new ones from clashing with it.
+  if type(old_tok) == "string" and old_tok ~= "" and old_tok ~= clip then
+    amu_gh_msg.text = "Token saved! Delete the old one on github.com when you like. Click Scan Now to scan."
+  end
   pcall(write_ps1_config_overlay)
 end
 
@@ -3112,8 +3990,8 @@ G.UIDEF.amu_github_token_help = function()
       { n = G.UIT.T, config = { text = txt, scale = 0.33, colour = colour or G.C.UI.TEXT_LIGHT } }
     }}
   end
-  local function button(label, func, colour, w)
-    return { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = w or 2.8, minh = 0.6, r = 0.1,
+  local function button(label, func, colour, w, id)
+    return { n = G.UIT.C, config = { id = id, align = "cm", padding = 0.06, minw = w or 2.8, minh = 0.6, r = 0.1,
       colour = colour, button = func, hover = true, shadow = true }, nodes = {
       { n = G.UIT.T, config = { text = label, scale = 0.34, colour = G.C.UI.TEXT_LIGHT } }
     }}
@@ -3123,14 +4001,14 @@ G.UIDEF.amu_github_token_help = function()
     n = G.UIT.ROOT,
     config = { align = "cm", minw = 9.5, padding = 0.22, r = 0.2, colour = bg, shadow = true, hover = true },
     nodes = {
-      { n = G.UIT.R, config = { align = "cm", padding = 0.06 }, nodes = {
+      { n = G.UIT.R, config = { align = "cm", padding = 0.06, func = "amu_modal_tick" }, nodes = {
         { n = G.UIT.T, config = { text = "Get a free GitHub token", scale = 0.5, colour = purple, shadow = true } }
       }},
       line("Without one, GitHub allows only 60 checks per hour, so Fork Finder stops early.", purple),
       line("A token makes it 5000 per hour. It is free, read-only and only sees public data."),
       { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
       line("1.  Click 'Open GitHub page' (log in if GitHub asks)."),
-      line("2.  Name: Balatro Mod Updater      (should already be filled in)"),
+      line("2.  Name: " .. amu_gh_token_name() .. "      (should already be filled in)"),
       line("3.  Expiration: 90 days            (should already be filled in)"),
       line("4.  Repository access: Public repositories (read-only)"),
       line("5.  Permissions: leave EVERYTHING unchecked / untouched"),
@@ -3146,7 +4024,7 @@ G.UIDEF.amu_github_token_help = function()
         { n = G.UIT.T, config = { ref_table = amu_gh_msg, ref_value = "text", scale = 0.28, colour = G.C.GREEN } }
       }},
       { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
-        button("Open GitHub page", "amu_gh_open_page", G.C.BLUE, 3.2),
+        button("Open GitHub page", "amu_gh_open_page", G.C.BLUE, 3.2, "amu_modal_main"),
         { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
         button("Paste token", "amu_gh_paste_token", G.C.GREEN, 2.8),
         { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
@@ -3163,6 +4041,30 @@ G.UIDEF.amu_github_token_help = function()
   }
 end
 
+-- Same rule as the results window: while one of these small windows is open, the controller cursor stays inside it.
+-- (Runs every frame through the title row's config.func; if the cursor is anywhere else, it goes back to the main button.)
+G.FUNCS.amu_modal_tick = function(e)
+  if AMU_MODAL then AMU_MODAL.touch(); AMU_MODAL.grid_om = e.UIBox end
+  local c = G.CONTROLLER
+  if not c then return end
+  local using_pad = c.HID and c.HID.controller and c.snap_to
+  local om = G.OVERLAY_MENU
+  if not (using_pad and om and e.UIBox == om) then return end
+  local t = c.focused and c.focused.target
+  -- same rule as the results window: only at the start, or when the cursor is really outside (never on an empty focus)
+  local fresh = AMU_MODAL and AMU_MODAL.first_om ~= om
+  local stray = t and t.UIBox ~= om
+  if not (fresh or stray) then return end
+  if c.locks and c.locks.frame then return end
+  local n = om.get_UIE_by_ID and om:get_UIE_by_ID("amu_modal_main")
+  if n then
+    if AMU_MODAL then AMU_MODAL.first_om = om end
+    pcall(c.snap_to, c, { node = n })
+    if c.update_cursor then pcall(c.update_cursor, c) end
+    if c.interrupt then c.interrupt.focus = false end
+  end
+end
+
 G.FUNCS.amu_gh_help_open = function(e)
   amu_gh_msg.text = ""
   open_overlay(G.UIDEF.amu_github_token_help())
@@ -3174,6 +4076,13 @@ G.FUNCS.amu_gh_scan_now = function(e)
     amu_gh_msg.text = "Paste your token first (then scanning works properly)."
     return
   end
+  -- reopen the menu on the Fork Finder tab (not whichever tab was last used)
+  pcall(function()
+    local tabs = mod.extra_tabs and mod.extra_tabs() or {}
+    for i, t in ipairs(tabs) do
+      if t.label == "Fork Finder" then SMODS.LAST_SELECTED_MOD_TAB = ((mod and mod.id) or "modupdater") .. "_" .. i end
+    end
+  end)
   G.FUNCS.amu_back_to_menu()
   if amu_run_fork_scan then amu_run_fork_scan() end
 end
@@ -3268,7 +4177,16 @@ G.UIDEF.amu_token_problem = function(kind)
   local bg     = RGBA(0.08, 0.08, 0.08, 0.96)
   local panel  = RGBA(0.15, 0.15, 0.15, 0.95)
   local lines
-  if kind == "bad" then
+  if kind == "bad_update" then
+    lines = { "Your GitHub token has expired or was rejected.",
+              "Updates still work without it, but only 60 checks per hour.",
+              "Replace it now? (about a minute)" }
+  elseif kind == "missing" then
+    lines = { "You have no GitHub token yet.",
+              "Without one GitHub allows only 60 checks per hour,",
+              "so Fork Finder scans stop early and the list is partial.",
+              "Get a free token now? (about a minute)" }
+  elseif kind == "bad" then
     lines = { "Your GitHub token has expired or was rejected.",
               "Fork scans can't run until you replace it.",
               "Replace it now? (about a minute)" }
@@ -3285,24 +4203,24 @@ G.UIDEF.amu_token_problem = function(kind)
       { n = G.UIT.T, config = { text = t, scale = 0.36, colour = c or G.C.UI.TEXT_LIGHT } } } }
   end
   local nodes = {
-    { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
+    { n = G.UIT.R, config = { align = "cm", padding = 0.08, func = "amu_modal_tick" }, nodes = {
       { n = G.UIT.T, config = { text = "GitHub token", scale = 0.5, colour = purple, shadow = true } } } },
   }
   for i, t in ipairs(lines) do nodes[#nodes + 1] = line(t, (i == #lines) and purple or nil) end
   nodes[#nodes + 1] = { n = G.UIT.B, config = { h = 0.15, w = 0.1 } }
-  local function b(label, func, colour, w)
-    return { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = w, minh = 0.62, r = 0.1,
+  local function b(label, func, colour, w, id)
+    return { n = G.UIT.C, config = { id = id, align = "cm", padding = 0.06, minw = w, minh = 0.62, r = 0.1,
       colour = colour, button = func, hover = true, shadow = true }, nodes = {
       { n = G.UIT.T, config = { text = label, scale = 0.38, colour = G.C.UI.TEXT_LIGHT } } } }
   end
   local gap = { n = G.UIT.B, config = { h = 0.1, w = 0.15 } }
   if kind == "limit_token" then
     nodes[#nodes + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
-      b("Back", "amu_back_to_menu", panel, 2.4), gap, b("Close All Menus", "amu_close_all", G.C.RED, 3.2) } }
+      b("Back", "amu_back_to_menu", panel, 2.4, "amu_modal_main"), gap, b("Close All Menus", "amu_close_all", G.C.RED, 3.2) } }
   else
     nodes[#nodes + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
-      b("Yes, replace it", "amu_gh_help_open", G.C.GREEN, 3.2), gap,
-      b("Not now", "amu_back_to_menu", panel, 2.2), gap,
+      b((kind == "missing") and "Yes, get one" or "Yes, replace it", "amu_gh_help_open", G.C.GREEN, 3.2, "amu_modal_main"), gap,
+      b("Not now", (kind == "bad_update" or kind == "missing") and "amu_token_not_now" or "amu_back_to_menu", panel, 2.2), gap,
       b("Close All Menus", "amu_close_all", G.C.RED, 3.2) } }
   end
   return { n = G.UIT.ROOT, config = { align = "cm", minw = 9.0, padding = 0.22, r = 0.2, colour = bg, shadow = true, hover = true }, nodes = nodes }
@@ -3324,18 +4242,23 @@ G.UIDEF.amu_backup_picker = function(ref)
   local display  = ref.display or folder
   local backups  = ref.backups or {}
 
-  local pinned_info   = config.mod_pinned and config.mod_pinned[folder]
+  local is_fw = ref.framework == true
+  local pinned_info
+  if folder == "_game" then pinned_info = AMU_GAME.pin_info()
+  elseif is_fw then pinned_info = config.framework_pins and config.framework_pins[folder]
+  else pinned_info = config.mod_pinned and config.mod_pinned[folder] end
   local pinned_backup = pinned_info and pinned_info.backup_file or ""
 
   local max_show = 5
   local shown = math.min(#backups, max_show)
+  local is_game = (folder == "_game")
 
   -- Register one revert G.FUNC per visible backup entry
   for i = 1, shown do
     local bf = backups[i]
     G.FUNCS["amu_revert_" .. tostring(i)] = function(e)
       close_overlay()
-      revert_and_pin_mod(folder, bf)
+      if is_fw then AMU_FRAMEWORKS.revert(folder, bf) else revert_and_pin_mod(folder, bf) end
       G.FUNCS.amu_back_to_menu()   -- back to the Backups page, not the main menu
     end
   end
@@ -3343,7 +4266,7 @@ G.UIDEF.amu_backup_picker = function(ref)
   local rows = {}
   for i = 1, shown do
     local bf    = backups[i]
-    local label = format_backup_label(folder, bf)
+    local label = is_fw and AMU_FRAMEWORKS.label(bf) or format_backup_label(folder, bf)
     local is_cur_pin = (bf == pinned_backup)
 
     local btn_node
@@ -3357,7 +4280,7 @@ G.UIDEF.amu_backup_picker = function(ref)
       btn_node = {
         n = G.UIT.C, config = { align = "cm", padding = 0.05, minw = 1.9, minh = 0.45, r = 0.1,
           colour = G.C.GREEN, button = "amu_revert_" .. tostring(i), hover = true, shadow = true }, nodes = {
-          { n = G.UIT.T, config = { text = "Revert & Pin", scale = 0.32, colour = purple } }
+          { n = G.UIT.T, config = { text = is_game and "Play this copy" or (is_fw and "Restore & Pin" or "Revert & Pin"), scale = 0.32, colour = purple } }
         }
       }
     end
@@ -3376,7 +4299,7 @@ G.UIDEF.amu_backup_picker = function(ref)
   if #backups == 0 then
     rows[1] = {
       n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
-        { n = G.UIT.T, config = { text = "No backups found.", scale = 0.38, colour = purple } }
+        { n = G.UIT.T, config = { text = is_game and "No saved game copy yet. One is made on the next update check." or (is_fw and "No backups yet. One is made right before each update." or "No backups found."), scale = 0.38, colour = purple } }
       }
     }
   elseif #backups > max_show then
@@ -3396,11 +4319,24 @@ G.UIDEF.amu_backup_picker = function(ref)
       { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
         { n = G.UIT.T, config = { text = "Backups: " .. display, scale = 0.52, colour = purple, shadow = true } }
       }},
-      { n = G.UIT.B, config = { h = 0.12, w = 0.1 } },
+      is_fw and { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
+        { n = G.UIT.T, config = { text = is_game and "Takes effect when the game restarts. Mod updates pause on a saved copy." or "Takes effect when the game restarts. Stays pinned until you press Unpin.", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } }
+        or { n = G.UIT.B, config = { h = 0.12, w = 0.1 } },
       { n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
         { n = G.UIT.C, config = { align = "cl", padding = 0.12, minw = 6.6, r = 0.12, colour = panel }, nodes = rows }
       }},
       { n = G.UIT.B, config = { h = 0.14, w = 0.1 } },
+      is_game and { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
+        { n = G.UIT.C, config = { align = "cm", padding = 0.03 }, nodes = {
+          { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
+            { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = 6.6, minh = 0.6, r = 0.1, colour = G.C.GREEN,
+                button = "amu_game_latest", hover = true, shadow = true }, nodes = {
+              { n = G.UIT.T, config = { text = "Use Steam's newest game + turn updates on", scale = 0.36, colour = purple } } } } } },
+          { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
+            { n = G.UIT.C, config = { align = "cm", padding = 0.06, minw = 6.6, minh = 0.5, r = 0.1, colour = G.C.BLUE,
+                button = "amu_game_allow", hover = true, shadow = true }, nodes = {
+              { n = G.UIT.T, config = { text = "Allow mod updates on a saved copy: " .. ((config.cfg_allow_updates_on_backup == true) and "ON" or "OFF"), scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } } } },
+        } } } } or { n = G.UIT.B, config = { h = 0.01, w = 0.1 } },
       { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
         { n = G.UIT.C, config = { align = "cm", padding = 0.1, minw = 2.8, minh = 0.7, r = 0.12,
           colour = panel, button = "amu_back_to_menu", hover = true, shadow = true }, nodes = {
@@ -3435,6 +4371,18 @@ local function amu_is_noise(s)
 end
 
 -- Builds the rows of the hover box (called by the game when you hover / focus the row).
+G.FUNCS.amu_game_latest = function(e)
+  close_overlay()
+  AMU_FRAMEWORKS.game_run("steam")
+  G.FUNCS.amu_back_to_menu()
+end
+G.FUNCS.amu_game_allow = function(e)
+  config.cfg_allow_updates_on_backup = not (config.cfg_allow_updates_on_backup == true)
+  pcall(write_ps1_config_overlay)
+  close_overlay()
+  open_overlay(G.UIDEF.amu_backup_picker({ folder = "_game", display = AMU_FRAMEWORKS._game.display, backups = AMU_GAME.copies(), framework = true }))
+end
+
 local function amu_changelog_tip(args)
   args = args or {}
   local folder, display = args.folder or "", args.display or args.folder or ""
@@ -3515,10 +4463,29 @@ build_backup_mods_page = function(page)
       local row_i     = i - start_i + 1
       local folder    = entry.folder
       local display   = entry.display
-      local pin_info  = config.mod_pinned and config.mod_pinned[folder]
+      local pin_info
+      if folder == "_game" then pin_info = AMU_GAME.pin_info()
+      elseif AMU_FRAMEWORKS[folder] then pin_info = config.framework_pins and config.framework_pins[folder]
+      else pin_info = config.mod_pinned and config.mod_pinned[folder] end
       local is_pinned = type(pin_info) == "table" and pin_info.pinned == true
 
+      -- Balatro game files / Lovely / Steamodded: green while on the newest version, red while on a saved older copy
+      local name_col = G.C.UI.TEXT_LIGHT
+      if AMU_FRAMEWORKS[folder] then
+        local older = is_pinned
+        if folder == "_game" then
+          local pend = AMU_GAME.pending_swap()
+          if pend and pend ~= "" and pend ~= "steam" then older = true end
+        end
+        name_col = older and RGBA(1.0, 0.36, 0.36, 1) or RGBA(0.34, 0.9, 0.42, 1)
+      end
+
       G.FUNCS["amu_open_backups_" .. row_i] = function(e)
+        if AMU_FRAMEWORKS[folder] then
+          amu_backup_status.text = AMU_FRAMEWORKS[folder].note
+          open_overlay(G.UIDEF.amu_backup_picker({ folder = folder, display = display, backups = AMU_FRAMEWORKS.backups(folder), framework = true }))
+          return
+        end
         local backups = list_backups_for_mod(folder)
         open_overlay(G.UIDEF.amu_backup_picker({ folder = folder, display = display, backups = backups }))
       end
@@ -3529,14 +4496,18 @@ build_backup_mods_page = function(page)
       end
 
       G.FUNCS["amu_unpin_mod_" .. row_i] = function(e)
-        unpin_mod(folder)
+        if AMU_FRAMEWORKS[folder] then AMU_FRAMEWORKS.unpin(folder) else unpin_mod(folder) end
         amu_update_area("amu_backup_mod_list", build_backup_mods_page(AMU_BACKUP_PAGE))
       end
 
       -- Two lines to the right of the name: version, then last update / pin info
-      local line1 = amu_fit(mod_version_line(folder), 0.35, 4.2)
+      local fw1, fw2
+      if AMU_FRAMEWORKS[folder] then fw1, fw2 = AMU_FRAMEWORKS.lines(folder) end
+      local line1 = amu_fit(fw1 or mod_version_line(folder), 0.35, 4.2)
       local line2, line2_colour
-      if is_pinned then
+      if fw2 and not is_pinned then
+        line2, line2_colour = fw2, grey
+      elseif is_pinned then
         local pd = fmt_date(parse_stamp(pin_info.backup_file or ""))
         line2 = pd and ("Pinned to backup " .. pd) or "Pinned to a backup"
         line2_colour = orange
@@ -3569,7 +4540,7 @@ build_backup_mods_page = function(page)
 
       local row_nodes = {
         { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 4.6 }, nodes = {
-          { n = G.UIT.T, config = { text = amu_fit(display, 0.5, 4.4), scale = 0.5, colour = G.C.UI.TEXT_LIGHT } } } },
+          { n = G.UIT.T, config = { text = amu_fit(display, 0.5, 4.4), scale = 0.5, colour = name_col } } } },
         { n = G.UIT.C, config = { align = "cl", padding = 0, minw = 4.2 }, nodes = {
           { n = G.UIT.R, config = { align = "cl", padding = 0 }, nodes = {
             { n = G.UIT.T, config = { text = line1, scale = 0.35, colour = G.C.UI.TEXT_LIGHT } } } },
@@ -3596,9 +4567,9 @@ build_backup_mods_page = function(page)
 
   local shown = math.max(0, end_i - start_i + 1)
   local blank_from = shown + 1
-  if shown == 0 and AMU_FIND.active("backups") then
+  if shown == 0 and (AMU_FIND.active("backups") or AMU_FIND.filtering("backups")) then
     rows[#rows + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.02, minh = AMU_BK_ROW_H, minw = AMU_BK_W - 0.5 }, nodes = {
-      { n = G.UIT.T, config = { text = "No mods match your search", scale = 0.4, colour = G.C.UI.TEXT_LIGHT } } } }
+      { n = G.UIT.T, config = { text = "No mods match your search or filter", scale = 0.4, colour = G.C.UI.TEXT_LIGHT } } } }
     blank_from = 2
   end
   for _ = blank_from, AMU_BK_PER do
@@ -3612,6 +4583,7 @@ end
 -- Sort button on the Backups screen
 G.FUNCS.amu_sort_backups = function(e)
   config.sort_backups = (config.sort_backups == "recent") and "az" or "recent"
+  pcall(AMU_UI.save)
   amu_sort_set("backups", config.sort_backups)
   amu_update_area("amu_backup_mod_list", build_backup_mods_page(AMU_BACKUP_PAGE))
 end
@@ -3724,11 +4696,13 @@ get_fork_mod_entries = function(force_all, keep_tr)
   local cls = newer_only and amu_changelogs() or nil
   local entries = {}
   for folder_name, data in pairs(amu_fork_suggestions.suggestions) do
-    if type(data) == "table" and type(data.forks) == "table" and #data.forks > 0 then
+    if type(data) == "table" and type(data.forks) == "table" and #data.forks > 0
+       and (AMU_FORKIGN.show() or not AMU_FORKIGN.mod_is(folder_name)) then
       local installed = newer_only and amu_installed_date(folder_name, umap, cls) or ""
       local list = {}
       for _, f in ipairs(data.forks) do
         local keep = (not newer_only or amu_fork_is_newer(f, installed)) and not (hide_tr and amu_fork_is_translation(f))
+          and (AMU_FORKIGN.show() or not AMU_FORKIGN.is(f))
         if keep then list[#list + 1] = f end
       end
       -- newest push first, whatever kind of fork it is
@@ -3754,6 +4728,7 @@ get_fork_mod_entries = function(force_all, keep_tr)
           has_upstream   = has_upstream,
           fork_count     = fork_only_count,
           counts         = counts,
+          mod_ignored    = AMU_FORKIGN.mod_is(folder_name),
         }
       end
     end
@@ -3761,6 +4736,83 @@ get_fork_mod_entries = function(force_all, keep_tr)
   table.sort(entries, function(a, b) return a.display:lower() < b.display:lower() end)
   return entries
 end
+
+-- "Ignore scans" for single forks: config.fork_ignored["owner/repo" in lower case] = true. The scan (autoupdate.ps1 -CheckForks) does
+-- not compare an ignored fork (it only keeps a stub so the fork can be un-ignored here), and the Fork Finder list hides it
+-- unless "Ignored: Shown" is on.
+AMU_FORKIGN = {}
+function AMU_FORKIGN.is(f)
+  return type(f) == "table" and type(config.fork_ignored) == "table" and config.fork_ignored[tostring(f.repo or ""):lower()] == true
+end
+-- "Ignore" for a whole mod: config.fork_ignored_mods[folder in lower case] = true. The scan skips the mod (its last results are
+-- kept so it can be un-ignored here) and the list hides it unless "Ignored: Shown" is on.
+function AMU_FORKIGN.mod_is(folder)
+  return type(config.fork_ignored_mods) == "table" and config.fork_ignored_mods[tostring(folder or ""):lower()] == true
+end
+function AMU_FORKIGN.toggle_mod(folder)
+  config.fork_ignored_mods = config.fork_ignored_mods or {}
+  local k = tostring(folder or ""):lower()
+  if k == "" then return false end
+  if config.fork_ignored_mods[k] then config.fork_ignored_mods[k] = nil else config.fork_ignored_mods[k] = true end
+  pcall(write_ps1_config_overlay)
+  return config.fork_ignored_mods[k] == true
+end
+function AMU_FORKIGN.mod_tip(args)
+  local dark = G.C.UI.TEXT_DARK or RGBA(0.2, 0.2, 0.25, 1)
+  local rows = {}
+  local function add(text, scale, colour)
+    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.015 }, nodes = {
+      { n = G.UIT.T, config = { text = amu_fit(text, scale, 6.0), scale = scale, colour = colour or dark } } } }
+  end
+  add("Ignore this whole mod", 0.34, G.C.BLUE or dark)
+  add("Fork scans skip it completely.", 0.28)
+  add("It leaves this list unless Ignored: Shown is on.", 0.27)
+  add("Tick it again to scan the mod again.", 0.27)
+  return { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = {
+    { n = G.UIT.C, config = { align = "cl", padding = 0.03 }, nodes = rows } } }
+end
+function AMU_FORKIGN.show() return config.fork_show_ignored == true end
+function AMU_FORKIGN.toggle(repo)
+  config.fork_ignored = config.fork_ignored or {}
+  local k = tostring(repo or ""):lower()
+  if k == "" then return false end
+  if config.fork_ignored[k] then config.fork_ignored[k] = nil else config.fork_ignored[k] = true end
+  pcall(write_ps1_config_overlay)
+  return config.fork_ignored[k] == true
+end
+-- Hover text for a Fork Finder row: the whole story the short row text leaves out.
+function AMU_FORKIGN.row_tip(args)
+  local entry = (args and args.entry) or {}
+  local dark = G.C.UI.TEXT_DARK or RGBA(0.2, 0.2, 0.25, 1)
+  local blue = G.C.BLUE or dark
+  local rows = {}
+  local function add(text, scale, colour)
+    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.015 }, nodes = {
+      { n = G.UIT.T, config = { text = amu_fit(text, scale, 6.0), scale = scale, colour = colour or dark } } } }
+  end
+  add(tostring(args and args.display or ""), 0.34, blue)
+  local counts, parts = entry.counts or {}, {}
+  for _, k in ipairs({ "original", "parent", "parent_fork", "fork_fork", "fork" }) do
+    local n = counts[k] or 0
+    if n > 0 then
+      local w = AMU_FORK_KIND[k].word
+      parts[#parts + 1] = (k == "original" or k == "parent") and ("the " .. w) or (n .. " " .. w .. (n == 1 and "" or "s"))
+    end
+  end
+  add("Found: " .. (#parts > 0 and table.concat(parts, ", ") or "nothing newer"), 0.28)
+  local newest = tostring(entry.forks and entry.forks[1] and entry.forks[1].pushed_at or ""):match("^(%d%d%d%d%-%d%d%-%d%d)")
+  if newest then add("Newest push: " .. newest .. "  (" .. tostring(entry.forks[1].repo or "") .. ")", 0.27) end
+  local ign = 0
+  for _, f in ipairs(entry.forks or {}) do if AMU_FORKIGN.is(f) then ign = ign + 1 end end
+  if ign > 0 then add(ign .. " of them ignored by scans", 0.27) end
+  local src = config.mod_fork_source and config.mod_fork_source[args and args.folder or ""]
+  if src and src.fork_repo then add("Using now: " .. tostring(src.fork_repo), 0.27, blue) end
+  add("Press the Forks button to read about each fork and tick Ignore scans.", 0.26)
+  return { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = {
+    { n = G.UIT.C, config = { align = "cl", padding = 0.03 }, nodes = rows } } }
+end
+function AMU_FORKIGN.label() return AMU_FORKIGN.show() and "Ignored: Shown" or "Ignored: Hidden" end
+AMU_FORKIGN.label_ref = { text = "" }
 
 -- Fork Finder list for the search: A-Z, or "Recent" = the mods whose newest fork was pushed most recently first.
 AMU_FIND.source.forks = function(mode)
@@ -3778,6 +4830,7 @@ end
 
 G.FUNCS.amu_sort_forks = function(e)
   config.sort_forks = (config.sort_forks == "recent") and "az" or "recent"
+  pcall(AMU_UI.save)
   amu_sort_set("forks", config.sort_forks)
   AMU_FORK_PAGE = 1
   amu_update_area("amu_fork_mod_list", build_fork_mods_page(1))
@@ -3820,6 +4873,7 @@ end
 
 G.FUNCS.amu_fork_filter = function(e)
   config.fork_newer_only = (config.fork_newer_only == false) and true or false
+  pcall(AMU_UI.save)
   amu_fork_filter_label.text = amu_fork_filter_text()
   AMU_FORK_PAGE = 1
   if not amu_fork_scanning then amu_fork_status.text = amu_fork_summary() end
@@ -3829,11 +4883,21 @@ end
 
 G.FUNCS.amu_fork_tr_filter = function(e)
   config.fork_hide_translations = (config.fork_hide_translations == false) and true or false
+  pcall(AMU_UI.save)
   amu_fork_tr_label.text = amu_fork_tr_text()
   AMU_FORK_PAGE = 1
   if not amu_fork_scanning then amu_fork_status.text = amu_fork_summary() end
   amu_reopen_if_open("amu_fork_mod_list")
   AMU_FIND.snap_to_button("amu_fork_tr_filter")
+end
+
+G.FUNCS.amu_fork_ign_filter = function(e)
+  config.fork_show_ignored = not (config.fork_show_ignored == true)
+  pcall(AMU_UI.save)
+  AMU_FORKIGN.label_ref.text = AMU_FORKIGN.label()
+  AMU_FORK_PAGE = 1
+  amu_reopen_if_open("amu_fork_mod_list")
+  AMU_FIND.snap_to_button("amu_fork_ign_filter")
 end
 
 local function run_fork_scan()
@@ -3893,6 +4957,7 @@ local function run_fork_scan()
         amu_fork_suggestions = load_fork_suggestions()
         amu_fork_status.text = amu_fork_summary()
         local ts = amu_fork_suggestions and amu_fork_suggestions.token_status
+        if ts == "bad" then AMU_TOKEN_UI.set_bad(true) elseif ts == "ok" then AMU_TOKEN_UI.set_bad(false) end
         if ts == "bad" then
           amu_fork_status.text = "GitHub token rejected - replace it to scan."
         elseif ts == "rate_limited" then
@@ -3972,6 +5037,15 @@ local function switch_to_fork(folder_name, fork_repo)
           pcall(amu_update_areas, {
             ["amu_fork_mod_list"] = build_fork_mods_page(AMU_FORK_PAGE)
           })
+          if msg == "done" then
+            local ok, shown, why = pcall(function()
+              return AMU_CRASH.ask_restart({
+                folder_name .. " now uses the fork you picked.",
+                "Press Switch Back in Mod Updater > Fork Finder to return to the original.",
+              })
+            end)
+            if ok and shown == false then amu_fork_status.text = folder_name .. " switch error: " .. amu_fit(tostring(why or "see last_run.json"), 0.3, 8.5) end
+          end
           return true
         end
         return false
@@ -3980,6 +5054,12 @@ local function switch_to_fork(folder_name, fork_repo)
   else
     AMU_RUN(cmd)
     amu_fork_status.text = folder_name .. " switched to fork. Restart to apply."
+    pcall(function()
+      AMU_CRASH.ask_restart({
+        folder_name .. " now uses the fork you picked.",
+        "Press Switch Back in Mod Updater > Fork Finder to return to the original.",
+      })
+    end)
   end
 end
 
@@ -4037,6 +5117,14 @@ local function switch_back_fork(folder_name)
           pcall(amu_update_areas, {
             ["amu_fork_mod_list"] = build_fork_mods_page(AMU_FORK_PAGE)
           })
+          if msg == "done" then
+            local ok, shown, why = pcall(function()
+              return AMU_CRASH.ask_restart({
+                folder_name .. " is back on the original mod.",
+              })
+            end)
+            if ok and shown == false then amu_fork_status.text = folder_name .. " revert error: " .. amu_fit(tostring(why or "see last_run.json"), 0.3, 8.5) end
+          end
           return true
         end
         return false
@@ -4045,6 +5133,7 @@ local function switch_back_fork(folder_name)
   else
     AMU_RUN(cmd)
     amu_fork_status.text = folder_name .. " reverted to original. Restart to apply."
+    pcall(function() AMU_CRASH.ask_restart({ folder_name .. " is back on the original mod." }) end)
   end
 end
 
@@ -4167,7 +5256,8 @@ G.UIDEF.amu_fork_picker = function(ref)
     local is_upstream = (kind == "original" or kind == "parent")
     local diverged    = (not is_upstream) and ((fork.commits_behind or 0) > 0) and ((fork.commits_ahead or 0) > 0)
     local is_tr       = amu_fork_is_translation(fork)
-    local kind_tag    = AMU_FORK_KIND[kind].tag .. (is_tr and "  /  TRANSLATION" or "")
+    local is_ign      = AMU_FORKIGN.is(fork)
+    local kind_tag    = AMU_FORK_KIND[kind].tag .. (is_tr and "  /  TRANSLATION" or "") .. (is_ign and "  /  IGNORED" or "")
     local url = tostring(fork.html_url or "")
     if url == "" then url = "https://github.com/" .. tostring(fork.repo or "") end
 
@@ -4175,13 +5265,19 @@ G.UIDEF.amu_fork_picker = function(ref)
       switch_to_fork(folder, fork.repo)
       G.FUNCS.amu_back_to_menu()   -- land on the Fork Finder tab again, not the main menu
     end
+    G.FUNCS["amu_ignore_fork_" .. slot] = function(e)
+      local now = AMU_FORKIGN.toggle(fork.repo)
+      amu_fork_status.text = tostring(fork.repo) .. (now and " is ignored: the next Fork Finder scan skips it." or " is no longer ignored: the next scan checks it again.")
+      if amu_fork_picker_ref then open_overlay(G.UIDEF.amu_fork_picker(amu_fork_picker_ref)) end
+    end
     G.FUNCS["amu_open_fork_" .. slot] = function(e)
       local ok = pcall(function() love.system.openURL(url) end)
       amu_fork_status.text = ok and ("Opened " .. tostring(fork.repo) .. " in your browser.") or "Couldn't open a browser."
     end
 
     local pushed_str = tostring(fork.pushed_at or ""):match("^(%d%d%d%d%-%d%d%-%d%d)") or ""
-    local info_parts = { "+" .. (fork.commits_ahead or 0) .. " commits" }
+    local info_parts = { "+" .. (fork.commits_ahead or 0) .. " new" }
+    if fork.ignored then info_parts = { "ignored" } end
     if (fork.commits_behind or 0) > 0 then
       info_parts[#info_parts + 1] = "-" .. fork.commits_behind .. (is_upstream and "" or " (diverged)")
     end
@@ -4243,9 +5339,15 @@ G.UIDEF.amu_fork_picker = function(ref)
     local rel = tostring(fork.latest_release_tag or "")
     local open_label = "Open fork page" .. (rel ~= "" and ("     Release: " .. rel) or "")
     card[#card + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = {
-      { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = CARD_W - 0.5, minh = 0.38, r = 0.09,
+      { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = CARD_W - 3.4, minh = 0.38, r = 0.09,
           colour = G.C.BLUE, button = "amu_open_fork_" .. slot, hover = true, shadow = true, on_demand_tooltip = tip }, nodes = {
-        { n = G.UIT.T, config = { text = amu_fit(open_label, 0.3, CARD_W - 0.8), scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } } } }
+        { n = G.UIT.T, config = { text = amu_fit(open_label, 0.3, CARD_W - 3.7), scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
+      { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
+      { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 0.42, minh = 0.42, r = 0.07,
+          colour = is_ign and G.C.RED or RGBA(0.78, 0.78, 0.86, 1), button = "amu_ignore_fork_" .. slot, hover = true, shadow = true }, nodes = {
+        { n = G.UIT.T, config = { text = is_ign and "X" or "  ", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
+      { n = G.UIT.C, config = { align = "cl", padding = 0.04 }, nodes = {
+        { n = G.UIT.T, config = { text = "Ignore scans", scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } } } }
 
     rows[#rows + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
       { n = G.UIT.C, config = { align = "cl", padding = 0.08, minw = CARD_W, r = 0.1, colour = panel }, nodes = card } } }
@@ -4352,20 +5454,24 @@ build_fork_mods_page = function(page)
           amu_fork_status.text = AMU_WEB.open_first(folder, display, entry.installed_repo)
         end
 
-        local label_parts = {}
         local counts = entry.counts or {}
+        local short, nf = {}, 0
         for _, k in ipairs({ "original", "parent", "parent_fork", "fork_fork", "fork" }) do
           local n = counts[k] or 0
           if n > 0 then
-            local w = AMU_FORK_KIND[k].word
-            if k == "original" or k == "parent" then
-              label_parts[#label_parts + 1] = w:sub(1, 1):upper() .. w:sub(2)
-            else
-              label_parts[#label_parts + 1] = n .. " " .. w .. (n == 1 and "" or "s")
-            end
+            if k == "original" then short[#short + 1] = "Orig"
+            elseif k == "parent" then short[#short + 1] = "Parent"
+            else nf = nf + n end
           end
         end
-        local fork_label = amu_fit(table.concat(label_parts, " + "), 0.34, 4.5)
+        if nf > 0 then short[#short + 1] = nf .. (nf == 1 and " fork" or " forks") end
+        local fork_text = table.concat(short, " + ")
+        if config.sort_forks == "recent" then
+          local newest = tostring(entry.forks and entry.forks[1] and entry.forks[1].pushed_at or ""):match("^(%d%d%d%d%-%d%d%-%d%d)")
+          if newest then fork_text = fork_text .. "  " .. newest end
+        end
+        local row_tip = { filler = { func = AMU_FORKIGN.row_tip, args = { entry = entry, display = display, folder = folder } } }
+        local fork_label = amu_fit(fork_text, 0.34, 3.7)
         local label_colour = has_upstream and orange or (is_switched and G.C.GREEN or G.C.UI.TEXT_LIGHT)
 
         local action_btn
@@ -4379,15 +5485,37 @@ build_fork_mods_page = function(page)
             { n = G.UIT.T, config = { text = "View Forks", scale = 0.36, colour = G.C.UI.TEXT_LIGHT } } } }
         end
 
-        rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H }, nodes = {
-          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 5.6 }, nodes = {
-            { n = G.UIT.T, config = { text = amu_fit(display, 0.5, 5.4), scale = 0.5, colour = G.C.UI.TEXT_LIGHT } } } },
-          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 4.6 }, nodes = {
+        -- a mod you switched to a fork only had Switch Back: this button opens the fork list (where Ignore scans is)
+        local forks_btn = is_switched and { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.4, minh = 0.48, r = 0.09,
+            colour = G.C.BLUE, button = "amu_view_forks_" .. row_i, hover = true, shadow = true }, nodes = {
+            { n = G.UIT.T, config = { text = "Forks", scale = 0.36, colour = G.C.UI.TEXT_LIGHT } } } }
+          or { n = G.UIT.B, config = { h = 0.1, w = 1.4 } }
+
+        local mod_ign = AMU_FORKIGN.mod_is(folder)
+        G.FUNCS["amu_ign_mod_" .. row_i] = function(e)
+          local now = AMU_FORKIGN.toggle_mod(folder)
+          amu_fork_status.text = display .. (now and " is ignored: fork scans skip it." or " is no longer ignored: scans check it again.")
+          amu_reopen_if_open("amu_fork_mod_list")
+        end
+        local mod_tip = { filler = { func = AMU_FORKIGN.mod_tip, args = {} } }
+        local ign_box = { n = G.UIT.C, config = { align = "cm", padding = 0.02, minw = 0.46, minh = 0.46, r = 0.07,
+            colour = mod_ign and G.C.RED or RGBA(0.78, 0.78, 0.86, 1), button = "amu_ign_mod_" .. row_i, hover = true, shadow = true,
+            on_demand_tooltip = mod_tip }, nodes = {
+          { n = G.UIT.T, config = { text = mod_ign and "X" or "  ", scale = 0.34, colour = G.C.UI.TEXT_LIGHT } } } }
+
+        rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H, on_demand_tooltip = row_tip }, nodes = {
+          ign_box,
+          { n = G.UIT.B, config = { h = 0.1, w = 0.14 } },
+          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 4.6, on_demand_tooltip = row_tip }, nodes = {
+            { n = G.UIT.T, config = { text = amu_fit(display, 0.5, 4.4), scale = 0.5, colour = mod_ign and RGBA(0.6, 0.6, 0.66, 1) or G.C.UI.TEXT_LIGHT } } } },
+          { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 3.9, on_demand_tooltip = row_tip }, nodes = {
             { n = G.UIT.T, config = { text = fork_label, scale = 0.34, colour = label_colour } } } },
           { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.7, minh = 0.48, r = 0.09,
             colour = G.C.BLUE, button = "amu_page_current_" .. row_i, hover = true, shadow = true }, nodes = {
             { n = G.UIT.T, config = { text = "Webpage", scale = 0.36, colour = G.C.UI.TEXT_LIGHT } } } },
-          { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
+          { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
+          forks_btn,
+          { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
           action_btn,
         }}
       end
@@ -4459,6 +5587,12 @@ local function build_prompt_lines(summary)
   local skipped = summary.skipped_mods or {}
 
   -- first, so it is never hidden below the scroll
+  if summary.github_token_bad == true then
+    table.insert(lines, "Your GitHub token has expired or was rejected.")
+    table.insert(lines, "Updates ran without it (GitHub allows 60 checks per hour).")
+    table.insert(lines, "When you close this window you can replace it.")
+    table.insert(lines, "")
+  end
   local untracked_n = amu_untracked_count(summary)
   if untracked_n > 0 then
     table.insert(lines, tostring(untracked_n) .. " mod(s) have no update source, so they are never checked.")
@@ -4493,6 +5627,16 @@ local function build_prompt_lines(summary)
     end
   end
 
+  local stale = summary.folder_name_stale
+  if type(stale) == "string" then stale = { stale } end
+  if type(stale) == "table" and #stale > 0 then
+    table.insert(lines, "Folder names that still show an old version:")
+    for i = 1, math.min(#stale, 6) do table.insert(lines, "    " .. tostring(stale[i])) end
+    table.insert(lines, "The mod itself is up to date. The name is only a label.")
+    table.insert(lines, "To fix it, close the game and rename the folder.")
+    table.insert(lines, "")
+  end
+
   local available = summary.available_updates or {}
   if #available > 0 then
     table.insert(lines, "Updates to download yourself (" .. tostring(#available) .. "):")
@@ -4510,7 +5654,10 @@ local function build_prompt_lines(summary)
     local shown, off = {}, 0
     for _, v in ipairs(skipped) do
       local sv = tostring(v)
-      if sv:find("(updates disabled)", 1, true) or sv:find("[Framework debug]", 1, true) then
+      local fw_current = sv:find("[Framework] ", 1, true) and sv:find("already current", 1, true)
+      if fw_current and config.cfg_show_framework_current ~= true then
+        -- hidden by default: only pending restarts and problems are worth a line (switch on in Config)
+      elseif sv:find("(updates disabled)", 1, true) or sv:find("[Framework debug]", 1, true) then
         off = off + 1
       else
         shown[#shown+1] = sv
@@ -4538,10 +5685,23 @@ function show_prompt(summary)
   local errors = summary and summary.errors or {}
   local available = summary and summary.available_updates or {}
   local fw = summary and summary.framework_staged == true
+  if summary then AMU_TOKEN_UI.on_summary(summary) end
   local should = (#updated > 0) or fw or (#available > 0) or ((config.prompt_on_errors ~= false) and (#errors > 0))
-    or (amu_untracked_count(summary) > 0)
-  if not should then return end
+    or (amu_untracked_count(summary) > 0) or (summary and summary.github_token_bad == true)
+  -- no GitHub token at all: ask about getting one after every update check (turn off with "ask_missing_token": false)
+  local no_token = not (config.github_token and config.github_token ~= "") and config.ask_missing_token ~= false
+  if not should then
+    if no_token and G and G.E_MANAGER and Event then
+      G.E_MANAGER:add_event(Event({ trigger = "after", delay = 0.35, blocking = false, func = function()
+        open_overlay(G.UIDEF.amu_token_problem("missing"))
+        return true
+      end }))
+    end
+    return
+  end
 
+  AMU_PROMPT.token_bad = (summary and summary.github_token_bad == true) or false
+  AMU_PROMPT.token_missing = no_token and not AMU_PROMPT.token_bad
   AMU_PROMPT.title = "Mod Updater"
   AMU_PROMPT.lines = build_prompt_lines(summary)
   AMU_PROMPT.has_updates = (#updated > 0) or fw
@@ -4597,15 +5757,101 @@ do
   function S.active() return (now() - (S.alive_at or -10)) < 0.25 and S.total > S.vis end
 
   -- mouse wheel
-  if love and not S.wheel_hooked then
-    S.wheel_hooked = true
-    local prev = love.wheelmoved
-    love.wheelmoved = function(x, y, ...)
-      if y and y ~= 0 and S.active() then
-        S.scroll(y > 0 and -3 or 3)
-        return
+  -- Other mods replace love.wheelmoved after we loaded (Better Mouse and Gamepad does, and never calls the old one), which
+  -- silently removed this hook. So the hook is put back by the results window itself (S.ensure_wheel, every frame while it
+  -- is open), chaining to whatever handler is there at that moment.
+  S.wheel_fn = S.wheel_fn or function(x, y, ...)
+    if y and y ~= 0 and S.active() then
+      S.scroll(y > 0 and -3 or 3)
+      return
+    end
+    if S.in_wheel then return end -- a mod that wrapped us calls us again: stop the loop
+    local prev = S.wheel_prev
+    if prev then
+      S.in_wheel = true
+      local ok, err = pcall(prev, x, y, ...)
+      S.in_wheel = false
+      if not ok then error(err, 0) end
+    end
+  end
+
+  function S.ensure_wheel()
+    if love and love.wheelmoved ~= S.wheel_fn then
+      S.wheel_prev = love.wheelmoved
+      love.wheelmoved = S.wheel_fn
+    end
+  end
+  S.ensure_wheel()
+
+  -- While one of our windows is open, the game may not focus anything outside it. (The tick functions only used to pull the
+  -- cursor back after it had jumped, which showed as a flicker.) Rejecting outside nodes here means the cursor never leaves.
+  AMU_MODAL = AMU_MODAL or { alive_at = -10 }
+  function AMU_MODAL.touch() AMU_MODAL.alive_at = now() end
+  function AMU_MODAL.active()
+    return G and G.OVERLAY_MENU and (now() - (AMU_MODAL.alive_at or -10)) < 0.25
+  end
+  if Controller and not Controller._amu_modal_focus then
+    Controller._amu_modal_focus = true
+    local orig_focusable = Controller.is_node_focusable
+    function Controller:is_node_focusable(node)
+      local ok = orig_focusable(self, node)
+      if ok and AMU_MODAL.active() and node.UIBox ~= G.OVERLAY_MENU then return false end
+      return ok
+    end
+  end
+
+  -- Token windows: D-pad moves over a fixed grid (rows of buttons, left to right) instead of the game's "closest node" guess,
+  -- which skipped buttons and jumped rows out of order. Left/Right wrap inside a row; Up/Down keep the column number.
+  function AMU_MODAL.grid_move(ctrl, dir)
+    local om = G.OVERLAY_MENU
+    local cur = ctrl.focused and ctrl.focused.target
+    local items = {}
+    for _, v in pairs(G.MOVEABLES) do
+      if v.UIBox == om and v.T and ctrl:is_node_focusable(v) then
+        items[#items + 1] = { n = v, x = v.T.x + 0.5 * v.T.w, y = v.T.y + 0.5 * v.T.h }
       end
-      if prev then return prev(x, y, ...) end
+    end
+    if #items < 2 then return false end
+    table.sort(items, function(a, b) return a.y < b.y end)
+    local rows = {}
+    for _, it in ipairs(items) do
+      local last = rows[#rows]
+      if last and math.abs(it.y - last.y) < 0.25 then last[#last + 1] = it
+      else rows[#rows + 1] = { it, y = it.y } end
+    end
+    local ri, ci
+    for r, row in ipairs(rows) do
+      table.sort(row, function(a, b) return a.x < b.x end)
+      for i, it in ipairs(row) do if it.n == cur then ri, ci = r, i end end
+    end
+    if not ri then return false end
+    local tr, tc = ri, ci
+    if dir == "L" then tc = (ci - 2) % #rows[ri] + 1
+    elseif dir == "R" then tc = ci % #rows[ri] + 1
+    elseif dir == "U" then tr = (ri - 2) % #rows + 1; tc = math.min(ci, #rows[tr])
+    elseif dir == "D" then tr = ri % #rows + 1; tc = math.min(ci, #rows[tr])
+    else return false end
+    local target = rows[tr][tc].n
+    if target == cur then return true end
+    ctrl.focused.prev_target = cur
+    if cur.states and cur.states.focus then cur.states.focus.is = false end
+    ctrl.focused.target = target
+    target.states.focus.is = true
+    ctrl:update_cursor()
+    return true
+  end
+  if Controller and not Controller._amu_grid_nav then
+    Controller._amu_grid_nav = true
+    local orig_nav = Controller.navigate_focus
+    function Controller:navigate_focus(dir)
+      local om = G.OVERLAY_MENU
+      if dir and om and AMU_MODAL.active() and AMU_MODAL.grid_om == om
+         and self.HID and self.HID.controller and not self.interrupt.focus
+         and self.focused and self.focused.target and self.focused.target.UIBox == om then
+        local ok, handled = pcall(AMU_MODAL.grid_move, self, dir)
+        if ok and handled then return end
+      end
+      return orig_nav(self, dir)
     end
   end
 
@@ -4645,6 +5891,8 @@ do
   -- run every frame by the results window itself (so it stops by itself when the window is gone)
   function G.FUNCS.amu_prompt_tick(e)
     S.alive_at = now()
+    AMU_MODAL.touch()
+    S.ensure_wheel()
     local c = G.CONTROLLER
     if not c then return end
     local using_pad = c.HID and c.HID.controller and c.snap_to
@@ -4652,9 +5900,14 @@ do
     if using_pad then
       local om = G.OVERLAY_MENU
       local t = c.focused and c.focused.target
-      if om and e.UIBox == om and not (t and t.UIBox == om) and not c.locks.frame then
+      -- Only when the window is new, or the cursor is really on something outside it. A momentarily empty focus (the game
+      -- clears it while the stick is used) must NOT snap back: that made the highlight blink between buttons.
+      local fresh = AMU_MODAL.first_om ~= om
+      local stray = t and t.UIBox ~= om
+      if om and e.UIBox == om and (fresh or stray) and not c.locks.frame then
         local n = e.UIBox.get_UIE_by_ID and e.UIBox:get_UIE_by_ID("amu_prompt_main")
         if n then
+          AMU_MODAL.first_om = om
           pcall(c.snap_to, c, { node = n })
           if c.update_cursor then pcall(c.update_cursor, c) end
           c.interrupt.focus = false
@@ -4800,8 +6053,22 @@ G.UIDEF.amu_restart_prompt = function(ref)
 end
 
 
-function G.FUNCS.amu_close_prompt(e) close_overlay() end
+function G.FUNCS.amu_close_prompt(e)
+  local ask = AMU_PROMPT and AMU_PROMPT.token_bad
+  local ask_missing = AMU_PROMPT and AMU_PROMPT.token_missing
+  if AMU_PROMPT then AMU_PROMPT.token_bad = false; AMU_PROMPT.token_missing = false end
+  close_overlay()
+  -- expired or missing GitHub token: ask about a new one once this window is gone
+  if (ask or ask_missing) and G and G.E_MANAGER and Event then
+    G.E_MANAGER:add_event(Event({ trigger = "after", delay = 0.35, blocking = false, func = function()
+      open_overlay(G.UIDEF.amu_token_problem(ask and "bad_update" or "missing"))
+      return true
+    end }))
+  end
+end
+G.FUNCS.amu_token_not_now = function(e) close_overlay() end
 function G.FUNCS.amu_restart_now(e)
+  pcall(function() AMU_UI.save_config() end)
   close_overlay()
 
   local save_dir = love.filesystem.getSaveDirectory()
@@ -5060,6 +6327,22 @@ function AMU_CRASH.show_lines(title, lines, restart)
   AMU_PROMPT.page = 1
   AMU_PROMPT.has_updates = restart and true or false
   open_overlay(G.UIDEF.amu_restart_prompt(AMU_PROMPT))
+end
+
+-- After a revert or a fork switch has finished: if the helper reported no error, show the same "Restart now / Later"
+-- window the updates use (the files only load when the game restarts). Returns true when the window was shown,
+-- or false and the first error text when the helper reported a problem.
+function AMU_CRASH.ask_restart(lines)
+  local sum = decode_json(read_all(AMU_CRASH.path("last_run.json")) or "")
+  local errs = type(sum) == "table" and sum.errors or nil
+  if type(errs) == "string" then errs = { errs } end
+  if type(errs) == "table" and #errs > 0 then return false, tostring(errs[1]) end
+  local out = {}
+  for i = 1, #lines do out[#out + 1] = lines[i] end
+  out[#out + 1] = ""
+  out[#out + 1] = "Restart Balatro so it loads the changed files."
+  AMU_CRASH.show_lines("Mod Updater", out, true)
+  return true
 end
 
 -- Tell the player what was put back (and pinned), what stayed as it is, and what could not be put back.
@@ -5381,8 +6664,11 @@ end
 -- Called after every full (non-single-mod) PS1 run completes.
 -- Shows what a put-back did, or asks about a startup crash, or shows the usual update results.
 on_full_update_done = function(mod_path)
+  pcall(AMU_CRASH.adopt_pin_releases)
   AMU_CRASH.in_flight = false
   local summary = read_summary(mod_path)
+  pcall(AMU_GAME.reconcile, summary)
+  pcall(AMU_GAME.sync_status)
   -- the crash question (or its result) is on screen or still to come: show the update results after it
   if AMU_CRASH.polling or AMU_CRASH.busy or AMU_CRASH.prompt_on_screen() then
     AMU_CRASH.later_summary = summary
@@ -5618,13 +6904,21 @@ local function run_update_async(mods_dir, mod_path)
   }, " ")
 
   local thread_code = AMU_HIDE_SRC .. [[
-    local cmd = ...
+    local cmd, logpath, t0 = ...
     local ok = pcall(function() amu_run(cmd) end)
+    -- when PowerShell actually exited (compare with the "done" line the game writes a moment later)
+    pcall(function()
+      local f = io.open(logpath, "ab")
+      if f then
+        f:write(os.date("%Y-%m-%d %H:%M:%S") .. "  powershell exited  " .. tostring(os.time() - t0) .. "s\r\n")
+        f:close()
+      end
+    end)
     local ch = love.thread.getChannel("amu_update_status")
     ch:push(ok and "done" or "error")
   ]]
   local t = love.thread.newThread(thread_code)
-  t:start(cmd)
+  t:start(cmd, join_path(mod_path, "update_timing.log"), os.time())
 
   if config.show_loading_overlay ~= false then
     amu_show_loading(ref)
@@ -5633,7 +6927,19 @@ local function run_update_async(mods_dir, mod_path)
   AMU_CRASH.in_flight = true   -- the startup-crash question (if any) waits for this run
 
   local start_time = love.timer and love.timer.getTime and love.timer.getTime() or 0
+  local start_os = os.time()
   local dots = 0
+  -- how long each run takes, so a slow one can be traced (update_timing.log in the mod folder)
+  local function amu_log_time(tag)
+    pcall(function()
+      local f = io.open(join_path(mod_path, "update_timing.log"), "ab")
+      if f then
+        f:write(os.date("%Y-%m-%d %H:%M:%S") .. "  " .. tag .. "  " ..
+          string.format("%.0f", (love.timer.getTime() - start_time)) .. "s\r\n")
+        f:close()
+      end
+    end)
+  end
 
   G.E_MANAGER:add_event(Event({
     blockable = false,
@@ -5643,12 +6949,27 @@ local function run_update_async(mods_dir, mod_path)
 
       local msg = channel:pop()
       if msg then
+        amu_log_time("done")
         amu_hide_loading()
         on_full_update_done(mod_path)
         return true
       end
 
       if love.timer and love.timer.getTime and (love.timer.getTime() - start_time) > (tonumber(config.ui_timeout_seconds) or 300) then
+        -- The check may simply have finished a moment late: if last_run.json was written after this run started, use it
+        -- like a normal finish instead of warning.
+        local finished = false
+        pcall(function()
+          local info = love.filesystem.getInfo("Mods/" .. tostring(mod_path):match("([^/\\]+)[/\\]*$") .. "/last_run.json")
+          if info and info.modtime and info.modtime >= start_os - 2 then finished = true end
+        end)
+        if finished then
+          amu_log_time("done (late)")
+          amu_hide_loading()
+          on_full_update_done(mod_path)
+          return true
+        end
+        amu_log_time("TIMED OUT")
         amu_hide_loading()
         AMU_CRASH.in_flight = false
         show_msg("Mod Updater", "Updater timed out waiting for PowerShell.\nYou can still play.", {"OK"}, "warning")

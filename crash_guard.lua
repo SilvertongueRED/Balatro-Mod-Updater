@@ -268,11 +268,26 @@ end
     if not pcall(love.filesystem.write, HELPER, table.concat(lines, "\r\n") .. "\r\n") then return false end
 
     local script = (love.filesystem.getSaveDirectory() .. "/" .. HELPER):gsub("/", "\\")
+    -- A scheduled task that starts powershell.exe shows a console window on Windows 11 even with -WindowStyle Hidden
+    -- (the new Windows Terminal ignores it), and that window stays up while the helper waits for the game to close.
+    -- wscript.exe has no console, and WScript.Shell.Run with window style 0 starts the helper truly hidden.
+    local VBS = "amu_restart_hidden.vbs"
+    local vbs_lines = {
+      "Set fso = CreateObject(\"Scripting.FileSystemObject\")",
+      "dir = fso.GetParentFolderName(WScript.ScriptFullName)",
+      "Set sh = CreateObject(\"WScript.Shell\")",
+      "sh.Run \"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"\"\" & dir & \"\\" .. HELPER .. "\"\"\", 0, False",
+    }
+    local have_vbs = pcall(love.filesystem.write, VBS, table.concat(vbs_lines, "\r\n") .. "\r\n")
+    local task_exe, task_args = "powershell.exe", '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' .. script .. '"'
+    if have_vbs then
+      local vbs_path = (love.filesystem.getSaveDirectory() .. "/" .. VBS):gsub("/", "\\")
+      task_exe, task_args = "wscript.exe", '//B //Nologo "' .. vbs_path .. '"'
+    end
     local launcher = {
       "$ErrorActionPreference = 'Stop'",
       "try {",
-      "  $a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument " ..
-        q('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' .. script .. '"'),
+      "  $a = New-ScheduledTaskAction -Execute " .. q(task_exe) .. " -Argument " .. q(task_args),
       "  $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable",
       "  Register-ScheduledTask -TaskName '" .. TASK .. "' -Action $a -Settings $s -Force | Out-Null",
       "  Start-ScheduledTask -TaskName '" .. TASK .. "'",
@@ -316,8 +331,9 @@ end
     if v ~= "" then bits[#bits + 1] = "now " .. v end
     local w = when(m.at)
     if w ~= "" then bits[#bits + 1] = "updated " .. w end
-    if #bits == 0 then return m.name end
-    return m.name .. "    (" .. table.concat(bits, "   ") .. ")"
+    local nm = (m.name == "smods" and "Steamodded") or (m.name == "lovely" and "Lovely") or m.name
+    if #bits == 0 then return nm end
+    return nm .. "    (" .. table.concat(bits, "   ") .. ")"
   end
 
   -- what can be selected on the current page: { kind = "row"|"button", text, act, mod }

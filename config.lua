@@ -68,6 +68,17 @@ return {
   -- Fork Finder list: true = hide forks that are only/mostly translations (esp/espanol...), false = show them
   fork_hide_translations = true,
 
+  -- Fork Finder "Ignore scans": forks (owner/repo in lower case) the fork scan skips; "Ignored: Shown" lists them again
+  fork_ignored = {},
+  fork_show_ignored = false,
+  fork_ignored_mods = {},
+
+  -- A pinned mod/framework is tried again (straight to the latest version) once its source has a version other than the one put back
+  cfg_pin_retry = true,
+  cfg_game_backup = true,
+  cfg_game_auto_switch = true,
+  cfg_allow_updates_on_backup = false,
+
   -- Per-mod fork tracking: which fork source is currently in use
   -- Keys are folder names; values are { fork_repo="owner/repo", original_repo="owner/repo", switched_at="ISO" }
   mod_fork_source = {},
