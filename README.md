@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.23
+- Changed: the hover on "Your current" in View forks is a bulleted list. The scan now checks the real commits of your git clone, so "Your downloaded copy does NOT have it yet" (red, blinking) only shows when your copy is really missing GitHub's newest commit, and nothing shows when it has it. If the scan cannot tell (not a git clone, or an old scan), the line is left out. Run Scan Now once to fill this in.
+
 ### 1.0.22
 - Fixed: Steam kept showing Balatro as running (the "Resume" button) for 1 to 2 minutes after you quit. The update check and the fork scan are started from inside the game, so Steam waited for them. They now stop as soon as Balatro closes: a mod that is already being installed finishes first, the rest is checked at the next launch, and a half-finished fork scan keeps the previous results.
 

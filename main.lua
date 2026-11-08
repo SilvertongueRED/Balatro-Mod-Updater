@@ -3088,6 +3088,16 @@ AMU_FIND.CFG_TIPS = {
   cfg_game_auto_switch = { "When Steam updates Balatro, the saved copy of", "the version you were on is put back, so your", "mods keep working. Mod, Steamodded and Lovely", "updates pause until you turn them on in", "Backups > Balatro game files." },
 }
 
+-- Red text that pulses (used for "Your downloaded copy does NOT have it yet"): a shared colour table, changed every frame.
+AMU_FIND.BLINK_RED = { 0.85, 0.1, 0.1, 1 }
+G.FUNCS = G.FUNCS or {}
+G.FUNCS.amu_blink_red = function(e)
+  local t = (G.TIMERS and G.TIMERS.REAL) or 0
+  local k = 0.5 + 0.5 * math.sin(t * 6.3)
+  local c = AMU_FIND.BLINK_RED
+  c[1] = 0.55 + 0.4 * k; c[2] = 0.04 + 0.1 * k; c[3] = 0.04 + 0.1 * k; c[4] = 0.35 + 0.65 * k
+end
+
 function AMU_FIND.cfg_tip(title, lines)
   return { filler = { func = function()
     local dark = (G.C.UI and G.C.UI.TEXT_DARK) or RGBA(0.2, 0.2, 0.25, 1)
@@ -3096,8 +3106,19 @@ function AMU_FIND.cfg_tip(title, lines)
     for _, t in ipairs(lines or {}) do
       local txt, col = t, dark
       if type(t) == "table" then txt, col = t.text, t.colour or dark end   -- a line can be { text = ..., colour = ... }
-      rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.01 }, nodes = {
-        { n = G.UIT.T, config = { text = tostring(txt), scale = 0.27, colour = col } } } }
+      local tcfg = { text = tostring(txt), scale = 0.27, colour = col }
+      if type(t) == "table" and t.blink then tcfg.colour = AMU_FIND.BLINK_RED; tcfg.func = "amu_blink_red" end
+      local tnode = { n = G.UIT.T, config = tcfg }
+      if type(t) == "table" and (t.bullet or t.indent) then
+        -- bullet drawn as a small square (the game font has no bullet glyph); wrapped lines sit under the text
+        local sq = t.bullet and { n = G.UIT.B, config = { w = 0.12, h = 0.12, colour = tcfg.colour } } or { n = G.UIT.B, config = { w = 0.12, h = 0.12 } }
+        rows[#rows + 1] = { n = G.UIT.R, config = { align = "tl", padding = 0.01 }, nodes = {
+          { n = G.UIT.C, config = { align = "tm", padding = 0.04 }, nodes = { sq } },
+          { n = G.UIT.B, config = { w = 0.1, h = 0.1 } },
+          { n = G.UIT.C, config = { align = "tl", padding = 0 }, nodes = { tnode } } } }
+      else
+        rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.01 }, nodes = { tnode } }
+      end
     end
     return { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = {
       { n = G.UIT.C, config = { align = "cl", padding = 0.03 }, nodes = rows } } }
@@ -4688,8 +4709,14 @@ function AMU_FIND.current_info(folder, scan)
   local head = AMU_FIND.d10(scan.installed_head_at)
   if info and info.source == "git" then
     local loc = type(info.commits) == "table" and info.commits[1] and AMU_FIND.d10(info.commits[1].d) or nil
-    if loc and head and head > loc then
-      out.date, out.how = head, "newest commit on GitHub; your downloaded copy may not have it yet"
+    local has = scan.installed_has_head   -- true / false from the scan (a git clone only), nil = unknown
+    if head and has ~= nil then
+      -- the scan checked the real commits: the copy either has GitHub's newest commit or it does not
+      out.date, out.how = head, "newest commit on GitHub"
+      out.lacks = (has == false)
+      out.stamp = AMU_FIND.norm_stamp(scan.installed_head_at)
+    elseif loc and head and head > loc then
+      out.date, out.how = head, "newest commit on GitHub"
       out.stamp = AMU_FIND.norm_stamp(scan.installed_head_at)
     elseif loc then
       out.date, out.how = loc, "last commit in your git clone"
@@ -5881,14 +5908,19 @@ G.UIDEF.amu_fork_picker = function(ref)
       cur_tip_lines[#cur_tip_lines + 1] = { text = "Most recently updated: " .. tostring(win.repo or "") .. "  " .. tostring(AMU_FIND.d10(AMU_FIND.fork_stamp(win)) or ""), colour = AMU_FIND.NEWEST_DARK }
       cur_tip_lines[#cur_tip_lines + 1] = { text = "Using now: " .. tostring(cur_links[1].name), colour = G.C.BLUE or dark }
     end
-    cur_tip_lines[#cur_tip_lines + 1] = "A green name marks the most recently updated copy."
+    local function bullets(text, extra)
+      for i, l in ipairs(AMU_FIND.wrap(text, 0.27, 5.3, 3)) do
+        local row = { text = l, bullet = (i == 1), indent = (i > 1) }
+        for k, v in pairs(extra or {}) do row[k] = v end
+        cur_tip_lines[#cur_tip_lines + 1] = row
+      end
+    end
+    bullets("A green name marks the most recently updated copy.")
     if cur_info.date then
-      local how = tostring(cur_info.how or "")
-      local a1, b1 = how:match("^(.-);%s*(.+)$")
-      if a1 then how = a1 .. " (" .. b1 .. ")" end
-      for _, l in ipairs(AMU_FIND.wrap("Last change " .. cur_info.date .. ": " .. how, 0.27, 5.6, 4)) do cur_tip_lines[#cur_tip_lines + 1] = l end
+      bullets("Last change " .. cur_info.date .. ": " .. tostring(cur_info.how or ""))
+      if cur_info.lacks then bullets("Your downloaded copy does NOT have it yet", { blink = true }) end
     else
-      cur_tip_lines[#cur_tip_lines + 1] = "Run Scan Now to find out when your copy last changed."
+      bullets("Run Scan Now to find out when your copy last changed.")
     end
     local cur_tip = AMU_FIND.cfg_tip("Your current copy", cur_tip_lines)
     local cur_nodes = {

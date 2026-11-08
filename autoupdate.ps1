@@ -2093,7 +2093,7 @@ function New-ForkEntry([string]$kind, $info, [string]$installedRepo, [string]$in
   $entryFile = $null
   if ($config.use_github_cache -ne $false -and $script:forkInstPushed -and $info.pushed_at) {
     $ekey = "forkentry3|$kind|$installedRepo|$installedBranch|$($script:forkInstPushed)|$full|$(Format-ForkDate $info.pushed_at)"
-    $entryFile = Join-Path $script:ghCacheDir ("fe_" + (Get-GhCacheKey $ekey) + ".ghc")
+    $entryFile = Join-Path $script:ghCacheDir ("fe2_" + (Get-GhCacheKey $ekey) + ".ghc")
     $prev = Read-JsonIfExists $entryFile
     if ($prev) {
       $script:forkEntryReused++
@@ -2153,9 +2153,11 @@ function New-ForkEntry([string]$kind, $info, [string]$installedRepo, [string]$in
   # The day the installed copy's own newest commit was made (the compare answer names the base commit): lets the game say which
   # copy is the most recently changed one.
   $instHeadAt = ""
+  $instHeadSha = ""
   try {
     $bc = $compare.base_commit
     if ($bc) {
+      if ($bc.sha) { $instHeadSha = [string]$bc.sha }
       $hd = if ($bc.commit.committer.date) { $bc.commit.committer.date } else { $bc.commit.author.date }
       if ($hd) { $instHeadAt = Format-ForkDate $hd }
     }
@@ -2197,6 +2199,7 @@ function New-ForkEntry([string]$kind, $info, [string]$installedRepo, [string]$in
     latest_release_notes = $relNotes
     latest_release_at    = $relAt
     installed_head_at    = $instHeadAt
+    installed_head_sha   = $instHeadSha
     html_url             = [string]$info.html_url
   }
   if ($entryFile) {
@@ -2399,11 +2402,27 @@ function Check-Forks() {
               if ($ir.published_at) { $instRelAt  = Format-ForkDate $ir.published_at }
             } catch {}
           }
+          # Does the downloaded copy really contain GitHub's newest commit of the installed repo? Only a git clone can say:
+          # true = its newest commit is in the clone, false = it is not, left out = unknown.
+          $instHasHead = $null
+          try {
+            $instSha = ""
+            foreach ($ae in $activeForks) { if (-not $instSha -and $ae.installed_head_sha) { $instSha = [string]$ae.installed_head_sha } }
+            if ($instSha -and (Test-Path -LiteralPath (Join-Path $path ".git"))) {
+              $ce = Run-Git $path @("cat-file", "-e", "$instSha^{commit}")
+              if ($ce.code -ne 0) { $instHasHead = $false }
+              else {
+                $an = Run-Git $path @("merge-base", "--is-ancestor", $instSha, "HEAD")
+                $instHasHead = ($an.code -eq 0)
+              }
+            }
+          } catch {}
           $suggestions.suggestions[$name] = @{
             current_repo     = $rootRepo
             installed_repo   = $installedRepo
             installed_is_fork = $installedIsFork
             installed_head_at     = $instHead
+            installed_has_head    = $instHasHead
             installed_pushed_at   = $script:forkInstPushed
             installed_release_at  = $instRelAt
             installed_release_tag = $instRelTag
