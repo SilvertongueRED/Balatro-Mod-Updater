@@ -156,6 +156,12 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.2
+- Fixed: on the **Backups** tab, a pinned row no longer lets "Pinned to backup <date>" run behind the **PINNED** badge, and the **Unpin** button stays inside the panel. The row is laid out to fit the panel width.
+- Fixed: after a fork switch, **Fork Finder** knows which fork you are on. Right after pressing **Switch to Fork** the fork card shows **Restart to apply**; after the restart it shows **Active**, the fork leaves the list of newer forks (it is still in the all-forks view), and the other forks are compared with the fork you use now, without a new scan.
+- Fixed: the bottom-right pop-ups (**All mods up to date!**, **N new forks found**) were cut off at the right edge in some window sizes, for example borderless. They are now placed inside the game area, which the game fits to any window, monitor or resolution.
+- Fixed: the Updater's backup of its own folder could fail with "Could not find file ...update_timing.log", because the game rewrites that log while the backup is being zipped. If zipping fails, the backup is now made from a copy and files that disappear are skipped.
+
 ### 1.0.1
 - Fixed: after **Restart now** the game could hang inside Lovely at start-up (its log stopped before "Initialization complete" and no mod had loaded). The restart helper now waits up to 10 seconds (was 3) for the game to close by itself, waits 5 seconds (was 2) before starting it again, and then checks the new Lovely log. If Lovely has not finished starting 45 seconds after its log was created, the helper closes the game and starts it once more. It never closes a game it cannot judge.
 - New: `amu_restart_helper.log` (in the Balatro save folder) ends with `Lovely start check: ok` after a normal restart, or lists the recovery steps.

@@ -1592,7 +1592,9 @@ function AMU_FIND.toast.show(text, opts)
       button = opts.action and "amu_toast_click" or nil, hover = opts.action and true or nil, shadow = true }, nodes = lines }
     T.box = UIBox({
       definition = { n = G.UIT.ROOT, config = { align = "cm", colour = G.C.CLEAR }, nodes = { card } },
-      config = { align = "br", offset = { x = -0.4, y = -0.2 }, major = G.ROOM_ATTACH, bond = "Weak", instance_type = "POPUP" },
+      -- "bri" = inside the bottom right corner of the game area (without the "i" the box sits OUTSIDE it, below and to the right, and gets
+      -- cut off). The game area is fitted to any window, monitor or borderless size, so this follows it.
+      config = { align = "bri", offset = { x = -0.4, y = -0.2 }, major = G.ROOM_ATTACH, bond = "Weak", instance_type = "POPUP" },
     })
     T.action = opts.action
   end)
@@ -4786,7 +4788,7 @@ build_backup_mods_page = function(page)
       -- Two lines to the right of the name: version, then last update / pin info
       local fw1, fw2
       if AMU_FRAMEWORKS[folder] then fw1, fw2 = AMU_FRAMEWORKS.lines(folder) end
-      local line1 = amu_fit(fw1 or mod_version_line(folder), 0.35, 4.2)
+      local line1 = amu_fit(fw1 or mod_version_line(folder), 0.35, 4.0)
       local line2, line2_colour
       if fw2 and not is_pinned then
         line2, line2_colour = fw2, grey
@@ -4799,7 +4801,7 @@ build_backup_mods_page = function(page)
         line2 = ud and ("Updated " .. ud) or "Never updated here"
         line2_colour = grey
       end
-      line2 = amu_fit(line2, 0.31, 4.2)
+      line2 = amu_fit(line2, 0.31, 4.0)
 
       local tip = { filler = { func = amu_changelog_tip, args = { folder = folder, display = display } } }
 
@@ -4821,25 +4823,27 @@ build_backup_mods_page = function(page)
         unpin_node = { n = G.UIT.B, config = { h = 0.1, w = 1.1 } }
       end
 
-      -- the leading gap (1.1) balances the empty room that follows the Backups button (the gap + the Unpin slot), so the
-      -- whole block sits in the middle of the panel like Mod Toggles and Fork Finder
+      -- Width budget (the list area is 15.2 wide, about 14.7 usable): 0.2 + 4.4 + 4.15 + 0.15 + 1.1 + 0.1 + 1.6 + 0.1 + 1.7 + 0.1 + 1.1 = 14.7.
+      -- The version/pin column is wide enough for "Pinned to backup YYYY-MM-DD" (its text is cut at 4.0), and a gap sits in front of
+      -- the PINNED badge, so the text never runs behind the badge and the Unpin button stays inside the panel.
       local row_nodes = {
-        { n = G.UIT.B, config = { h = 0.1, w = 1.1 } },
+        { n = G.UIT.B, config = { h = 0.1, w = 0.2 } },
         { n = G.UIT.C, config = { align = "cl", padding = 0.02, minw = 4.4 }, nodes = {
           { n = G.UIT.T, config = { text = amu_fit(display, 0.5, 4.2), scale = 0.5, colour = name_col } } } },
-        { n = G.UIT.C, config = { align = "cl", padding = 0, minw = 3.7 }, nodes = {
+        { n = G.UIT.C, config = { align = "cl", padding = 0, minw = 4.15 }, nodes = {
           { n = G.UIT.R, config = { align = "cl", padding = 0 }, nodes = {
             { n = G.UIT.T, config = { text = line1, scale = 0.35, colour = G.C.UI.TEXT_LIGHT } } } },
           { n = G.UIT.R, config = { align = "cl", padding = 0 }, nodes = {
             { n = G.UIT.T, config = { text = line2, scale = 0.31, colour = line2_colour } } } },
         }},
+        { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
         pin_badge,
         { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
-        { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.7, minh = 0.48, r = 0.09,
+        { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.6, minh = 0.48, r = 0.09,
           colour = has_web and G.C.BLUE or RGBA(0.5, 0.5, 0.5, 0.9), button = "amu_web_bk_" .. row_i, hover = true, shadow = true }, nodes = {
           { n = G.UIT.T, config = { text = "Webpage", scale = 0.38, colour = G.C.UI.TEXT_LIGHT } } } },
         { n = G.UIT.B, config = { h = 0.1, w = 0.1 } },
-        { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.9, minh = 0.48, r = 0.09,
+        { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.7, minh = 0.48, r = 0.09,
           colour = G.C.BLUE, button = "amu_open_backups_" .. row_i, hover = true, shadow = true,
           on_demand_tooltip = tip }, nodes = {
           { n = G.UIT.T, config = { text = "Backups", scale = 0.38, colour = G.C.UI.TEXT_LIGHT } } } },
@@ -4885,6 +4889,34 @@ load_fork_suggestions = function()
   local data = read_all(join_path(mod_path, "fork_suggestions.json"))
   if not data then return nil end
   return decode_json(data)
+end
+
+-- The fork a mod was switched to. config.mod_fork_source[folder].fork_repo is saved the moment you press Switch, so the Fork Finder
+-- can show it right away; switch_pending[folder] is true only until the game restarts (it lives in memory), which is how the list tells
+-- "switched, restart to apply" from "restarted, you are on it now".
+AMU_FIND.switch_pending = AMU_FIND.switch_pending or {}
+function AMU_FIND.fork_now(folder)
+  local src = config.mod_fork_source and config.mod_fork_source[folder]
+  local r = type(src) == "table" and src.fork_repo or nil
+  if type(r) == "string" and r ~= "" then return r end
+  return nil
+end
+function AMU_FIND.is_fork_now(folder, repo)
+  local r = AMU_FIND.fork_now(folder)
+  return r ~= nil and tostring(repo or ""):lower() == r:lower()
+end
+-- Day and exact time of the fork you run now, from the last scan: "Your copy" is right before the next scan too.
+function AMU_FIND.fork_now_day(folder)
+  local r = AMU_FIND.fork_now(folder)
+  local data = r and amu_fork_suggestions and amu_fork_suggestions.suggestions and amu_fork_suggestions.suggestions[folder]
+  if type(data) ~= "table" or type(data.forks) ~= "table" then return nil end
+  for _, f in ipairs(data.forks) do
+    if tostring(f.repo or ""):lower() == r:lower() then
+      local st = AMU_FIND.fork_stamp(f)
+      return AMU_FIND.d10(st), st
+    end
+  end
+  return nil
 end
 
 -- A copy counts as "newer" when it has commits the installed copy doesn't have AND its newest change (commit or release) is
@@ -5010,10 +5042,15 @@ get_fork_mod_entries = function(force_all, keep_tr)
           local d = amu_installed_date(folder_name, umap, cls)
           if d ~= "" then cur = { date = AMU_FIND.d10(d), stamp = AMU_FIND.norm_stamp(d) } end
         end
+        -- on a fork: compare the other copies with that fork, not with the copy from before the switch
+        local nd, ns = AMU_FIND.fork_now_day(folder_name)
+        if nd then cur = { date = nd, stamp = ns, how = "the fork you use now" } end
       end
       local list = {}
+      local on_now = newer_only and not AMU_FIND.switch_pending[folder_name]
       for _, f in ipairs(data.forks) do
         local keep = (not newer_only or amu_fork_is_newer(f, cur)) and not (hide_tr and amu_fork_is_translation(f))
+          and not (on_now and AMU_FIND.is_fork_now(folder_name, f.repo))
           and (AMU_FORKIGN.show() or not AMU_FORKIGN.is(f))
         if keep then list[#list + 1] = f end
       end
@@ -5116,6 +5153,10 @@ function AMU_FORKIGN.row_tip(args)
   end
   add("Found: " .. (#parts > 0 and table.concat(parts, ", ") or "nothing newer"), 0.28)
   local cur = AMU_FIND.current_info(args and args.folder or "", entry)
+  do
+    local nd, ns = AMU_FIND.fork_now_day(args and args.folder or "")
+    if nd then cur = { date = nd, stamp = ns, how = "the fork you use now" } end
+  end
   local win = AMU_FIND.newest_pick(cur, entry.forks)
   local function addw(text, scale, colour, maxlines)
     for _, ln in ipairs(AMU_FIND.wrap(text, scale, 6.0, maxlines or 2)) do add(ln, scale, colour) end
@@ -5134,7 +5175,10 @@ function AMU_FORKIGN.row_tip(args)
   for _, f in ipairs(entry.forks or {}) do if AMU_FORKIGN.is(f) then ign = ign + 1 end end
   if ign > 0 then add(ign .. " of them ignored by scans", 0.27) end
   local src = config.mod_fork_source and config.mod_fork_source[args and args.folder or ""]
-  if src and src.fork_repo then add("Using now: " .. tostring(src.fork_repo), 0.27, blue) end
+  if src and src.fork_repo then
+    local wait = AMU_FIND.switch_pending[args and args.folder or ""]
+    add("Using now: " .. tostring(src.fork_repo) .. (wait and "  (restart to apply)" or ""), 0.27, blue)
+  end
   addw("Press the Forks button to read about each fork and tick Ignore scans.", 0.26, nil, 2)
   return { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = {
     { n = G.UIT.C, config = { align = "cl", padding = 0.03 }, nodes = rows } } }
@@ -5336,6 +5380,7 @@ local function switch_to_fork(folder_name, fork_repo)
     fork_repo   = fork_repo,
     switched_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
   }
+  AMU_FIND.switch_pending[folder_name] = true   -- cleared by the restart (memory only)
   pcall(write_ps1_config_overlay)
 
   local save_dir = love.filesystem.getSaveDirectory()
@@ -5582,6 +5627,11 @@ G.UIDEF.amu_fork_picker = function(ref)
   -- "Your current copy" row: lets you read about what you have BEFORE switching away from it
   local cur_links = amu_current_page_links(folder, ref.installed_repo)
   local cur_info = AMU_FIND.current_info(folder, ref.scan)
+  do
+    local nd, ns = AMU_FIND.fork_now_day(folder)
+    if nd then cur_info = { date = nd, stamp = ns, how = "the fork you use now" } end
+  end
+  local restart_pending = cur_fork_repo ~= nil and AMU_FIND.switch_pending[folder] == true
   local win = AMU_FIND.newest_pick(cur_info, forks)
   local cur_newest = (win == "cur")
   local cur_row = nil
@@ -5619,6 +5669,13 @@ G.UIDEF.amu_fork_picker = function(ref)
       cur_nodes[#cur_nodes + 1] = { n = G.UIT.B, config = { w = 0.1, h = 0.1 } }
     end
     cur_row = { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = cur_nodes }
+    if restart_pending then
+      cur_row = { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = {
+        { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = {
+          cur_row,
+          { n = G.UIT.R, config = { align = "cm", padding = 0.01 }, nodes = {
+            { n = G.UIT.T, config = { text = "Restart the game to apply the switch.", scale = 0.27, colour = orange } } } } } } } }
+    end
   end
 
   for i = first, last do
@@ -5677,7 +5734,8 @@ G.UIDEF.amu_fork_picker = function(ref)
     local btn_node
     if is_cur then
       btn_node = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.1, minh = 0.42, r = 0.1, colour = panel }, nodes = {
-        { n = G.UIT.T, config = { text = "\226\156\147 Active", scale = 0.3, colour = G.C.GREEN } } } }
+        { n = G.UIT.T, config = { text = restart_pending and "\226\156\147 Restart to apply" or "\226\156\147 Active",
+            scale = restart_pending and 0.27 or 0.3, colour = restart_pending and orange or G.C.GREEN } } } }
     else
       btn_node = { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 2.1, minh = 0.42, r = 0.1,
         colour = is_upstream and orange or G.C.GREEN, button = "amu_switch_fork_" .. slot, hover = true, shadow = true }, nodes = {

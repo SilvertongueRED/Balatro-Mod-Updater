@@ -386,7 +386,23 @@ function Backup-Folder([string]$folderPath, [string]$folderName) {
   $dest = Join-Path $backupRoot "$folderName-$stamp.zip"
   try {
     if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force }
-    Compress-Archive -Path (Join-Path $folderPath "*") -DestinationPath $dest -Force
+    try {
+      Compress-Archive -Path (Join-Path $folderPath "*") -DestinationPath $dest -Force -ErrorAction Stop
+    } catch {
+      # A file can vanish or be locked while it is zipped: the game rewrites the Updater's own timing logs during a run, which made
+      # the backup fail with "Could not find file ...update_timing.log". Zip a copy instead; files that disappear while copying are skipped.
+      $tmp = Join-Path ([IO.Path]::GetTempPath()) ("amu_backup_" + [Guid]::NewGuid().ToString("N"))
+      try {
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        Get-ChildItem -LiteralPath $folderPath -Force -ErrorAction SilentlyContinue | ForEach-Object {
+          Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $tmp $_.Name) -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force }
+        Compress-Archive -Path (Join-Path $tmp "*") -DestinationPath $dest -Force -ErrorAction Stop
+      } finally {
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    }
     return (Split-Path -Leaf $dest)
   } catch {
     $summary.errors += "Backup failed for ${folderName}: $($_.Exception.Message)"
