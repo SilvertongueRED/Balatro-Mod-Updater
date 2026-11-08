@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.8
+- Changed: the bottom-right pop-ups are wider again (the left gap to the deck is about half as big), so the text wraps less.
+
 ### 1.0.7
 - Fixed: Switch Back to the copy you had installed before (for example your fork, after trying the parent) did not show "Using now: <repo>" and "(restart to apply)" in the Fork Finder hover. The copy you left is now remembered and used as the target of Switch Back.
 

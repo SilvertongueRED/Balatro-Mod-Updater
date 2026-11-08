@@ -1593,8 +1593,8 @@ function AMU_FIND.toast.show(text, opts)
         local cw = tonumber(G.CARD_W) or 2.05
         local dright, dy = G.deck.T.x + G.deck.T.w / 2 + cw / 2 + 0.05, G.deck.T.y
         if type(dy) == "number" and dy > G.TILE_H * 0.5 and dy < G.TILE_H and dright > G.TILE_W * 0.5 and dright < G.TILE_W + 0.5 then
-          strip = math.min(math.max(rmx + (G.TILE_W - dright) - 0.35, 1.1), 4.0)
-          ox = math.max(rmx - 0.2, -0.4)
+          strip = math.min(math.max(rmx + (G.TILE_W - dright) + 0.0, 1.1), 4.5)
+          ox = math.max(rmx - 0.15, -0.4)
           oy = math.max(rmy - 0.25, -0.2)
         end
       end
