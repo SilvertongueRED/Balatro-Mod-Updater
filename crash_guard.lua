@@ -231,20 +231,43 @@ end
       "$log = Join-Path $PSScriptRoot 'amu_restart_helper.log'",
       "function Log($m) { Add-Content -Path $log -Value ((Get-Date -Format 'HH:mm:ss') + ' ' + $m) }",
       "Set-Content -Path $log -Value 'restart helper started'",
+      -- One-shot switch used only by "Test restart after update.bat": pretend the first start hung so the recovery really runs.
+      -- Ignored (and deleted) when older than 20 minutes, so a forgotten file never affects a normal restart.
+      "$testFlag = Join-Path $PSScriptRoot 'amu_restart_test.json'",
+      "$simStuck = $false",
+      "if (Test-Path -LiteralPath $testFlag) { if ((Get-Item -LiteralPath $testFlag).LastWriteTime -gt (Get-Date).AddMinutes(-20)) { $simStuck = $true; Log 'TEST: will pretend Lovely hung on the first start' }; Remove-Item -LiteralPath $testFlag -Force }",
       "$p = Get-Process -Name 'Balatro'",
-      "if ($p) { $p | Wait-Process -Timeout 3 }",
+      "if ($p) { $p | Wait-Process -Timeout 10 }",
       "$p = Get-Process -Name 'Balatro'",
-      "if ($p) { Log 'game still running after 3s, force closing'; $p | Stop-Process -Force }",
+      "if ($p) { Log 'game still running after 10s, force closing'; $p | Stop-Process -Force }",
       "for ($i = 0; $i -lt 30 -and (Get-Process -Name 'Balatro'); $i++) { Start-Sleep -Milliseconds 500 }",
       "Log 'game process is gone'",
-      "Start-Sleep -Seconds 2",
+      "Start-Sleep -Seconds 5",
       "$flag = 'HKCU:\\Software\\Valve\\Steam\\Apps\\" .. APP .. "'",
       "function Test-SteamRunning { $v = (Get-ItemProperty -Path $flag -Name Running -ErrorAction SilentlyContinue).Running; return ($v -eq 1) }",
+      -- Lovely writes a new log in Mods\\lovely\\log at every start and logs "Initialization complete" within a fraction of
+      -- a second. A start whose log never gets that line is a hung Lovely (seen once after a self-update restart).
+      "function Get-LovelyState([datetime]$since, [int]$limit = 45) {",
+      "  $d = Join-Path $PSScriptRoot 'Mods\\lovely\\log'",
+      "  for ($i = 0; $i -lt 240; $i++) {",
+      "    $f = Get-ChildItem -LiteralPath $d -Filter 'lovely-*.log' -File | Where-Object { $_.CreationTime -ge $since } | Sort-Object CreationTime -Descending | Select-Object -First 1",
+      "    if ($f) {",
+      "      $txt = ''",
+      "      try { $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite'); $sr = New-Object IO.StreamReader($fs); $txt = $sr.ReadToEnd(); $sr.Close(); $fs.Close() } catch {}",
+      "      if ($txt -match 'Initialization complete') { return 'ok' }",
+      "      if (((Get-Date) - $f.CreationTime).TotalSeconds -gt $limit) { return 'stuck' }",
+      "    } elseif ($i -gt 80) { return 'unknown' }",
+      "    if (-not (Get-Process -Name 'Balatro')) { return 'unknown' }",
+      "    Start-Sleep -Milliseconds 500",
+      "  }",
+      "  return 'unknown'",
+      "}",
       "$w = 0",
       "$maxwait = " .. (have_exe and "6" or "90"),
       "while ((Test-SteamRunning) -and $w -lt $maxwait) { Start-Sleep -Seconds 1; $w++ }",
       "$up = $false",
       "Start-Sleep -Seconds 1",
+      "$t0 = (Get-Date).AddSeconds(-2)",
     }
     if have_exe then
       lines[#lines + 1] = "if (Test-SteamRunning) { Log 'starting the exe directly'; Start-Process -FilePath " .. q(exe) ..
@@ -264,6 +287,28 @@ end
         q(exe) .. " -WorkingDirectory " .. q(dir) .. " }"
     end
     lines[#lines + 1] = "if ($up) { Log 'game is running again' }"
+    local retry = {
+      "$state = ''",
+      "if ($up) { $state = Get-LovelyState $t0; if ($simStuck -and $state -eq 'ok') { Log 'TEST: Lovely started fine, pretending it hung'; $state = 'stuck' } }",
+      "if ($state -eq 'stuck') {",
+      "  Log 'Lovely did not finish starting (hung before the game loaded): closing the game and starting it once more'",
+      "  Get-Process -Name 'Balatro' | Stop-Process -Force",
+      "  for ($i = 0; $i -lt 30 -and (Get-Process -Name 'Balatro'); $i++) { Start-Sleep -Milliseconds 500 }",
+      "  Start-Sleep -Seconds 8",
+      "  $w = 0",
+      "  while ((Test-SteamRunning) -and $w -lt 6) { Start-Sleep -Seconds 1; $w++ }",
+      "  $t0 = (Get-Date).AddSeconds(-2)",
+      "  $up2 = $false",
+      "  Start-Process " .. q("steam://rungameid/" .. APP),
+      "  for ($i = 0; $i -lt 70; $i++) { Start-Sleep -Milliseconds 500; if (Get-Process -Name 'Balatro') { $up2 = $true; break } }",
+    }
+    if have_exe then
+      retry[#retry + 1] = "  if (-not $up2) { Start-Process -FilePath " .. q(exe) .. " -WorkingDirectory " .. q(dir) ..
+        "; for ($i = 0; $i -lt 70; $i++) { Start-Sleep -Milliseconds 500; if (Get-Process -Name 'Balatro') { $up2 = $true; break } } }"
+    end
+    retry[#retry + 1] = "  if ($up2) { Log ('second start: Lovely ' + (Get-LovelyState $t0)) } else { Log 'second start: the game did not come up' }"
+    retry[#retry + 1] = "} elseif ($state -ne '') { Log ('Lovely start check: ' + $state) }"
+    for _, l in ipairs(retry) do lines[#lines + 1] = l end
     lines[#lines + 1] = "Unregister-ScheduledTask -TaskName '" .. TASK .. "' -Confirm:$false | Out-Null"
     if not pcall(love.filesystem.write, HELPER, table.concat(lines, "\r\n") .. "\r\n") then return false end
 

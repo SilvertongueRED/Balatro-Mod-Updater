@@ -132,6 +132,7 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 ## Known limits and troubleshooting
 
 **Install and environment**
+- **The game window never appears after Restart now.** Read `amu_restart_helper.log` in the Balatro save folder. Since 1.0.1 the helper restarts the game once by itself when Lovely hangs at start-up; if it says `stuck` twice, send that log and the two newest files in `Mods\lovely\log`.
 - **Game does not relaunch after Restart now.** Task Scheduler may be blocked by antivirus or a work policy. The Updater falls back to the `steam://` link: start the game from Steam yourself.
 - **Updates never run.** Check that Windows PowerShell 5.1 is installed and scripts are allowed to start.
 - **Antivirus flags `autoupdate.ps1`.** A script that downloads files can look suspicious. The whole script is readable in this repository.
@@ -154,6 +155,10 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 - **Old copies of a mod inside `Mods`:** two mods with the same ID crash the game. Move backups and `.bak` copies out of `Mods`.
 
 ## Changelog
+
+### 1.0.1
+- Fixed: after **Restart now** the game could hang inside Lovely at start-up (its log stopped before "Initialization complete" and no mod had loaded). The restart helper now waits up to 10 seconds (was 3) for the game to close by itself, waits 5 seconds (was 2) before starting it again, and then checks the new Lovely log. If Lovely has not finished starting 45 seconds after its log was created, the helper closes the game and starts it once more. It never closes a game it cannot judge.
+- New: `amu_restart_helper.log` (in the Balatro save folder) ends with `Lovely start check: ok` after a normal restart, or lists the recovery steps.
 
 ### 1.0.0
 First 1.0 release: the 0.8.x series polished and bug-fixed.
