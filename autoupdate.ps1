@@ -25,6 +25,34 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# ---- Game-quit watch ----
+# Background checks are started from inside Balatro, so this script is a child of the game. Steam keeps showing a game as
+# running until every child has exited, so a long update check or fork scan kept Steam on "Resume" for minutes after the
+# player quit. The update check and the fork scan call Test-GameGone between steps and stop once Balatro has closed. A step
+# that is already running (a mod being installed) always finishes first, so no mod is left half written. The rest is simply
+# checked at the next launch. Runs started by hand (the .bat files) or for a restore / switch have no Balatro parent and
+# are never cut short.
+$script:gameProc = $null
+$script:quitEarly = $false
+try {
+  if (-not $Interactive -and -not $RollbackRecent -and $RestoreModName -eq "" -and $RestoreFrameworkName -eq "" -and $UseGameBackup -eq "" -and $SwitchModName -eq "" -and $SwitchBackModName -eq "") {
+    $walkId = $PID
+    for ($i = 0; $i -lt 5 -and -not $script:gameProc; $i++) {
+      $row = Get-CimInstance Win32_Process -Filter "ProcessId=$walkId" -ErrorAction Stop
+      if (-not $row -or -not $row.ParentProcessId) { break }
+      $par = Get-Process -Id ([int]$row.ParentProcessId) -ErrorAction SilentlyContinue
+      if (-not $par) { break }
+      if ($par.ProcessName -ieq "Balatro") { $script:gameProc = $par; [void]$par.Handle }
+      $walkId = [int]$row.ParentProcessId
+    }
+  }
+} catch { $script:gameProc = $null }
+
+function Test-GameGone() {
+  if (-not $script:gameProc) { return $false }
+  try { return [bool]$script:gameProc.HasExited } catch { return $false }
+}
+
 function Ensure-Dir([string]$path) {
   if (-not (Test-Path -LiteralPath $path)) { New-Item -ItemType Directory -Path $path | Out-Null }
 }
@@ -2238,6 +2266,7 @@ function Check-Forks() {
       $name = $_.Name
       $path = $_.FullName
       if ($script:forkRateLimited -or $script:forkBadToken) { return }
+      if (Test-GameGone) { $script:quitEarly = $true; return }
       if ($skipSet.ContainsKey($name)) { return }
       if ($name -eq "_Balatro-Mod-Updater_Backups") { return }
       if ($name -eq "_Balatro-Automatic-Mod-Updater_Backups") { return }
@@ -2407,6 +2436,8 @@ function Check-Forks() {
   elseif ($hasToken) { $suggestions.token_status = "ok" }
   else { $suggestions.token_status = "none" }
 
+  # Balatro was closed mid scan: keep the previous results instead of saving a partial list. Scanned again next launch.
+  if ($script:quitEarly) { return }
   try {
     Save-JsonNoBom $forkSuggestionsPath $suggestions
     if ($AllForks -and -not $script:forkBadToken) { Save-JsonNoBom $forkSuggestionsAllPath $suggestions }
@@ -2683,6 +2714,8 @@ try {
     $path = $_.FullName
     # When targeting a single mod, skip everything else
     if ($targetModFilter -ne "" -and $name -ne $targetModFilter) { return }
+    # Balatro was closed: do not start another mod (Steam would keep showing the game as running). Checked next launch.
+    if (Test-GameGone) { $script:quitEarly = $true; return }
     # A pinned mod is checked for a newer version: if its source serves something other than the version that was put back, the pin
     # is released and the mod is updated to the latest version right here (see Invoke-PinRetryCheck).
     $pinNote = ""
@@ -3167,7 +3200,7 @@ if ($CheckForks) {
 
 Repair-ForkLovelyDeps
 
-if ($script:holdUpdates) { Ensure-FrameworkBaseline } else { Update-Frameworks }
+if (Test-GameGone) { $script:quitEarly = $true } elseif ($script:holdUpdates) { Ensure-FrameworkBaseline } else { Update-Frameworks }
 Save-PinReleases
 
 # Mod folders whose NAME carries a version (e.g. "Some-Mod-v1.3.0") that no longer matches the mod's own manifest version.
