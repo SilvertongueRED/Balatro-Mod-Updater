@@ -5199,7 +5199,8 @@ function AMU_FORKIGN.row_tip(args)
   local src = config.mod_fork_source and config.mod_fork_source[args and args.folder or ""]
   if src and src.fork_repo then
     local wait = AMU_FIND.switch_pending[args and args.folder or ""]
-    add("Using now: " .. tostring(src.fork_repo) .. (wait and "  (restart to apply)" or ""), 0.27, blue)
+    add("Using now: " .. tostring(src.fork_repo), 0.27, blue)
+    if wait then add("(restart to apply)", 0.27, blue) end   -- own line: on one line the hover box cut it off
   end
   addw("Press the Forks button to read about each fork and tick Ignore scans.", 0.26, nil, 2)
   return { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = {
