@@ -5344,7 +5344,26 @@ local function run_fork_scan()
         elseif ts == "rate_limited" then
           amu_fork_status.text = "Stopped early (GitHub limit) - list is partial."
         end
+        amu_cl_cache.stamp, amu_cl_cache.data = nil, nil   -- the scan can rewrite changelogs.json: read it again
+        AMU_FORK_PAGE = 1
         amu_reopen_if_open("amu_fork_mod_list")
+        -- Rebuild the list once more a moment later. Right after a scan the list could still show the old result until a filter
+        -- button was pressed (twice, to get back to the chosen filter). Skipped while the search box is in use.
+        do
+          local t0
+          G.E_MANAGER:add_event(Event({ blockable = false, blocking = false, no_delete = true, func = function()
+            local now = (G.TIMERS and G.TIMERS.REAL) or 0
+            t0 = t0 or now
+            if (now - t0) < 0.6 then return false end
+            pcall(function()
+              if not AMU_FIND.active("forks") then
+                amu_fork_status.text = amu_fork_summary()
+                amu_reopen_if_open("amu_fork_mod_list")
+              end
+            end)
+            return true
+          end }))
+        end
         if ts ~= "bad" and ts ~= "rate_limited" and amu_fork_suggestions then
           local n = 0
           for k in pairs(AMU_FIND.fork_keys()) do if not keys_before[k] then n = n + 1 end end
