@@ -1,200 +1,221 @@
-# Balatro-Mod-Updater
-Updates (and makes backups of) any Balatro mod and the frameworks (Steamodded and Lovely Injector).
+# Balatro Mod Updater
 
-It notices changes to a mod you installed from its Git page, its GitHub Releases, or its Nexus Mods page. It also:
-- backs up every mod and framework before updating it
-- lets you restart now or later after updates
-- has in-game settings for your Nexus API key, auto-checking at startup, and turning update checks off for single mods
-- has per-mod "Check" buttons in the Mod Toggles tab
+Keeps your Balatro mods, **Steamodded** and **Lovely Injector** up to date, backs everything up before it changes anything, and rescues you when an update breaks the game.
 
-Auto-checking at startup is off by default. Turn it on in the mod's config tab.
+> **Windows only.** Needs Windows PowerShell 5.1, [Steamodded](https://github.com/Steamopollys/Steamodded) 1.x and Lovely.
 
-## What's new in 1.0.0
-This is the first 1.0 release: it is the 0.8.x series (crash protection, saved game copies, Fork Finder) polished and bug-fixed.
+## Contents
+- [Features](#features)
+- [Installation](#installation)
+- [How each mod is updated](#how-each-mod-is-updated)
+- [In-game tabs](#in-game-tabs)
+- [Fork Finder and the GitHub token](#fork-finder-and-the-github-token)
+- [Saved copies of the game](#saved-copies-of-the-game)
+- [If the game won't start after an update](#if-the-game-wont-start-after-an-update)
+- [Settings](#settings-autoupdater_configjson)
+- [Troubleshooting](#known-limits-and-troubleshooting)
+- [Changelog](#changelog)
 
-- **A small pop-up in the bottom right when a check or a scan ends.** After an update check (at startup or **Check for updates now**) that finds nothing to update, a box says **All mods up to date!** for a few seconds. After a fork scan it says **Fork scan done: no new forks**, or, when forks that were not in the list before turned up, **N new forks found**: click that box and it opens **Mods > Mod Updater > Fork Finder**. It stays out of the way (it is not shown when the results window or an error screen appears instead) and works in a run too. Mouse click only for now.
-- **The fork scan follows the Fork Finder filter.** With the default **Show newer forks only** the scan only compares forks that were pushed to since your installed copy's last push (within 12 months), so its limited number of comparisons goes to forks that can actually be newer. With **Show all forks** the scan looks at every fork that was pushed to after it was created, with no age cutoff, and compares up to 25 per source repo. The scan remembers which mode it ran in (`scan_mode` in `fork_suggestions.json`); if you switch to **Show all forks** after a newer-only scan, the status line tells you to press **Scan Now** again. A full scan makes more GitHub requests, so use a token.
-- **Fork Finder no longer gets stuck on "Scanning for forks...".** Balatro clears its waiting events when a run starts, which made the Updater forget a running scan (the scan finished but the screen never said so). The scan, switching a mod to a fork and back, a single-mod check, restoring a backup, restoring Steamodded or Lovely, and the game backup run now survive starting a run. A scan marked as running for over 6 minutes no longer blocks a new one.
-- **"No common ancestor" is not a scan error any more.** A fork whose history is unrelated to your copy (a re-created repo, for example Bunco's original) used to show `Fork scan: error comparing ... 404`. It is now skipped quietly.
-- **Switching to the original is Switch Back.** If the fork you pick is the mod's original repo, the button switches back to your original copy instead of cloning it as a "fork" and leaving its state behind.
-- **Switching to a fork or back is faster.** The git fetch skips background maintenance and tags. `update_timing_history.txt` now has a line per switch with the time of each step, so a slow switch can be traced.
-- **Checking... and Shuffling mods... end together.** The Checking... line under **Check for updates now** and the Shuffling animation on the main menu run while any check (startup or manual) runs, and stop at the same moment. The line is 50% bigger and the front page text, the Fork Finder header spacing and the **Hold B or press Esc** hint were refreshed.
-- **A pinned mod is tried again when its source has something newer.** If you put a mod back (Restore & Pin, or the crash screen), the Updater remembers which version you left. On every check it looks at the source: if there is a different, newer version it releases the pin and updates straight to the **latest** version, not just the next one. If the source still has nothing newer, the mod stays put. Steamodded and Lovely work the same way. Switch it off with **Retry pinned mods when newer** in Config (`pin_retry_newer` in `autoupdater_config.json`), and the pin then stays and the results just mention that a newer version exists.
-- **Always the latest version.** Every mod type jumps straight to the newest version in one update, however many versions it is behind.
-- **Saved copies of the game, and automatic protection from a Steam update.**
-  - The first check saves a copy of the Balatro game files (about the size of the game) in `AMU_GameBackups`, next to your `Mods` folder. Every new Steam build is saved too. The newest 3 copies are kept (`game_backup_keep`).
-  - When the Updater notices Steam updated the game, it saves the new version, stages a switch back to the saved copy of the version you were on, and **freezes mod and Steamodded/Lovely updates**, because a mod built for the new game could crash the old one. The results window offers **Restart now**; if you just quit, the switch happens when the game closes and the game is started through Steam. Turn the automatic switch off with **Auto-switch to saved game** in Config (`game_auto_switch`).
-  - Updates stay frozen until you turn them on: **Mods > Mod Updater > Backups > Balatro game files > Use Steam's newest game + turn updates on**. That puts the newest saved game back, resumes updates, and the newest version stays saved so it is the one switched back to after the **next** Steam update.
-  - **Allow mod updates on a saved copy** (same window) lets mods update even while an older game is installed. Use it only if you know what you are doing.
-  - **`Use backed up game.bat`** does the same from outside the game: pick a saved copy by number, or **S** for Steam's version. Close Balatro first.
-  - Turn the whole feature off with `"game_backup": false` in `autoupdater_config.json`.
-- **Fork Finder: ignore a whole mod.** Every row starts with a small square: tick it and fork scans skip that mod completely (it leaves the list unless **Ignored: Shown** is on). Rows now use short text such as `Orig + 2 forks` with the full story on hover, and a mod you switched to a fork has both **Forks** and **Switch Back** buttons. The **Webpage** button on *Balatro game files* opens the Balatro update history on SteamDB.
-- **Fork Finder: Ignore scans.** Each fork now has an **Ignore scans** checkbox next to **Open fork page**. Ignored forks are not checked by scans; they stay listed (shown as IGNORED) so you can un-ignore them, and the **Ignored: Hidden/Shown** button above the list hides or shows them. **Recent** sort orders mods by the newest listed fork's last push date, and shows that date on each row.
-- **A restart window after every change that needs one.** Putting a mod back (Restore & Pin), switching a mod to a fork and switching back to the original now open the same **Restart now / Later** window the updates use (it only appears when the change worked). Steamodded, Lovely and the game files already did.
-- **Unpin checks for a newer version at once.** Unpin on a mod (Backups tab) now checks that one mod straight away. If its source has a newer version it is updated and the results window opens with **Restart now / Later**. If it is already the newest, the status line says so and no restart is needed. While a saved game copy is installed the status line says updates are paused. Steamodded and Lovely still update on the next full check.
-- **Pins and toggles are saved at once.** Steamodded only saved this mod's settings when you left the Mods menu, so a pin made right before **Restart now** could be lost (the mod then showed no PINNED badge after the restart). Every pin, unpin, toggle and fork switch now saves straight away, and **Restart now** saves first.
-- **Remembered sorting.** The sort on Mod Toggles, Backups and Fork Finder (and the Fork Finder list filters) is saved in `ui_state.json` the moment you change it.
-- **Show filters.** Mod Toggles has a **Show:** pill with a **Next:** button next to it, like the sort control (All, ON = mods with updates on, OFF = mods with updates off). Backups has the same for **All / Pinned**. They work together with the search box, and **All on / All off** only change the mods being shown. The chosen filter is remembered, also after a restart (the search box still starts empty).
-- **First and last page.** Every list has a **<<** and a **>>** button next to the page selector. On a controller, **hold LB** for about half a second to jump to the first page and **hold RB** to jump to the last (on other pads the matching shoulder button); a quick tap of LB / RB still turns one page. With a controller in use the two buttons show a small "hold" label and the LB / RB glyph.
-- **Green and red names on Backups.** Balatro game files, Lovely Injector and Steamodded are green while they are on the newest version and red while a saved older copy is in use.
-- **The restart helper runs hidden.** It used to leave a PowerShell window open while the game restarted (Windows 11 ignores `-WindowStyle Hidden` for tasks). It now starts through a tiny script (`amu_restart_hidden.vbs` in the Balatro save folder) with no window.
-- New test files: `Test pins and latest.bat`, `Test game backup.bat` and `Test fork ignore.bat` (both run in a throw-away folder in your temp folder and never touch your real Mods or game folders).
-- `Test startup crash.bat` rehearses the "an update crashed the game on startup" rescue in the REAL game: it makes a throw-away test mod crash Balatro on purpose, then you check that the crash recovery screen offered to put back the test mod, Steamodded and Lovely, and that it pinned them. Steamodded and Lovely are only ever put back as exact copies of what you have installed; the menu has Arm / Check / Clean up.
+## Features
 
-## What's new in 0.8.4
-- **Hold S clears the search, even while you are typing.** On Mod Toggles, Backups and Fork Finder, holding **S** on the keyboard for about half a second now empties the search box. Before, it only worked when the cursor was outside the box. A quick tap of S still jumps into the box, and holding **R3** on a controller still clears it.
-- **No more sideways jump after leaving the search box with a controller.** Pressing **B** (or Enter, or Esc) in the search box could push the whole tab to the right. The tab is now put back.
-- **No more frozen keyboard and controller.** If the controller's on-screen keyboard was left behind after the search box closed, the keyboard and controller stopped responding while the mouse still worked. A leftover keyboard is now closed automatically.
+| | |
+|---|---|
+| **Updates from anywhere** | Mods installed from a **Git** page, **GitHub Releases** or **Nexus Mods**, plus Steamodded and Lovely. Always jumps straight to the newest version. |
+| **Backups first** | Every mod and framework is backed up before it is updated. Restore or **pin** any backup from the Backups tab. |
+| **Crash protection** | If an update crashes the game, a recovery screen offers to put the updated mods back. |
+| **Fork Finder** | Finds forks of your mods that have newer work and lets you switch to one (and back). |
+| **Saved game copies** | Saves Balatro's game files and switches back to the old version when a Steam update would break your mods. |
+| **Search, sort, filter** | Every list tab has live search, sort, show filters and first/last page buttons, with full controller support. |
+| **Restart now or later** | After updates you pick **Restart now** or **Later**. |
 
-## What's new in 0.8.3
-- **Bigger Config page.** The settings now fill the whole window: two panels with larger toggles, text and buttons, and room for the controller button hints.
-- **Easier Nexus key.** The Config page has a **How do I get a key?** button. It shows the steps and opens your Nexus account's API tab in the browser, and **Paste key** saves it. (Nexus only offers one-click sign-in to apps it has registered itself, so the key is still copied by hand.)
-- **Config page controller fix.** Up and Down on the right-hand buttons no longer jump to a toggle on the left.
-- **Clearer Nexus errors.** If Nexus rejects your API key (error 401), the results screen now says so and points to Config > How do I get a key?
-- **A little more room under each tab title**, so it no longer touches the buttons below it.
-- **Close All Menus on the title line.** On every tab the red button now sits next to the page title with its "Hold B or press Esc" hint beside it, instead of in the corner.
-- **Bigger page selector** on every list tab, matching the size of the search box and Clear button.
-- **Bigger No Source tab**, sized like the other tabs.
-- **Updated mod description.** The Mod Updater page in Steamodded now shows four short cards (updates, search and sort, Fork Finder, crash protection) instead of a block of text.
+Auto-checking at startup is **off by default**. Turn it on in the mod's Config tab.
 
-## What's new in 0.8.2
-- **Search on the Mod Toggles, Backups and Fork Finder tabs**, like in Balatro Mod Search and Sort. Type in the box next to the page selector and the list narrows while you type. Every word has to match the mod's name or folder name, in any order. **Clear** empties the box, and **Found x of y** shows how many match.
-  - Keyboard: press **S** to jump into the box and hold **S** to clear it. Controller: press **R3** (click the right stick), hold it to clear.
-  - On Mod Toggles, **All on / All off** change only the mods your search found while a search is active.
-  - The search is kept while you move between tabs and sub-screens. It empties when you leave the Mods menu.
-  - **Clear** empties the search right where you are: only the list changes, the menu does not reload.
-- **Bigger, roomier Mod Toggles, Backups and Fork Finder tabs**: larger text and buttons that use the whole window, with room for the controller button hints.
-- **Fork Finder can be sorted** like the other tabs: **A-Z**, or **Recent** (the mods whose newest fork was updated most recently first). Its search also matches the GitHub repository name.
-- **Crash recovery screen for crashes before the main menu.** If Balatro crashes while it is still starting, right after the updater updated some mods, you get a recovery screen instead of only the crash report. It offers **Put them all back and restart**, **Choose which mods to put back...**, and **Show the crash report** (nothing changes). It works with mouse, keyboard (arrows, Enter, Esc) and controller (D-pad or stick, A, B). Crashes after the main menu still get the normal crash report.
-- **Crash Detected question fixes:**
-  - On a controller, the cursor now starts on the question instead of the main menu behind it.
-  - The question always waits for the main menu. It no longer gets lost when the update check finishes while the game is still loading.
-  - After **Not now**, you are reliably asked again the next time the game starts.
+## Installation
 
-## What's new in 0.8.1
-- **A startup crash now asks you what to do instead of changing things by itself.** If Balatro did not reach the main menu right after the updater changed some mods, the next time the game gets to the main menu you see **Crash Detected** with the list of mods that were updated (version and time). Pick one:
-  - **Yes, put them all back**: every one of those mods goes back to the version you had before and is pinned. A window then lists what was put back, with **Restart now**.
-  - **Choose mods...**: one check box per mod, with **Revert selected**, **Revert all** and **Keep all** (plus **Tick all** / **Untick all**). Handy for finding the one that breaks the game: put half back, restart, see.
-  - **Not now**: nothing changes. You are asked again the next time you start the game, or press **Startup crash: review N mod(s)** in the Mod Updater settings.
-- Mods you keep stay suspects until the game has started fine once: if it crashes again, you are asked again, and `Undo last update.bat` can still undo them.
-- Works with mouse, keyboard (**Esc** = Not now) and controller (D-pad and A, **B** = Not now / Back, LB / RB turn the picker's pages).
-- **Works with "Auto-check at startup" off, too.** The crash is noticed by the game itself when it starts, not by the update check.
-- **`Undo last update.bat` lets you choose too.** Press Enter to put everything back, type numbers (for example `1,3`) for only some, or `K` to keep everything.
-- **Fixed:** pins made by `Undo last update.bat` were lost the next time the game started, so the mods could update to the broken version again. They are kept now, and the main menu tells you what was put back.
-- While you have not answered, those mods are not updated again.
-
-## What's new in 0.8.0
-- **Switching goes back to the Fork Finder.** After you press **Switch to Fork** (or **Switch to Original / Parent**) you land on the Fork Finder list again instead of the main menu.
-- **Fork Finder finds the whole family now.** For a mod that is itself a fork it checks (1) the **Original** project, (2) the **Parent** it was forked from (when that is a different repo), (3) other forks of the parent/original (**Parent fork**) and (4) forks of *your own copy* (**Fork-fork**). Everything is compared against the copy you have installed, so "+N commits" means "N commits you don't have". Example: Redux Arcanum now finds `RakibRyan/Redux-Arcanum`, a fork of the fork you have installed.
-- **Newest first, clearly labelled.** Each mod's list is sorted by last update with the newest on top, and every card says what it is: ORIGINAL, PARENT, PARENT FORK, FORK-FORK or FORK. The mod list shows the counts (for example "Original + 2 parent forks + 1 fork-fork").
-- **Hide translations.** New **Translations: Hidden / Shown** button. Forks that are only or mostly translations (Espanol / ESP / language files / "translation" commits) are left out while it is on (on by default; the status line says how many are hidden). Scan again to improve detection on old scan data.
-- **Open the page of what you have now.** Every mod row has a **Page** button, and the fork screen has **Open GitHub page** (and **Open Nexus page** when the mod has one) for your current copy, so you can read about it before switching.
-- **Lovely requirement fixer.** Some forks ask for a Lovely version that doesn't exist (Balatro-History's fork wants `Lovely (>=0.15)` while the newest Lovely is 0.10.0), so Steamodded refuses to load them ("Missing Dependencies") and blacklists them. For mods switched to a fork, the updater now lowers a requirement that is higher than any real Lovely to the Lovely you have, after a switch and after every update run. Restart the game to apply.
-
-## What's new in 0.7.9
-- **Hold B now works.** A quick tap of B is still "Back" (it happens when you let go); holding B for about 0.7 seconds closes all menus. Regular B presses keep working afterwards. The hold is timed every frame straight from the gamepad, so it works even when another mod (like Better Mouse and Gamepad) handles the controller, and it no longer fails when a menu is rebuilding. Tapping B on a mod's Backups or Fork list screen now goes Back (it did nothing before).
-- **Your settings survive updates.** When the updater updates itself (release or git), your Nexus API key, GitHub token, `config.lua` settings, saved lists and changelogs are kept instead of being replaced by the repo's blank defaults.
-- **Mod Toggles:** the mod name is on the left, the on/off box and **Check** are together on the far right, and the status text sits in the gap between. Rows no longer overlap the buttons above or the "Saved on/off list" line below; the page selector sits a little lower.
-- **Backups:** the list is lowered away from the Sort button, and the space above and below the page selector is equal.
-- **Controller:** LB / RB no longer switch tabs on screens without pages (Config); only LT / RT switch tabs. D-pad / left-stick left and right now move to the next button in the same row (e.g. Paste from clipboard -> Clear).
-
-## What's new in 0.7.8
-- **Menus always fit.** Every list is a fixed size, so nothing runs out of its box, overlaps the tab buttons, or jumps around when you change page.
-- **Close All Menus** (red button on every screen). On a controller **hold B** for about a second; on a keyboard press **Esc**. Hold-B works in every menu in the game, not only this mod's.
-- **Controller:** LT / RT switch tabs, LB / RB switch pages, and D-pad / left-stick up and down walk through every row in order.
-- **Mod Toggles:** **Save list** keeps the current on/off list, **Restore list** puts it back. The first time you press **All on** / **All off** the list is saved automatically (unless you saved one yourself).
-- **Backups:** wider rows with bigger version / date text. Hover a row (or focus its **Backups** button) to see a short summary of the newest changes. The notes live in `changelogs.json` and are rewritten after every update and every restore.
-- **Fork Finder:** shows only forks newer than your installed copy by default (button switches to all forks). Each fork has an **Open fork page** button (opens GitHub in your browser) and a hover summary of what changed.
-- Fixed a crash on the "Check for updates now" result screen (`on_full_update_done` was used before it was defined).
-
+1. Install Steamodded and Lovely.
+2. Put the `Balatro-Mod-Updater` folder in your Balatro `Mods` folder.
+3. Start Balatro and open **Mods > Mod Updater**.
+4. Optional: add your Nexus API key (**Config > How do I get a key?**) and turn on **Auto-check at startup**.
 
 ## How each mod is updated
-1. **The mod folder has an `update.json` with `"provider": "github"` or `"nexus"`.** That source is used, even if the folder is also a git clone.
-2. **The mod folder is a git clone.** It gets `git pull`. An `update.json` with `"branch": "stable"` makes it switch to and follow that branch.
-3. **Neither.** The mod is never checked. It's listed under `untracked_mods` in `last_run.json` so you know.
+
+| Mod folder has... | What happens |
+|---|---|
+| `update.json` with `"provider": "github"` or `"nexus"` | That source is used, even if the folder is also a git clone. |
+| A git clone | `git pull`. An `update.json` with `"branch": "stable"` switches to and follows that branch. |
+| Neither | Never checked. Listed under `untracked_mods` in `last_run.json`. |
 
 ### GitHub (`update.json`)
 ```json
 { "provider": "github", "repo": "Owner/Repo", "track": "auto" }
 ```
-- `track`:
-  - `auto` (default): use releases if the repo has any. Otherwise follow the newest commit on the default branch.
-  - `release`: releases only.
-  - `branch`: always follow the newest commit. Add `"branch": "name"` to pick the branch.
-- `include_prereleases`: `true` also accepts pre-releases.
-- `asset_regex`: picks the release file. If no file matches, the release's source-code zip is used.
-- `strip_single_top_folder`: `true` (default) unpacks a zip that has a single top folder straight into the mod folder.
+
+| Option | Meaning |
+|---|---|
+| `track` | `auto` (default): releases if the repo has any, otherwise the newest commit on the default branch. `release`: releases only. `branch`: always the newest commit (add `"branch": "name"` to pick the branch). |
+| `include_prereleases` | `true` also accepts pre-releases. |
+| `asset_regex` | Picks the release file. If nothing matches, the source-code zip is used. |
+| `strip_single_top_folder` | `true` (default) unpacks a zip with one top folder straight into the mod folder. |
 
 ### Nexus (`update.json`)
 ```json
 { "provider": "nexus", "mod_id": 12345 }
 ```
-- Only MAIN files are used, and the newest upload wins. Optional and old files are ignored. Use `file_name_regex` to pick one file when a mod has several.
-- Nexus only allows API downloads for **Premium** accounts. On a free account, the updater shows "update available" with a link instead.
+- Only **MAIN** files are used and the newest upload wins. Use `file_name_regex` to pick one file when a mod has several.
+- Nexus only allows API downloads for **Premium** accounts. On a free account you get "update available" with a link.
 
 ### Git
-- Leftover merge conflicts (`<<<<<<<` markers) are repaired automatically.
-- If your local edits clash with an update, the update still goes in. Your edits are saved in `git stash list`.
+- Leftover merge conflict markers (`<<<<<<<`) are repaired automatically.
+- If your local edits clash with an update, the update still goes in and your edits are saved in `git stash list`.
 - `git_reset_on_diverge: true` in `autoupdater_config.json` resets mods whose author rewrote history (a backup is made first).
 
-## Steamodded & Lovely
-- Steamodded is checked by reading its `version.lua`.
-- Lovely is checked by comparing `version.dll` with the latest release.
+### Steamodded and Lovely
+- Steamodded is checked by reading its `version.lua`. Lovely is checked by comparing `version.dll` with the latest release.
 - Updates are staged and applied by `apply_pending.ps1` after Balatro closes. Click **Restart now** to apply them.
-- Applying never replaces Steamodded with the same or an older version.
-- Old staged updates are removed automatically once you're current.
+- Applying never replaces Steamodded with the same or an older version, and old staged updates are removed once you are current.
 
-## If the game won't start after an update
-- **The game crashes while starting (before the main menu):** the Mod Updater's crash recovery screen appears instead of the crash report. It lists the mods it just updated. Choose **Put them all back and restart**, or **Choose which mods to put back...**, or **Show the crash report** to change nothing.
-- **The game reaches the main menu (after one failed start):** you get the **Crash Detected** question described in "What's new in 0.8.1". Nothing is changed until you answer.
-- **Neither screen shows up:** close Balatro and double-click **`Undo last update.bat`** in this folder. It lists the mods from the last update. Press **Enter** to put all of them back, type numbers like **1,3** for only some, or **K** to keep everything.
-- Put-back mods are **pinned**: they are not updated again until you unpin them in the **Backups** tab, or until their source has a different (newer) version and **Retry pinned mods when newer** is on.
-- **A Steam update of Balatro broke your mods:** the Updater switches back to the saved copy of the old game by itself and freezes updates (see 1.0.0). If you need to do it by hand, close Balatro and double-click **`Use backed up game.bat`**.
+## In-game tabs
 
-## Known limits and troubleshooting
-**Install and environment**
-- **The game does not relaunch after Restart now.** Task Scheduler may be blocked by antivirus or a work policy. The Updater then falls back to the `steam://` link: start the game from Steam yourself.
-- **Windows only.** The crash screen and the restart helper do not work on other systems or the Steam Deck.
-- **Updates never run.** Check that Windows PowerShell 5.1 is installed and that scripts are allowed to start.
-- **Antivirus flags `autoupdate.ps1`.** A script that downloads files can look suspicious to antivirus programs. The whole script is readable in this repository.
+| Tab | What it does |
+|---|---|
+| **Mod Toggles** | Turn update checks on or off per mod, **All on / All off**, **Save list / Restore list**, per-mod **Check** button, sort (A-Z / Recent) and **Show** filter (All / ON / OFF). |
+| **Backups** | Version in use and last update for each mod, restore or pin a backup, **Unpin**, sort and **Show** filter (All / Pinned). Hover a row for a summary of the newest changes. |
+| **Fork Finder** | Forks with newer work, **Switch to Fork / Switch Back**, **Scan Now**, GitHub token setup. |
+| **No Source** | Mods with no git clone or `update.json`. Paste their GitHub or Nexus link to create one. |
+| **Config** | Nexus key, GitHub token, auto-check, pin retry, game backup options. |
 
-**Network limits (not a bug in the mod)**
-- **GitHub allows 60 requests per hour without a token.** Fork scans fail first. Use the **GitHub token** button in Fork Finder.
-- **Expired GitHub token.** The Updater notices after an update check and offers to replace it. Replace it, or press **Clear** on the token screen to stop the message.
-- **Nexus key rejected or rate limited.** Free keys have limits. Paste the key again, or wait an hour.
-- **Download cut off in the middle of an update.** This can leave a half-extracted mod. Restore the newest backup from the **Backups** tab.
-
-**Steamodded and Lovely**
-- **An update is staged, not applied.** The results window says it is ready: click **Restart now**. If you just quit, it is applied when the game closes, so it shows on the next start.
-- **Restoring Steamodded or Lovely by hand.** The backups are zips in the Updater's `_framework_backups` folder, plus `winmm.dll.bak_<date>` files next to Lovely.
-
-**Folder names with a version in them**
-- Some mods ship in a folder with the version in its name. Updates change the files, not the folder name, so the name keeps showing the old version. Rename the folder by hand with the game closed (the results window lists these folders).
-- Renaming a folder resets that mod's toggle and pin in the Updater, because they are saved by folder name. Backups made under the old name stay under the old name.
-
-**Conflicts with other mods**
-- **Mods that replace `love.wheelmoved`.** Better Mouse and Gamepad is one. The results window re-installs its wheel handler every frame. If wheel scrolling fails, check which other mods are installed.
-- **Controller mods that use R3 or S.** The search key may do nothing. Click the search box with the mouse.
-- **An old copy of a mod inside `Mods`.** Two mods with the same ID crash the game. Move backups and `.bak` copies out of the `Mods` folder.
-
-## Optional settings (`autoupdater_config.json`)
-- `github_token`: raises GitHub's limit from 60 to 5000 checks per hour. You don't need to edit this file: in the **Fork Finder** tab click **GitHub token** and follow the steps (free, read-only, takes about a minute).
-- `report_untracked`: `false` stops listing untracked mods.
-- `game_backup` (default `true`), `game_backup_keep` (default `3`), `game_auto_switch` (default `true`), `allow_updates_on_backup_game` (default `false`), `pin_retry_newer` (default `true`): see 1.0.0.
+Every screen has a red **Close all** button (**hold B** on a controller or press **Esc**). Controller: **LT / RT** switch tabs, **LB / RB** turn pages (hold to jump to the first or last page), **R3** jumps to search (hold to clear).
 
 ## Fork Finder and the GitHub token
-Fork Finder looks for forks of your mods that have newer work (**Show newer forks only**, the default) or lists every recently active fork (**Show all forks**); **Scan Now** scans for whichever one is selected. Each scan makes many GitHub requests, and GitHub only allows 60 per hour without a token, so a scan of a big mod list will stop early.
 
-Fix (one time, about a minute):
-1. Open the **Fork Finder** tab and click **GitHub token**, then **Open GitHub page**.
+Fork Finder lists forks of your mods with newer work (**Show newer forks only**, the default) or every recently active fork (**Show all forks**). **Scan Now** scans for whichever is selected.
+
+GitHub only allows 60 requests per hour without a token, so a scan of a big mod list stops early. **Fix it once, in about a minute:**
+
+1. Open **Fork Finder**, click **GitHub token**, then **Open GitHub page**.
 2. Name: `Balatro Mod Updater`. Expiration: `90 days`. Repository access: **Public repositories (read-only)**. Leave all permissions untouched.
 3. Click **Generate token** and copy it (starts with `github_pat_`).
-4. Back in the game click **Paste token**.
+4. Back in the game click **Paste token**, then **Scan Now**.
 
-The token only reads public data. When it expires (after 90 days) the next scan shows a prompt: click **Yes, replace it** and you are taken straight to the token screen. After pasting, click **Scan Now** to scan right away.
+The token only reads public data. When it expires the next scan offers **Yes, replace it**.
 
-## In-game settings tabs
-- **Mod Toggles**: **All on / All off** buttons, a **Now / Next** sort pair (*Now: A-Z* shows the current sort, and the *Next: Recent* button switches to it), larger names and checkboxes, and a per-mod **Check** button. Rows line up in fixed columns so the controller d-pad / stick moves straight up and down.
-- **Backups**: the same **Now / Next** sort pair (A-Z or Recent). Each mod shows the version in use and when it was last updated (pinned mods show "Pinned to backup <date>"). **Back** in a mod's backup list returns to this page.
-- **No Source**: lists mods with no git clone or `update.json`. Copy the mod's GitHub or Nexus page link and click **Paste link** to create its `update.json`. This tab also has the switch for the "N mod(s) have no git/update.json" note on the results screen (on by default).
-- **Close all** appears on every screen and leaves the mods menu completely.
+## Saved copies of the game
+
+- The first check saves a copy of the Balatro game files in `AMU_GameBackups`, next to your `Mods` folder. Every new Steam build is saved too, and the newest 3 copies are kept (`game_backup_keep`).
+- When Steam updates the game, the Updater saves the new version, stages a switch back to the saved copy you were on, and **freezes mod and Steamodded/Lovely updates**, because a mod built for the new game could crash the old one.
+- Updates stay frozen until you turn them on: **Mods > Mod Updater > Backups > Balatro game files > Use Steam's newest game + turn updates on**.
+- **Allow mod updates on a saved copy** (same window) lets mods update on an older game. Only use it if you know what you are doing.
+- `Use backed up game.bat` does the same from outside the game: pick a saved copy by number, or **S** for Steam's version. Close Balatro first.
+- Turn the feature off with `"game_backup": false`, or only the automatic switch with **Auto-switch to saved game** in Config.
+
+## If the game won't start after an update
+
+1. **Crash before the main menu:** a recovery screen lists the mods that were just updated. Choose **Put them all back and restart**, **Choose which mods to put back...**, or **Show the crash report** (changes nothing).
+2. **The game reaches the main menu after a failed start:** the **Crash Detected** question appears. Nothing changes until you answer.
+3. **Neither screen shows up:** close Balatro and double-click `Undo last update.bat`. Press **Enter** to put everything back, type numbers like `1,3` for only some, or `K` to keep everything.
+4. **A Steam update broke your mods:** the Updater switches back to the saved game by itself. By hand, close Balatro and run `Use backed up game.bat`.
+
+Put-back mods are **pinned**: they are not updated again until you unpin them in **Backups**, or until their source has a newer version and **Retry pinned mods when newer** is on.
+
+## Settings (`autoupdater_config.json`)
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `github_token` | empty | Raises GitHub's limit from 60 to 5000 requests per hour. Easier to set from the **GitHub token** button. |
+| `report_untracked` | `true` | `false` stops listing untracked mods. |
+| `game_backup` | `true` | Save copies of the game files. |
+| `game_backup_keep` | `3` | How many saved game copies to keep. |
+| `game_auto_switch` | `true` | Switch back to the saved game after a Steam update. |
+| `allow_updates_on_backup_game` | `false` | Let mods update while an older saved game is installed. |
+| `pin_retry_newer` | `true` | Release a pin and update when the source has something newer. |
+
+## Known limits and troubleshooting
+
+**Install and environment**
+- **Game does not relaunch after Restart now.** Task Scheduler may be blocked by antivirus or a work policy. The Updater falls back to the `steam://` link: start the game from Steam yourself.
+- **Updates never run.** Check that Windows PowerShell 5.1 is installed and scripts are allowed to start.
+- **Antivirus flags `autoupdate.ps1`.** A script that downloads files can look suspicious. The whole script is readable in this repository.
+
+**Network limits (not a bug in the mod)**
+- **GitHub 60 requests per hour without a token.** Fork scans fail first. Use the **GitHub token** button.
+- **Nexus key rejected or rate limited.** Paste the key again, or wait an hour. Error 401 means the key was rejected.
+- **Download cut off mid-update.** Can leave a half-extracted mod. Restore the newest backup from **Backups**.
+
+**Steamodded and Lovely**
+- **Update staged, not applied.** Click **Restart now**. If you just quit, it is applied when the game closes.
+- **Restoring by hand.** Backups are zips in `_framework_backups`, plus `winmm.dll.bak_<date>` files next to Lovely.
+
+**Folder names with a version in them**
+- Updates change the files, not the folder name. Rename the folder by hand with the game closed. This resets that mod's toggle and pin, because they are saved by folder name.
+
+**Conflicts with other mods**
+- **Mods that replace `love.wheelmoved`** (Better Mouse and Gamepad is one): if wheel scrolling fails, check your other mods.
+- **Controller mods that use R3 or S:** the search key may do nothing. Click the search box with the mouse.
+- **Old copies of a mod inside `Mods`:** two mods with the same ID crash the game. Move backups and `.bak` copies out of `Mods`.
+
+## Changelog
+
+### 1.0.0
+First 1.0 release: the 0.8.x series polished and bug-fixed.
+- New: bottom-right pop-up when a check or scan ends (**All mods up to date!**, **N new forks found**). Click it to open Fork Finder.
+- New: saved copies of the game, with automatic switch back and an update freeze after a Steam update.
+- New: pinned mods are retried when their source has something newer (**Retry pinned mods when newer**).
+- New: Fork Finder can **ignore a whole mod** (square on each row) and **ignore single forks** (**Ignore scans**), with an **Ignored: Hidden/Shown** button.
+- New: **Show** filters on Mod Toggles (All / ON / OFF) and Backups (All / Pinned).
+- New: **<<** and **>>** buttons on every list. Controller: hold LB / RB for first / last page.
+- New: restart window after Restore & Pin, switching to a fork and switching back.
+- New: Unpin checks that mod for a newer version at once.
+- New: green / red names on Backups (newest version vs a saved older copy in use).
+- New test files: `Test pins and latest.bat`, `Test game backup.bat`, `Test fork ignore.bat`, `Test startup crash.bat`.
+- Changed: the fork scan follows the Fork Finder filter and remembers its mode (`scan_mode`). Show all forks uses more GitHub requests, so use a token.
+- Changed: switching to a fork or back is faster, and `update_timing_history.txt` logs the time of each step.
+- Changed: Checking... and Shuffling mods... start and stop together. Sort, filters and pins are saved immediately.
+- Changed: the restart helper runs hidden (no PowerShell window).
+- Fixed: Fork Finder stuck on "Scanning for forks...".
+- Fixed: "No common ancestor" is skipped quietly instead of shown as a 404 error.
+- Fixed: picking a mod's original repo in Fork Finder now does **Switch Back**.
+- Fixed: a pin made right before **Restart now** could be lost.
+
+### 0.8.4
+- Fixed: holding **S** clears the search even while typing (Mod Toggles, Backups, Fork Finder).
+- Fixed: leaving the search box with a controller no longer shifts the tab sideways.
+- Fixed: a leftover on-screen keyboard no longer freezes keyboard and controller.
+
+### 0.8.3
+- New: bigger Config page (two panels, larger controls).
+- New: **How do I get a key?** button for the Nexus key, and **Paste key**.
+- New: clearer Nexus 401 error on the results screen.
+- Changed: red **Close All Menus** button now sits on the title line with its hint.
+- Changed: bigger page selector and No Source tab, new mod description cards.
+- Fixed: Up / Down on the Config buttons no longer jumps to a toggle on the left.
+
+### 0.8.2
+- New: search on Mod Toggles, Backups and Fork Finder (keyboard **S**, controller **R3**, hold to clear).
+- New: Fork Finder sort (**A-Z** / **Recent**).
+- New: crash recovery screen for crashes before the main menu.
+- Changed: bigger, roomier Mod Toggles, Backups and Fork Finder tabs.
+- Fixed: Crash Detected question waits for the main menu, and re-asks after **Not now**.
+
+### 0.8.1
+- New: a startup crash now asks what to do (**put them all back**, **Choose mods...**, **Not now**) instead of changing things by itself.
+- New: `Undo last update.bat` lets you choose which mods to put back.
+- Fixed: pins made by `Undo last update.bat` were lost on the next start.
+- Works with **Auto-check at startup** off.
+
+### 0.8.0
+- New: Fork Finder finds the whole family (Original, Parent, Parent fork, Fork-fork), newest first and clearly labelled.
+- New: **Translations: Hidden / Shown** button.
+- New: **Page** and **Open GitHub / Nexus page** buttons for your current copy.
+- New: Lovely requirement fixer for forks that ask for a Lovely version that does not exist.
+- Changed: switching returns you to the Fork Finder list.
+
+### 0.7.9
+- New: **Hold B** (about 0.7 s) closes all menus. A quick tap is Back.
+- Fixed: your settings (Nexus key, GitHub token, `config.lua`, lists) survive updates of the updater itself.
+- Changed: Mod Toggles and Backups layout cleanups, D-pad / stick moves along a row.
+
+### 0.7.8
+- New: **Close All Menus** on every screen, **Save list / Restore list** on Mod Toggles.
+- New: Backups hover summary, Fork Finder **Open fork page** button.
+- Changed: fixed-size lists so nothing overlaps or jumps.
+- Fixed: crash on the "Check for updates now" result screen.
