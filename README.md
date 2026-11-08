@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.17
+- Changed: the Fork Finder list hover is shorter. The "Found: ..." and "Your copy: ..." lines are gone. It shows the green "Most recently updated: ..." line (when it is your copy it now names it, like "your current copy (Owner/Name)"), the blue "Using now" line, and the hint.
+
 ### 1.0.16
 - Changed: the Fork Finder top line is shorter so the scan date fits. It no longer starts with "Showing newer forks only:" or "Showing every fork:" (the filter button already says that). It reads like "2 mod(s) (3 have any fork) - scanned 11-08 13:15".
 - Changed: with Translations: Hidden, a fork whose name has a language word (espanol, ESP, translation, and similar) is hidden unless it changes more than 6 non-language files. Forks without a language word in the name are hidden only when nearly all their changed files are language files.

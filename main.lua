@@ -5287,7 +5287,7 @@ function AMU_FORKIGN.row_tip(args)
       end
     end
   end
-  add("Found: " .. (#parts > 0 and table.concat(parts, ", ") or "nothing newer"), 0.28)
+  -- (the "Found: ..." and "Your copy: ..." lines are gone: the green and blue lines below say what matters)
   local cur = AMU_FIND.current_info(args and args.folder or "", entry)
   do
     local nd, ns = AMU_FIND.fork_now_day(args and args.folder or "")
@@ -5297,10 +5297,11 @@ function AMU_FORKIGN.row_tip(args)
   local function addw(text, scale, colour, maxlines)
     for _, ln in ipairs(AMU_FIND.wrap(text, scale, 6.0, maxlines or 2)) do add(ln, scale, colour) end
   end
-  if cur.date then addw("Your copy: " .. cur.date .. " (" .. cur.how .. ")", 0.27, nil, 2) end
   if win ~= nil then
     local who, day
-    if win == "cur" then who, day = "your current copy", cur.date
+    if win == "cur" then
+      local nm = AMU_FIND.fork_now(args and args.folder or "") or tostring(entry.installed_repo or "")
+      who, day = "your current copy" .. (nm ~= "" and (" (" .. nm .. ")") or ""), cur.date
     else who, day = tostring(win.repo or ""), AMU_FIND.d10(AMU_FIND.fork_stamp(win)) end
     addw("Most recently updated: " .. who .. "  " .. tostring(day or ""), 0.27, AMU_FIND.NEWEST_DARK, 2)
   else
