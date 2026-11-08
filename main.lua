@@ -5382,14 +5382,14 @@ amu_fork_summary = function()
   local text
   -- the filter button already says which list this is, so the line only gives the numbers
   if config.fork_newer_only ~= false then
-    text = shown .. " mod(s) (" .. all .. " have any fork)"
+    text = shown .. " new fork(s) (" .. all .. " have any fork)"
   else
-    text = shown .. " mod(s)"
+    text = shown .. " any fork(s)"
   end
   local mode = amu_fork_suggestions.scan_mode
   local d, t = tostring(amu_fork_suggestions.checked_at or ""):match("^%d%d%d%d%-(%d%d%-%d%d)T(%d%d:%d%d)")
   if d then
-    text = text .. " - scanned " .. d .. " " .. t
+    text = text .. " - last scanned " .. d .. " " .. t
     if config.fork_newer_only == false and mode == "newer" then text = text .. " (newer only, Scan Now for all)" end
   end
   return amu_fit(text, 0.3, 8.6)

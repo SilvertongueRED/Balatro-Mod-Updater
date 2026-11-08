@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.19
+- Changed: the Fork Finder top line is clearer. The newer-forks list reads like "0 new fork(s) (3 have any fork) - last scanned 11-08 14:32" and the all-forks list reads like "35 any fork(s) - last scanned 11-08 14:32".
+
 ### 1.0.18
 - Changed: the hover for a fork in the "View forks" screen is easier to read. Each change has a real bullet square (the game font cannot draw a bullet character, so the old one never showed), wrapped lines are indented under their bullet, "new commits you don't have" is green, "your copy has N commits it lacks" is orange, the two dates share one small grey line, a "What changed:" heading and thin divider lines split the sections, and the "Your copy" bracket note is gone.
 
