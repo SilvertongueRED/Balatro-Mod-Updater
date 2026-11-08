@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.24
+- Changed: the Fork Finder list hover says "Press the View Forks button to read about each fork and tick Ignore scans." so it matches the button name.
+
 ### 1.0.23
 - Changed: the hover on "Your current" in View forks is a bulleted list. The scan now checks the real commits of your git clone, so "Your downloaded copy does NOT have it yet" (red, blinking) only shows when your copy is really missing GitHub's newest commit, and nothing shows when it has it. If the scan cannot tell (not a git clone, or an old scan), the line is left out. Run Scan Now once to fill this in.
 

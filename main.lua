@@ -5347,7 +5347,7 @@ function AMU_FORKIGN.row_tip(args)
     -- same rule everywhere: when you are not on the most recently updated copy, say what you ARE using (blue)
     add("Using now: " .. tostring(entry.installed_repo), 0.27, blue)
   end
-  addw("Press the Forks button to read about each fork and tick Ignore scans.", 0.26, nil, 2)
+  addw("Press the View Forks button to read about each fork and tick Ignore scans.", 0.26, nil, 2)
   return { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = {
     { n = G.UIT.C, config = { align = "cl", padding = 0.03 }, nodes = rows } } }
 end
