@@ -3747,7 +3747,7 @@ local function amu_make_tab(o)
   for _, n in ipairs(o.top) do col[#col + 1] = n end
   col[#col + 1] = spacer(o.gap_top or 0.1)
   col[#col + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = {
-    { n = G.UIT.O, config = { id = o.id, w = o.list_w, h = o.list_h, object = Moveable() } } } }
+    { n = G.UIT.O, config = { id = o.id, w = o.list_w, h = o.list_h, object = Moveable(), func = "amu_fill_watch" } } } }
   if o.after and o.gap_after then col[#col + 1] = spacer(o.gap_after) end   -- breathing room between the list and the line under it
   for _, n in ipairs(o.after or {}) do col[#col + 1] = n end
   col[#col + 1] = spacer(gap_pager)
@@ -3842,6 +3842,19 @@ local function amu_make_tab(o)
     amu_update_area(o.id, o.build(page))
   end
   AMU_FIND.last_fill = fill
+  -- The event below waits in the game's main queue. During a run that queue can be backed up, and the list stayed blank until the
+  -- queue caught up (or a page was changed). So the list area also asks to be filled on its own first frame (UI elements run their
+  -- func every frame, no queue involved). fill() only runs once, so whichever comes first wins.
+  AMU_FIND.fills = AMU_FIND.fills or {}
+  AMU_FIND.fills[o.id] = fill
+  G.FUNCS.amu_fill_watch = function(e)
+    if e.config.amu_seen then return end
+    local om = G.OVERLAY_MENU
+    if not (om and om.get_UIE_by_ID and om:get_UIE_by_ID(e.config.id)) then return end   -- area not in the menu yet: try next frame
+    e.config.amu_seen = true
+    local f = AMU_FIND.fills and AMU_FIND.fills[e.config.id]
+    if f then pcall(f) end
+  end
   G.E_MANAGER:add_event(Event({ func = function()
     fill()
     return true
