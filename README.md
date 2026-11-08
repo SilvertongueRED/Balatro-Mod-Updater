@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.7
+- Fixed: Switch Back to the copy you had installed before (for example your fork, after trying the parent) did not show "Using now: <repo>" and "(restart to apply)" in the Fork Finder hover. The copy you left is now remembered and used as the target of Switch Back.
+
 ### 1.0.6
 - Fixed: after switching a mod to an OLDER copy (for example back to the parent while a newer fork was installed), the Fork Finder no longer calls the copy you just switched to the "most recently updated" one. The copy you left is still counted, the hover names it as the most recently updated, and the row label ("Parent") is only green when the copy you run now really is the newest.
 

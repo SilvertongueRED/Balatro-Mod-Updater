@@ -5607,6 +5607,9 @@ local function switch_back_fork(folder_name)
   do
     local st = config.mod_fork_source and config.mod_fork_source[folder_name]
     local orig = type(st) == "table" and st.original_repo or nil
+    -- the copy that was installed before the switch IS what Switch Back restores (it is not always listed as kind "original")
+    local lb = AMU_FIND.left_behind[folder_name]
+    if not orig and type(lb) == "table" and type(lb.repo) == "string" and lb.repo ~= "" then orig = lb.repo end
     if not orig then
       local d = amu_fork_suggestions and amu_fork_suggestions.suggestions and amu_fork_suggestions.suggestions[folder_name]
       for _, f in ipairs(type(d) == "table" and d.forks or {}) do
