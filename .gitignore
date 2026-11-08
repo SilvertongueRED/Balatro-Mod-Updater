@@ -24,3 +24,19 @@ _recently_updated.json
 changelogs.json
 toggle_snapshot.json
 update.json.off
+
+# Logs, reports and test leftovers written while using or testing the mod
+ui_state.json
+pin_versions.json
+_gh_cache/
+update_timing*
+_hold_s.log
+_crash_last_error.txt
+_launch_attempt
+_launch_sentinel
+*_test_report.txt
+test_*.ps1
+Test *.bat
+_backup_pre_*/
+_to_delete/
+Nexus Release Prep/
