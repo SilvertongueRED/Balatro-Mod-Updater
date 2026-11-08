@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.25
+- Changed: in the "Your current" hover the Last change line uses a small star icon instead of a square bullet and reads like "Last change 08-13-25: on GitHub" (month-day-year).
+
 ### 1.0.24
 - Changed: the Fork Finder list hover says "Press the View Forks button to read about each fork and tick Ignore scans." so it matches the button name.
 

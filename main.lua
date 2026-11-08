@@ -3112,6 +3112,12 @@ function AMU_FIND.cfg_tip(title, lines)
       if type(t) == "table" and (t.bullet or t.indent) then
         -- bullet drawn as a small square (the game font has no bullet glyph); wrapped lines sit under the text
         local sq = t.bullet and { n = G.UIT.B, config = { w = 0.12, h = 0.12, colour = tcfg.colour } } or { n = G.UIT.B, config = { w = 0.12, h = 0.12 } }
+        if t.star then
+          -- a small plus-shaped star (3 x 3 tiny squares) so this line looks different from the square bullets
+          local function cell(on) return { n = G.UIT.B, config = { w = 0.04, h = 0.04, colour = on and tcfg.colour or (G.C.CLEAR or { 0, 0, 0, 0 }) } } end
+          local function rw(a, b, c) return { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = { cell(a), cell(b), cell(c) } } end
+          sq = { n = G.UIT.C, config = { align = "cm", padding = 0 }, nodes = { rw(false, true, false), rw(true, true, true), rw(false, true, false) } }
+        end
         rows[#rows + 1] = { n = G.UIT.R, config = { align = "tl", padding = 0.01 }, nodes = {
           { n = G.UIT.C, config = { align = "tm", padding = 0.04 }, nodes = { sq } },
           { n = G.UIT.B, config = { w = 0.1, h = 0.1 } },
@@ -5911,13 +5917,18 @@ G.UIDEF.amu_fork_picker = function(ref)
     local function bullets(text, extra)
       for i, l in ipairs(AMU_FIND.wrap(text, 0.27, 5.3, 3)) do
         local row = { text = l, bullet = (i == 1), indent = (i > 1) }
-        for k, v in pairs(extra or {}) do row[k] = v end
+        for k, v in pairs(extra or {}) do if k ~= "star" then row[k] = v end end
+        if i == 1 and extra and extra.star then row.star = true end   -- the first line of a starred item gets the star icon
         cur_tip_lines[#cur_tip_lines + 1] = row
       end
     end
     bullets("A green name marks the most recently updated copy.")
     if cur_info.date then
-      bullets("Last change " .. cur_info.date .. ": " .. tostring(cur_info.how or ""))
+      local y, mo, d = tostring(cur_info.date):match("^(%d%d%d%d)%-(%d%d)%-(%d%d)")
+      local day_txt = y and (mo .. "-" .. d .. "-" .. y:sub(3, 4)) or tostring(cur_info.date)
+      local how_txt = tostring(cur_info.how or "")
+      how_txt = how_txt:gsub("^newest commit on GitHub$", "on GitHub"):gsub("^last commit on GitHub$", "on GitHub"):gsub("^last commit in your git clone$", "in your git clone")
+      bullets("Last change " .. day_txt .. ": " .. how_txt, { star = true })
       if cur_info.lacks then bullets("Your downloaded copy does NOT have it yet", { blink = true }) end
     else
       bullets("Run Scan Now to find out when your copy last changed.")
