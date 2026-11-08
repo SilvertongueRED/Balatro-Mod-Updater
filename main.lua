@@ -5746,6 +5746,9 @@ local function amu_fork_tip(args)
   local dark = G.C.UI.TEXT_DARK or RGBA(0.2, 0.2, 0.25, 1)
   local blue = G.C.BLUE or dark
   local maxw = 6.4
+  local grey = RGBA(0.42, 0.42, 0.48, 1)
+  local green = AMU_FIND.NEWEST_DARK or RGBA(0.1, 0.5, 0.25, 1)
+  local orange = RGBA(0.78, 0.4, 0.05, 1)
   local rows = {}
   local function add(text, scale, colour)
     rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.015 }, nodes = {
@@ -5754,32 +5757,59 @@ local function amu_fork_tip(args)
   local function addw(text, scale, colour, maxlines)
     for _, ln in ipairs(AMU_FIND.wrap(text, scale, maxw, maxlines or 2)) do add(ln, scale, colour) end
   end
+  -- thin divider line between sections
+  local function divider()
+    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = {
+      { n = G.UIT.B, config = { w = maxw, h = 0.025, colour = RGBA(0.75, 0.75, 0.8, 1) } } } }
+  end
+  -- a bullet drawn as a small coloured square (the game font has no bullet glyph), text wraps with a hanging indent
+  local function bullet(text, scale, colour, bcolour)
+    local lines = AMU_FIND.wrap(text, scale, maxw - 0.35, 2)
+    local col = {}
+    for _, ln in ipairs(lines) do
+      col[#col + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.01 }, nodes = {
+        { n = G.UIT.T, config = { text = amu_fit(ln, scale, maxw - 0.35), scale = scale, colour = colour or dark } } } }
+    end
+    rows[#rows + 1] = { n = G.UIT.R, config = { align = "tl", padding = 0.02 }, nodes = {
+      { n = G.UIT.C, config = { align = "tm", padding = 0.04 }, nodes = {
+        { n = G.UIT.B, config = { w = 0.12, h = 0.12, colour = bcolour or blue } } } },
+      { n = G.UIT.B, config = { w = 0.1, h = 0.1 } },
+      { n = G.UIT.C, config = { align = "tl", padding = 0 }, nodes = col } } }
+  end
 
   local day = AMU_FIND.fork_day(fork)
   add(tostring(fork.repo or "fork"), 0.34, blue)
-  if win ~= nil and win == fork then add("Most recently updated copy (commit or release)", 0.27, AMU_FIND.NEWEST_DARK) end
-  local a, b = fork.commits_ahead or 0, fork.commits_behind or 0
-  if a > 0 then add(a .. " new commit" .. (a == 1 and "" or "s") .. " you don't have", 0.27) end
-  if b > 0 then add("Your copy has " .. b .. " commit" .. (b == 1 and "" or "s") .. " it lacks", 0.27) end
-  if day then
-    add((AMU_FIND.d10(fork.last_commit_at) and "Last change: " or "Last push: ") .. day, 0.27)
-  end
-  if cur and cur.date then addw("Your copy: " .. cur.date .. " (" .. cur.how .. ")", 0.25, nil, 2) end
-  add("(compared with the copy you have installed)", 0.23)
+  if win ~= nil and win == fork then add("Most recently updated copy (commit or release)", 0.27, green) end
+  divider()
 
+  -- 1. the numbers, colour coded: green = you are missing it, orange = only your copy has it
+  local a, b = fork.commits_ahead or 0, fork.commits_behind or 0
+  if a > 0 then bullet(a .. " new commit" .. (a == 1 and "" or "s") .. " you don't have", 0.27, green, green) end
+  if b > 0 then bullet("Your copy has " .. b .. " commit" .. (b == 1 and "" or "s") .. " it lacks", 0.27, orange, orange) end
+
+  -- 2. dates on one small grey line
+  local bits = {}
+  if day then bits[#bits + 1] = (AMU_FIND.d10(fork.last_commit_at) and "Last change " or "Last push ") .. day end
+  if cur and cur.date then bits[#bits + 1] = "Your copy " .. cur.date end
+  if #bits > 0 then add(table.concat(bits, "   |   "), 0.24, grey) end
+  divider()
+
+  -- 3. the actual changes, one bullet each
+  add("What changed:", 0.27, blue)
   local notes = AMU_FIND.fork_notes(fork)
   local shown = 0
   for _, t in ipairs(notes) do
     if shown < 5 then
-      local ls = AMU_FIND.wrap(t, 0.27, maxw - 0.3, 2)
-      for li, ln in ipairs(ls) do add((li == 1 and "\226\128\162 " or "   ") .. ln, 0.27) end
+      bullet(t, 0.26, nil, blue)
       shown = shown + 1
     end
   end
-  if shown == 0 then addw(AMU_FIND.fork_fallback(fork), 0.27, nil, 2) end
+  if shown == 0 then bullet(AMU_FIND.fork_fallback(fork), 0.26, nil, blue) end
+  add("(compared with the copy you have installed)", 0.21, grey)
 
   local rel = tostring(fork.latest_release_tag or "")
   if rel ~= "" then
+    divider()
     local rd = AMU_FIND.d10(fork.latest_release_at)
     add("Latest release: " .. rel .. (rd and ("  (" .. rd .. ")") or ""), 0.27, blue)
   end
