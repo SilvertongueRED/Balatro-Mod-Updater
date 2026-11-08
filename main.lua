@@ -3996,6 +3996,7 @@ amu_extra_tabs_raw = function()
       label = "Fork Finder",
       tab_definition_function = function()
         if not amu_fork_suggestions then amu_fork_suggestions = load_fork_suggestions() end
+        if not amu_fork_scanning then pcall(function() amu_fork_status.text = amu_fork_summary() end) end
         AMU_TOKEN_UI.init()
         G.FUNCS.amu_token_flash()
         amu_fork_filter_label.text = amu_fork_filter_text()
@@ -4944,7 +4945,10 @@ end
 load_fork_suggestions = function()
   local mod_path = amu_mod_path()
   if mod_path == "" then return nil end
-  local data = read_all(join_path(mod_path, "fork_suggestions.json"))
+  -- "Show every fork" reads the last every-fork scan, so a newer-only scan in between does not wipe it.
+  local data
+  if config.fork_newer_only == false then data = read_all(join_path(mod_path, "fork_suggestions_all.json")) end
+  data = data or read_all(join_path(mod_path, "fork_suggestions.json"))
   if not data then return nil end
   return decode_json(data)
 end
@@ -5359,8 +5363,13 @@ amu_fork_summary = function()
     if hidden > 0 then text = text .. "  [" .. hidden .. " translation(s) hidden]" end
   end
   local mode = amu_fork_suggestions.scan_mode
+  local when = tostring(amu_fork_suggestions.checked_at or ""):match("^(%d%d%d%d%-%d%d%-%d%d)T(%d%d:%d%d)")
+  if when then
+    local d, t = tostring(amu_fork_suggestions.checked_at):match("^(%d%d%d%d%-%d%d%-%d%d)T(%d%d:%d%d)")
+    text = text .. "  - last scan " .. d .. " " .. t .. ((mode == "newer") and " (newer only)" or " (every fork)")
+  end
   if config.fork_newer_only == false and mode == "newer" then
-    text = text .. "  (last scan: newer only - Scan Now for every fork)"
+    text = text .. " - Scan Now for every fork"
   end
   return text
 end
@@ -5368,6 +5377,7 @@ end
 G.FUNCS.amu_fork_filter = function(e)
   config.fork_newer_only = (config.fork_newer_only == false) and true or false
   pcall(AMU_UI.save)
+  if not amu_fork_scanning then amu_fork_suggestions = load_fork_suggestions() or amu_fork_suggestions end
   amu_fork_filter_label.text = amu_fork_filter_text()
   AMU_FORK_PAGE = 1
   if not amu_fork_scanning then amu_fork_status.text = amu_fork_summary() end

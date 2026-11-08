@@ -134,6 +134,7 @@ $crashReportPath       = Join-Path $selfDirResolved "_crash_rollback_report.json
 # (put back / keep). Written by main.lua (or by this script), answered in game or by "Undo last update.bat".
 $crashPendingPath      = Join-Path $selfDirResolved "_crash_pending.json"
 $forkSuggestionsPath   = Join-Path $selfDirResolved "fork_suggestions.json"
+$forkSuggestionsAllPath = Join-Path $selfDirResolved "fork_suggestions_all.json"   # last "every fork" scan, kept so it survives a newer-only scan
 
 
 # The "no update source" and "folder name out of date" lists come from the last full update check. Keep them while this
@@ -416,7 +417,7 @@ function Backup-Folder([string]$folderPath, [string]$folderName) {
 $script:SelfKeepNames = @(
   "config.lua", "autoupdater_config.json", "changelogs.json", "toggle_snapshot.json",
   "update.json", "update.json.off", ".autoupdater_state.json", ".framework_state.json",
-  "fork_suggestions.json", "last_run.json", "_recently_updated.json", "_crash_pending.json", "launcher_debug.json",
+  "fork_suggestions.json", "fork_suggestions_all.json", "last_run.json", "_recently_updated.json", "_crash_pending.json", "launcher_debug.json",
   "pending_apply_log.json", "pending_apply.json", "_pending_framework_updates",
   "update_timing_detail.txt", "_gh_cache", "_framework_backups",
   "pin_versions.json", "_pin_released.json", ".game_state.json", "ui_state.json"
@@ -2191,7 +2192,9 @@ function Check-Forks() {
   # whole mods the player ignores: never scanned (no GitHub calls), their last results are kept so they can be un-ignored
   $ignoreMods = @{}
   foreach ($ig in @($config.fork_ignore_mods)) { if ($ig -is [string] -and $ig.Trim() -ne "") { $ignoreMods[$ig.Trim().ToLower()] = $true } }
-  $prevSug = Read-JsonIfExists $forkSuggestionsPath
+  $prevSug = $null
+  if ($AllForks) { $prevSug = Read-JsonIfExists $forkSuggestionsAllPath }
+  if (-not $prevSug) { $prevSug = Read-JsonIfExists $forkSuggestionsPath }
   $suggestions = @{
     checked_at  = (Get-Date).ToString("o")
     scan_mode   = $(if ($AllForks) { "all" } else { "newer" })
@@ -2388,7 +2391,10 @@ function Check-Forks() {
   elseif ($hasToken) { $suggestions.token_status = "ok" }
   else { $suggestions.token_status = "none" }
 
-  try { Save-JsonNoBom $forkSuggestionsPath $suggestions } catch {
+  try {
+    Save-JsonNoBom $forkSuggestionsPath $suggestions
+    if ($AllForks -and -not $script:forkBadToken) { Save-JsonNoBom $forkSuggestionsAllPath $suggestions }
+  } catch {
     $summary.errors += "Failed to write fork_suggestions.json: $($_.Exception.Message)"
   }
 }

@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.10
+- Changed: the Fork Finder keeps the last every-fork scan across game restarts and across newer-only scans, and the status line now shows when the list was last scanned (date and time, and whether it was a newer-only or every-fork scan). The list is filled the moment you open the tab, no rescan needed.
+
 ### 1.0.9
 - Fixed: updating a git mod failed with "untracked working tree files would be overwritten" when you had a loose file (like release-notes/v5.0.1.md) that upstream then committed. The Updater now stashes just those files (recoverable in git stash list), retries the pull, and notes it.
 
