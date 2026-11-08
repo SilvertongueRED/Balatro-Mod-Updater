@@ -11,6 +11,8 @@ param(
   # A backup name, "steam" (= back to the version Steam has installed) or "interactive" (ask in this console).
   [string]$UseGameBackup = "",
   [switch]$CheckForks,
+  # With -CheckForks: look at every recently active fork (Fork Finder set to "Show all forks"). Without it only forks that could be newer than the installed copy are compared.
+  [switch]$AllForks,
   [string]$SwitchModName = "",
   [string]$SwitchToForkRepo = "",
   [string]$SwitchBackModName = "",
@@ -249,7 +251,11 @@ function Get-GhHeaders() {
 # GitHub call fail with 401 (releases, Steamodded, Lovely). So a rejected token is left out for this run (updates then work
 # anonymously, 60 checks/hour) and last_run.json says github_token_bad so the game can ask for a new one.
 $script:ghTokenBad = $false
-if ($config.github_token -and ([string]$config.github_token).Trim() -ne "") {
+# Switching a mod to a fork (or back) and putting mods back never call the GitHub API, so they skip this check: it is a network
+# round trip that can take seconds (up to the 10 second timeout when GitHub answers slowly), and the game's "Restart now / Later"
+# window only opens once the script has finished.
+$script:skipTokenCheck = ($SwitchModName -ne "" -or $SwitchBackModName -ne "" -or $RollbackRecent)
+if (-not $script:skipTokenCheck -and $config.github_token -and ([string]$config.github_token).Trim() -ne "") {
   try {
     Invoke-RestMethod -Uri "https://api.github.com/rate_limit" -Headers (Get-GhHeaders) -TimeoutSec 10 | Out-Null
   } catch {
@@ -272,6 +278,7 @@ $script:ghCacheHits = 0      # GitHub said "unchanged": the saved answer was reu
 $script:ghCacheFresh = 0     # fresh answers downloaded and saved
 $script:forkEntryReused = 0  # fork comparisons reused from the last scan (nothing pushed since)
 $script:forkEntryBuilt = 0   # fork comparisons made fresh
+$script:forkUnrelated = 0     # repos with no common history with the installed copy (skipped, not an error)
 $script:gitSecTotal = 0.0    # seconds spent inside git commands (all of them)
 $script:gitNetSec = 0.0      # ...of which git fetch / pull / ls-remote / clone (the ones that talk to the internet)
 $script:gitCalls = 0
@@ -1358,7 +1365,7 @@ function Run-Git([string]$folderPath, [string[]]$gitArgs) {
     return @{ out = $out; code = $code }
   } finally {
     $ErrorActionPreference = $old
-    try { $script:gitSecTotal += $swGit.Elapsed.TotalSeconds; $script:gitCalls++; if ($gitArgs.Count -gt 0 -and $gitArgs[0] -in @("fetch","pull","ls-remote","clone")) { $script:gitNetSec += $swGit.Elapsed.TotalSeconds } } catch {}
+    try { $script:gitSecTotal += $swGit.Elapsed.TotalSeconds; $script:gitCalls++; if ($gitArgs.Count -gt 0 -and (($gitArgs -contains "fetch") -or ($gitArgs[0] -in @("pull","ls-remote","clone")))) { $script:gitNetSec += $swGit.Elapsed.TotalSeconds } } catch {}
   }
 }
 
@@ -2008,7 +2015,7 @@ function New-ForkEntry([string]$kind, $info, [string]$installedRepo, [string]$in
   # (Only the latest release tag is asked again, since publishing a release does not change the push time.)
   $entryFile = $null
   if ($config.use_github_cache -ne $false -and $script:forkInstPushed -and $info.pushed_at) {
-    $ekey = "forkentry|$kind|$installedRepo|$installedBranch|$($script:forkInstPushed)|$full|$(Format-ForkDate $info.pushed_at)"
+    $ekey = "forkentry3|$kind|$installedRepo|$installedBranch|$($script:forkInstPushed)|$full|$(Format-ForkDate $info.pushed_at)"
     $entryFile = Join-Path $script:ghCacheDir ("fe_" + (Get-GhCacheKey $ekey) + ".json")
     $prev = Read-JsonIfExists $entryFile
     if ($prev) {
@@ -2018,6 +2025,7 @@ function New-ForkEntry([string]$kind, $info, [string]$installedRepo, [string]$in
       try {
         $relNow = Get-GhJson "https://api.github.com/repos/$full/releases/latest" $headers
         $prev.latest_release_tag   = if ($relNow.tag_name) { [string]$relNow.tag_name } else { "" }
+        $prev | Add-Member -NotePropertyName latest_release_at -NotePropertyValue $(if ($relNow.published_at) { Format-ForkDate $relNow.published_at } else { "" }) -Force
         $prev.latest_release_notes = if ($relNow.body)     { [string]$relNow.body     } else { "" }
       } catch {}
       return $prev
@@ -2025,7 +2033,14 @@ function New-ForkEntry([string]$kind, $info, [string]$installedRepo, [string]$in
   }
   $script:forkEntryBuilt++
 
-  $compare = Get-GhJson "https://api.github.com/repos/$installedRepo/compare/${installedBranch}...${owner}:${branch}" $headers
+  # A 404 here means "No common ancestor": that repo and the installed copy have unrelated histories (one was re-created or its
+  # history rewritten), so there is nothing to compare. That is not a scan error: skip it quietly.
+  try {
+    $compare = Get-GhJson "https://api.github.com/repos/$installedRepo/compare/${installedBranch}...${owner}:${branch}" $headers
+  } catch {
+    if ((Get-HttpStatus $_) -eq 404) { $script:forkUnrelated++; return $null }
+    throw
+  }
   $ahead   = if ($compare.ahead_by)  { [int]$compare.ahead_by  } else { 0 }
   $behind  = if ($compare.behind_by) { [int]$compare.behind_by } else { 0 }
   if ($ahead -eq 0) {
@@ -2040,8 +2055,16 @@ function New-ForkEntry([string]$kind, $info, [string]$installedRepo, [string]$in
 
   # Newest commit messages first (the compare API lists oldest first), first line only, up to 20.
   $changelog = @()
+  $lastCommitAt = ""
   if ($compare.commits) {
     $commits = @($compare.commits)
+    # Date of the newest commit the fork has that the installed copy lacks (the repo's push date also moves for syncs and other
+    # branches, so it can look newer than the code is). Only trusted when the compare list is complete.
+    if ($commits.Count -ge 1 -and [int]$compare.total_commits -le $commits.Count) {
+      $newest = $commits[$commits.Count - 1]
+      $cd = if ($newest.commit.committer.date) { $newest.commit.committer.date } else { $newest.commit.author.date }
+      if ($cd) { $lastCommitAt = Format-ForkDate $cd }
+    }
     [array]::Reverse($commits)
     $limit = [Math]::Min($commits.Count, 20)
     for ($i = 0; $i -lt $limit; $i++) {
@@ -2049,6 +2072,17 @@ function New-ForkEntry([string]$kind, $info, [string]$installedRepo, [string]$in
       if ($msg) { $changelog += ($msg -split "`n")[0].Trim() }
     }
   }
+
+  # The day the installed copy's own newest commit was made (the compare answer names the base commit): lets the game say which
+  # copy is the most recently changed one.
+  $instHeadAt = ""
+  try {
+    $bc = $compare.base_commit
+    if ($bc) {
+      $hd = if ($bc.commit.committer.date) { $bc.commit.committer.date } else { $bc.commit.author.date }
+      if ($hd) { $instHeadAt = Format-ForkDate $hd }
+    }
+  } catch {}
 
   # How much of the change is translation files?
   $filesChanged = 0
@@ -2061,11 +2095,12 @@ function New-ForkEntry([string]$kind, $info, [string]$installedRepo, [string]$in
   }
 
   # Latest GitHub release (best-effort)
-  $relTag = ""; $relNotes = ""
+  $relTag = ""; $relNotes = ""; $relAt = ""
   try {
     $rel      = Get-GhJson "https://api.github.com/repos/$full/releases/latest" $headers
     $relTag   = if ($rel.tag_name) { [string]$rel.tag_name } else { "" }
     $relNotes = if ($rel.body)     { [string]$rel.body     } else { "" }
+    $relAt    = if ($rel.published_at) { Format-ForkDate $rel.published_at } else { "" }
   } catch {}
 
   $result = @{
@@ -2074,6 +2109,7 @@ function New-ForkEntry([string]$kind, $info, [string]$installedRepo, [string]$in
     kind                 = $kind
     is_upstream          = ($kind -eq "original")
     pushed_at            = (Format-ForkDate $info.pushed_at)
+    last_commit_at       = $lastCommitAt
     stars                = [int]$info.stargazers_count
     commits_ahead        = $ahead
     commits_behind       = $behind
@@ -2082,6 +2118,8 @@ function New-ForkEntry([string]$kind, $info, [string]$installedRepo, [string]$in
     loc_files            = $locFiles
     latest_release_tag   = $relTag
     latest_release_notes = $relNotes
+    latest_release_at    = $relAt
+    installed_head_at    = $instHeadAt
     html_url             = [string]$info.html_url
   }
   if ($entryFile) {
@@ -2124,6 +2162,7 @@ function Check-Forks() {
   $prevSug = Read-JsonIfExists $forkSuggestionsPath
   $suggestions = @{
     checked_at  = (Get-Date).ToString("o")
+    scan_mode   = $(if ($AllForks) { "all" } else { "newer" })
     suggestions = @{}
   }
   $script:forkRateLimited = $false
@@ -2173,6 +2212,8 @@ function Check-Forks() {
         # The copy the user has installed right now. Everything else is compared against it.
         $instInfo        = Get-GhJson "https://api.github.com/repos/$ownerRepo" $ghHeaders
         $script:forkInstPushed = Format-ForkDate $instInfo.pushed_at
+        $instPushedDt = $null
+        try { if ($instInfo.pushed_at) { $instPushedDt = [datetime]$instInfo.pushed_at } } catch {}
         $installedRepo   = [string]$instInfo.full_name
         $installedBranch = if ($instInfo.default_branch) { [string]$instInfo.default_branch } else { "main" }
         $installedIsFork = [bool]$instInfo.fork
@@ -2236,8 +2277,11 @@ function Check-Forks() {
 
           # Drop abandoned forks and forks that were never pushed to since being created, newest push first,
           # and only compare the top few so a scan stays inside the GitHub API limit.
+          # Newer-only scan (the default): a fork last pushed before the installed copy's last push cannot be newer, so it is not
+          # compared. "Show all forks" scan (-AllForks): every fork pushed to since it was created, however old.
           $liveForks = @($list | Where-Object {
-              $_.pushed_at -and ([datetime]$_.pushed_at) -ge $staleThreshold -and ([datetime]$_.pushed_at) -gt ([datetime]$_.created_at)
+              $_.pushed_at -and ([datetime]$_.pushed_at) -gt ([datetime]$_.created_at) -and
+              ($AllForks -or (([datetime]$_.pushed_at) -ge $staleThreshold -and (-not $instPushedDt -or ([datetime]$_.pushed_at) -ge $instPushedDt)))
             } | Sort-Object { [datetime]$_.pushed_at } -Descending)
           # forks ticked "Ignore scans" are not compared and do not use up the few comparisons a scan makes per mod
           foreach ($f in @($liveForks | Where-Object { $ignoreSet.ContainsKey(("$([string]$_.owner.login)/$($_.name)").ToLower()) } | Select-Object -First 30)) {
@@ -2246,7 +2290,7 @@ function Check-Forks() {
             $seen[$fnI.ToLower()] = $true
             $activeForks += (New-IgnoredForkStub $t.kind $f)
           }
-          $cands = @($liveForks | Where-Object { -not $ignoreSet.ContainsKey(("$([string]$_.owner.login)/$($_.name)").ToLower()) } | Select-Object -First $ForkMaxComparesPerMod)
+          $cands = @($liveForks | Where-Object { -not $ignoreSet.ContainsKey(("$([string]$_.owner.login)/$($_.name)").ToLower()) } | Select-Object -First $(if ($AllForks) { 25 } else { $ForkMaxComparesPerMod }))
 
           foreach ($f in $cands) {
             if ($script:forkRateLimited -or $script:forkBadToken) { break }
@@ -2263,10 +2307,26 @@ function Check-Forks() {
         if ($activeForks.Count -gt 0) {
           # Newest push first across every kind of fork
           $activeForks = @($activeForks | Sort-Object { [string]$_.pushed_at } -Descending)
+          # When was the installed copy last changed? Its newest commit (from the comparisons) and, when it is not a git clone, its
+          # latest release. The game shows this next to each fork so the newest copy is easy to see.
+          $instHead = ""
+          foreach ($ae in $activeForks) { if (-not $instHead -and $ae.installed_head_at) { $instHead = [string]$ae.installed_head_at } }
+          $instRelTag = ""; $instRelAt = ""
+          if (-not (Test-Path -LiteralPath (Join-Path $path ".git"))) {
+            try {
+              $ir = Get-GhJson "https://api.github.com/repos/$installedRepo/releases/latest" $ghHeaders
+              if ($ir.tag_name)     { $instRelTag = [string]$ir.tag_name }
+              if ($ir.published_at) { $instRelAt  = Format-ForkDate $ir.published_at }
+            } catch {}
+          }
           $suggestions.suggestions[$name] = @{
             current_repo     = $rootRepo
             installed_repo   = $installedRepo
             installed_is_fork = $installedIsFork
+            installed_head_at     = $instHead
+            installed_pushed_at   = $script:forkInstPushed
+            installed_release_at  = $instRelAt
+            installed_release_tag = $instRelTag
             forks            = $activeForks
           }
         }
@@ -2393,12 +2453,32 @@ function Repair-ForkLovelyDeps() {
   }
 }
 
+# Step times of a fork switch (seconds since the script started), appended to update_timing_history.txt so a slow switch can be explained.
+$script:switchMarks = New-Object System.Collections.ArrayList
+function Mark-SwitchStep([string]$what) {
+  try { [void]$script:switchMarks.Add(("{0} {1:N1}s" -f $what, $script:swTotal.Elapsed.TotalSeconds)) } catch {}
+}
+function Save-SwitchTiming([string]$mode, [string]$modName) {
+  try {
+    $line = "{0}  switch {1} {2}  total {3:N1}s  git {4:N1}s (network {5:N1}s)  steps: {6}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $mode, $modName, $script:swTotal.Elapsed.TotalSeconds, $script:gitSecTotal, $script:gitNetSec, ($script:switchMarks -join ", ")
+    Add-Content -LiteralPath (Join-Path $selfDirResolved "update_timing_history.txt") -Value $line -Encoding UTF8
+  } catch {}
+}
+
 function Switch-ToFork([string]$modName, [string]$forkRepo) {
   $modPath = Join-Path $modsDirResolved $modName
   if (-not (Test-Path -LiteralPath $modPath)) { throw "Mod folder not found: $modPath" }
 
+  # Picking the repo this mod was originally installed from is a Switch Back: do exactly that, so no leftover "switched" state stays behind.
+  $st0 = Read-JsonIfExists (Join-Path $modPath ".autoupdater_state.json")
+  if ($st0 -and $st0.original_repo -and ([string]$st0.original_repo).ToLower() -eq $forkRepo.Trim().ToLower()) {
+    Switch-BackFork $modName
+    return
+  }
+
   # Back up current version before switching
   Backup-Folder $modPath $modName | Out-Null
+  Mark-SwitchStep "backup"
 
   $statePath = Join-Path $modPath ".autoupdater_state.json"
   $state     = Read-JsonIfExists $statePath
@@ -2421,12 +2501,14 @@ function Switch-ToFork([string]$modName, [string]$forkRepo) {
     $setUrlRes = Run-Git $modPath @("remote", "set-url", "origin", $newUrl)
     if ($setUrlRes.code -ne 0) { throw "Failed to set remote URL: " + (Short-Out $setUrlRes.out) }
 
-    $fetchRes = Run-Git $modPath @("fetch", "origin")
+    $fetchRes = Run-Git $modPath @("-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch", "--no-tags", "origin")
     if ($fetchRes.code -ne 0) { throw "Failed to fetch from fork: " + (Short-Out $fetchRes.out) }
+    Mark-SwitchStep "fetch"
 
     $forkBranch = Get-GitDefaultBranch $modPath
     $resetRes   = Run-Git $modPath @("reset", "--hard", "origin/$forkBranch")
     if ($resetRes.code -ne 0) { throw "Failed to reset to fork HEAD: " + (Short-Out $resetRes.out) }
+    Mark-SwitchStep "reset"
 
     $state | Add-Member -NotePropertyName "fork_repo"    -NotePropertyValue $forkRepo -Force
     $state | Add-Member -NotePropertyName "switched_at"  -NotePropertyValue (Get-Date).ToString("o") -Force
@@ -2455,8 +2537,10 @@ function Switch-ToFork([string]$modName, [string]$forkRepo) {
   }
 
   $summary.updated_mods += "$modName (switched to fork: $forkRepo)"
+  Mark-SwitchStep "state saved"
   # Some forks ask for a Lovely version that does not exist; make the fork loadable with the Lovely we have.
   Repair-LovelyDependency $modPath $modName
+  Mark-SwitchStep "lovely check"
 }
 
 function Switch-BackFork([string]$modName) {
@@ -2470,6 +2554,7 @@ function Switch-BackFork([string]$modName) {
 
   # Back up current fork version before reverting
   Backup-Folder $modPath $modName | Out-Null
+  Mark-SwitchStep "backup"
 
   $gitDir = Join-Path $modPath ".git"
   if (Test-Path -LiteralPath $gitDir) {
@@ -2477,12 +2562,14 @@ function Switch-BackFork([string]$modName) {
     $setUrlRes = Run-Git $modPath @("remote", "set-url", "origin", $newUrl)
     if ($setUrlRes.code -ne 0) { throw "Failed to set remote URL: " + (Short-Out $setUrlRes.out) }
 
-    $fetchRes = Run-Git $modPath @("fetch", "origin")
+    $fetchRes = Run-Git $modPath @("-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch", "--no-tags", "origin")
     if ($fetchRes.code -ne 0) { throw "Failed to fetch from original: " + (Short-Out $fetchRes.out) }
+    Mark-SwitchStep "fetch"
 
     $origBranch = Get-GitDefaultBranch $modPath
     $resetRes   = Run-Git $modPath @("reset", "--hard", "origin/$origBranch")
     if ($resetRes.code -ne 0) { throw "Failed to reset to original HEAD: " + (Short-Out $resetRes.out) }
+    Mark-SwitchStep "reset"
 
     $state | Add-Member -NotePropertyName "fork_repo"     -NotePropertyValue $null -Force
     $state | Add-Member -NotePropertyName "original_repo" -NotePropertyValue $null -Force
@@ -2508,6 +2595,7 @@ function Switch-BackFork([string]$modName) {
 if ($SwitchBackModName -ne "") {
   try {
     Switch-BackFork $SwitchBackModName
+    Save-SwitchTiming "back" $SwitchBackModName
   } catch {
     $summary.errors += "ERROR switching back ${SwitchBackModName}: $($_.Exception.Message)"
   }
@@ -2519,6 +2607,7 @@ if ($SwitchBackModName -ne "") {
 if ($SwitchModName -ne "" -and $SwitchToForkRepo -ne "") {
   try {
     Switch-ToFork $SwitchModName $SwitchToForkRepo
+    Save-SwitchTiming "to-fork" $SwitchModName
   } catch {
     $summary.errors += "ERROR switching fork ${SwitchModName}: $($_.Exception.Message)"
   }

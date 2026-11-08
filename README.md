@@ -9,7 +9,16 @@ It notices changes to a mod you installed from its Git page, its GitHub Releases
 
 Auto-checking at startup is off by default. Turn it on in the mod's config tab.
 
-## What's new in 0.8.5
+## What's new in 1.0.0
+This is the first 1.0 release: it is the 0.8.x series (crash protection, saved game copies, Fork Finder) polished and bug-fixed.
+
+- **A small pop-up in the bottom right when a check or a scan ends.** After an update check (at startup or **Check for updates now**) that finds nothing to update, a box says **All mods up to date!** for a few seconds. After a fork scan it says **Fork scan done: no new forks**, or, when forks that were not in the list before turned up, **N new forks found**: click that box and it opens **Mods > Mod Updater > Fork Finder**. It stays out of the way (it is not shown when the results window or an error screen appears instead) and works in a run too. Mouse click only for now.
+- **The fork scan follows the Fork Finder filter.** With the default **Show newer forks only** the scan only compares forks that were pushed to since your installed copy's last push (within 12 months), so its limited number of comparisons goes to forks that can actually be newer. With **Show all forks** the scan looks at every fork that was pushed to after it was created, with no age cutoff, and compares up to 25 per source repo. The scan remembers which mode it ran in (`scan_mode` in `fork_suggestions.json`); if you switch to **Show all forks** after a newer-only scan, the status line tells you to press **Scan Now** again. A full scan makes more GitHub requests, so use a token.
+- **Fork Finder no longer gets stuck on "Scanning for forks...".** Balatro clears its waiting events when a run starts, which made the Updater forget a running scan (the scan finished but the screen never said so). The scan, switching a mod to a fork and back, a single-mod check, restoring a backup, restoring Steamodded or Lovely, and the game backup run now survive starting a run. A scan marked as running for over 6 minutes no longer blocks a new one.
+- **"No common ancestor" is not a scan error any more.** A fork whose history is unrelated to your copy (a re-created repo, for example Bunco's original) used to show `Fork scan: error comparing ... 404`. It is now skipped quietly.
+- **Switching to the original is Switch Back.** If the fork you pick is the mod's original repo, the button switches back to your original copy instead of cloning it as a "fork" and leaving its state behind.
+- **Switching to a fork or back is faster.** The git fetch skips background maintenance and tags. `update_timing_history.txt` now has a line per switch with the time of each step, so a slow switch can be traced.
+- **Checking... and Shuffling mods... end together.** The Checking... line under **Check for updates now** and the Shuffling animation on the main menu run while any check (startup or manual) runs, and stop at the same moment. The line is 50% bigger and the front page text, the Fork Finder header spacing and the **Hold B or press Esc** hint were refreshed.
 - **A pinned mod is tried again when its source has something newer.** If you put a mod back (Restore & Pin, or the crash screen), the Updater remembers which version you left. On every check it looks at the source: if there is a different, newer version it releases the pin and updates straight to the **latest** version, not just the next one. If the source still has nothing newer, the mod stays put. Steamodded and Lovely work the same way. Switch it off with **Retry pinned mods when newer** in Config (`pin_retry_newer` in `autoupdater_config.json`), and the pin then stays and the results just mention that a newer version exists.
 - **Always the latest version.** Every mod type jumps straight to the newest version in one update, however many versions it is behind.
 - **Saved copies of the game, and automatic protection from a Steam update.**
@@ -30,6 +39,7 @@ Auto-checking at startup is off by default. Turn it on in the mod's config tab.
 - **Green and red names on Backups.** Balatro game files, Lovely Injector and Steamodded are green while they are on the newest version and red while a saved older copy is in use.
 - **The restart helper runs hidden.** It used to leave a PowerShell window open while the game restarted (Windows 11 ignores `-WindowStyle Hidden` for tasks). It now starts through a tiny script (`amu_restart_hidden.vbs` in the Balatro save folder) with no window.
 - New test files: `Test pins and latest.bat`, `Test game backup.bat` and `Test fork ignore.bat` (both run in a throw-away folder in your temp folder and never touch your real Mods or game folders).
+- `Test startup crash.bat` rehearses the "an update crashed the game on startup" rescue in the REAL game: it makes a throw-away test mod crash Balatro on purpose, then you check that the crash recovery screen offered to put back the test mod, Steamodded and Lovely, and that it pinned them. Steamodded and Lovely are only ever put back as exact copies of what you have installed; the menu has Arm / Check / Clean up.
 
 ## What's new in 0.8.4
 - **Hold S clears the search, even while you are typing.** On Mod Toggles, Backups and Fork Finder, holding **S** on the keyboard for about half a second now empties the search box. Before, it only worked when the cursor was outside the box. A quick tap of S still jumps into the box, and holding **R3** on a controller still clears it.
@@ -139,15 +149,15 @@ Auto-checking at startup is off by default. Turn it on in the mod's config tab.
 - **The game reaches the main menu (after one failed start):** you get the **Crash Detected** question described in "What's new in 0.8.1". Nothing is changed until you answer.
 - **Neither screen shows up:** close Balatro and double-click **`Undo last update.bat`** in this folder. It lists the mods from the last update. Press **Enter** to put all of them back, type numbers like **1,3** for only some, or **K** to keep everything.
 - Put-back mods are **pinned**: they are not updated again until you unpin them in the **Backups** tab, or until their source has a different (newer) version and **Retry pinned mods when newer** is on.
-- **A Steam update of Balatro broke your mods:** the Updater switches back to the saved copy of the old game by itself and freezes updates (see 0.8.5). If you need to do it by hand, close Balatro and double-click **`Use backed up game.bat`**.
+- **A Steam update of Balatro broke your mods:** the Updater switches back to the saved copy of the old game by itself and freezes updates (see 1.0.0). If you need to do it by hand, close Balatro and double-click **`Use backed up game.bat`**.
 
 ## Optional settings (`autoupdater_config.json`)
 - `github_token`: raises GitHub's limit from 60 to 5000 checks per hour. You don't need to edit this file: in the **Fork Finder** tab click **GitHub token** and follow the steps (free, read-only, takes about a minute).
 - `report_untracked`: `false` stops listing untracked mods.
-- `game_backup` (default `true`), `game_backup_keep` (default `3`), `game_auto_switch` (default `true`), `allow_updates_on_backup_game` (default `false`), `pin_retry_newer` (default `true`): see 0.8.5.
+- `game_backup` (default `true`), `game_backup_keep` (default `3`), `game_auto_switch` (default `true`), `allow_updates_on_backup_game` (default `false`), `pin_retry_newer` (default `true`): see 1.0.0.
 
 ## Fork Finder and the GitHub token
-Fork Finder looks for forks of your mods that have newer work. Each scan makes many GitHub requests, and GitHub only allows 60 per hour without a token, so a scan of a big mod list will stop early.
+Fork Finder looks for forks of your mods that have newer work (**Show newer forks only**, the default) or lists every recently active fork (**Show all forks**); **Scan Now** scans for whichever one is selected. Each scan makes many GitHub requests, and GitHub only allows 60 per hour without a token, so a scan of a big mod list will stop early.
 
 Fix (one time, about a minute):
 1. Open the **Fork Finder** tab and click **GitHub token**, then **Open GitHub page**.
