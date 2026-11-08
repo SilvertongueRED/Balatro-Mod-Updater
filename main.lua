@@ -4949,11 +4949,21 @@ end
 -- can show it right away; switch_pending[folder] is true only until the game restarts (it lives in memory), which is how the list tells
 -- "switched, restart to apply" from "restarted, you are on it now".
 AMU_FIND.switch_pending = AMU_FIND.switch_pending or {}
+-- back_now[folder] = the original repo you just pressed Switch Back to (memory only, like switch_pending). Before the restart the
+-- mod is still the fork on disk, but the lists already treat the original as the copy you run.
+AMU_FIND.back_now = AMU_FIND.back_now or {}
 function AMU_FIND.fork_now(folder)
   local src = config.mod_fork_source and config.mod_fork_source[folder]
   local r = type(src) == "table" and src.fork_repo or nil
   if type(r) == "string" and r ~= "" then return r end
+  local b = AMU_FIND.back_now[folder]
+  if type(b) == "string" and b ~= "" then return b end
   return nil
+end
+function AMU_FIND.fork_now_how(folder)
+  local src = config.mod_fork_source and config.mod_fork_source[folder]
+  if type(src) == "table" and src.fork_repo then return "the fork you use now" end
+  return "the original you switched back to"
 end
 function AMU_FIND.is_fork_now(folder, repo)
   local r = AMU_FIND.fork_now(folder)
@@ -5098,7 +5108,7 @@ get_fork_mod_entries = function(force_all, keep_tr)
         end
         -- on a fork: compare the other copies with that fork, not with the copy from before the switch
         local nd, ns = AMU_FIND.fork_now_day(folder_name)
-        if nd then cur = { date = nd, stamp = ns, how = "the fork you use now" } end
+        if nd then cur = { date = nd, stamp = ns, how = AMU_FIND.fork_now_how(folder_name) } end
       end
       local list = {}
       local on_now = newer_only and not AMU_FIND.switch_pending[folder_name]
@@ -5209,7 +5219,7 @@ function AMU_FORKIGN.row_tip(args)
   local cur = AMU_FIND.current_info(args and args.folder or "", entry)
   do
     local nd, ns = AMU_FIND.fork_now_day(args and args.folder or "")
-    if nd then cur = { date = nd, stamp = ns, how = "the fork you use now" } end
+    if nd then cur = { date = nd, stamp = ns, how = AMU_FIND.fork_now_how(args and args.folder or "") } end
   end
   local win = AMU_FIND.newest_pick(cur, entry.forks)
   local function addw(text, scale, colour, maxlines)
@@ -5228,10 +5238,10 @@ function AMU_FORKIGN.row_tip(args)
   local ign = 0
   for _, f in ipairs(entry.forks or {}) do if AMU_FORKIGN.is(f) then ign = ign + 1 end end
   if ign > 0 then add(ign .. " of them ignored by scans", 0.27) end
-  local src = config.mod_fork_source and config.mod_fork_source[args and args.folder or ""]
-  if src and src.fork_repo then
+  local now_repo = AMU_FIND.fork_now(args and args.folder or "")
+  if now_repo then
     local wait = AMU_FIND.switch_pending[args and args.folder or ""]
-    add("Using now: " .. tostring(src.fork_repo), 0.27, blue)
+    add("Using now: " .. tostring(now_repo), 0.27, blue)
     if wait then add("(restart to apply)", 0.27, blue) end   -- own line: on one line the hover box cut it off
   end
   addw("Press the Forks button to read about each fork and tick Ignore scans.", 0.26, nil, 2)
@@ -5455,6 +5465,7 @@ local function switch_to_fork(folder_name, fork_repo)
     switched_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
   }
   AMU_FIND.switch_pending[folder_name] = true   -- cleared by the restart (memory only)
+  AMU_FIND.back_now[folder_name] = nil
   pcall(write_ps1_config_overlay)
 
   local save_dir = love.filesystem.getSaveDirectory()
@@ -5501,6 +5512,7 @@ local function switch_to_fork(folder_name, fork_repo)
           else
             amu_fork_status.text = folder_name .. " switch error. See last_run.json."
           end
+          pcall(amu_reopen_if_open, "amu_fork_mod_list")   -- same rebuild the filter button does; the list alone kept the old state
           pcall(amu_update_areas, {
             ["amu_fork_mod_list"] = build_fork_mods_page(AMU_FORK_PAGE)
           })
@@ -5536,6 +5548,19 @@ local function switch_back_fork(folder_name)
     return
   end
 
+  -- which repo is "the original"? The saved source knows; else the scan's entry of kind original.
+  do
+    local st = config.mod_fork_source and config.mod_fork_source[folder_name]
+    local orig = type(st) == "table" and st.original_repo or nil
+    if not orig then
+      local d = amu_fork_suggestions and amu_fork_suggestions.suggestions and amu_fork_suggestions.suggestions[folder_name]
+      for _, f in ipairs(type(d) == "table" and d.forks or {}) do
+        if amu_fork_kind(f) == "original" then orig = f.repo; break end
+      end
+    end
+    if type(orig) == "string" and orig ~= "" then AMU_FIND.back_now[folder_name] = orig end
+    AMU_FIND.switch_pending[folder_name] = true   -- cleared by the restart (memory only)
+  end
   if config.mod_fork_source then config.mod_fork_source[folder_name] = nil end
   pcall(write_ps1_config_overlay)
 
@@ -5582,6 +5607,7 @@ local function switch_back_fork(folder_name)
           else
             amu_fork_status.text = folder_name .. " revert error. See last_run.json."
           end
+          pcall(amu_reopen_if_open, "amu_fork_mod_list")   -- same rebuild the filter button does; the list alone kept the old state
           pcall(amu_update_areas, {
             ["amu_fork_mod_list"] = build_fork_mods_page(AMU_FORK_PAGE)
           })
@@ -5694,6 +5720,7 @@ G.UIDEF.amu_fork_picker = function(ref)
 
   local is_switched   = config.mod_fork_source and config.mod_fork_source[folder] ~= nil
   local cur_fork_repo = is_switched and config.mod_fork_source[folder].fork_repo or nil
+  if not cur_fork_repo and AMU_FIND.switch_pending[folder] then cur_fork_repo = AMU_FIND.back_now[folder] end   -- just switched back
 
   local CARD_W = 8.2
   local rows = {}
@@ -5703,7 +5730,7 @@ G.UIDEF.amu_fork_picker = function(ref)
   local cur_info = AMU_FIND.current_info(folder, ref.scan)
   do
     local nd, ns = AMU_FIND.fork_now_day(folder)
-    if nd then cur_info = { date = nd, stamp = ns, how = "the fork you use now" } end
+    if nd then cur_info = { date = nd, stamp = ns, how = AMU_FIND.fork_now_how(folder) } end
   end
   local restart_pending = cur_fork_repo ~= nil and AMU_FIND.switch_pending[folder] == true
   local win = AMU_FIND.newest_pick(cur_info, forks)

@@ -157,6 +157,8 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 ## Changelog
 
 ### 1.0.4
+- Fixed: after **Switch Back** (to the original) the Fork Finder now knows you are on the original, like it does for a fork: the hover shows "Using now" with "(restart to apply)", your copy takes the original's date, and the original card says **Restart to apply**.
+- Fixed: after switching to a fork or back, the Fork Finder is rebuilt the same way the filter buttons rebuild it, so you no longer have to click the filter to see the right hover and list.
 - Fixed: during a run, the bottom-right pop-ups (**All mods up to date!**, **N new forks found**) now sit in the empty strip to the right of the deck, in the bottom right corner of the screen, and their text wraps to fit it. They no longer cover the deck or its counts. Outside a run they stay in the bottom right corner.
 - Fixed: the hover box on a Fork Finder row cut off "(restart to apply)" after you switched fork. It now has its own line.
 - Fixed: during a run, the list on the **Mod Toggles**, **Backups**, **Fork Finder** and **No Source** tabs could stay blank (the pager and counts were there, the rows were not) until a page was changed. The list now fills itself on the first frame instead of waiting in the game's busy event queue.
