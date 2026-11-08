@@ -1589,10 +1589,12 @@ function AMU_FIND.toast.show(text, opts)
         local unit = G.TILESIZE * G.TILESCALE
         local rmx = sw / unit - G.ROOM.T.x - G.TILE_W      -- empty margin right of the game area
         local rmy = sh / unit - G.ROOM.T.y - G.TILE_H      -- empty margin below the game area
-        local dright, dy = G.deck.T.x + G.deck.T.w, G.deck.T.y
+        -- the deck's area is wider than the card drawn in it: use the card's visible right edge (area centre + half a card)
+        local cw = tonumber(G.CARD_W) or 2.05
+        local dright, dy = G.deck.T.x + G.deck.T.w / 2 + cw / 2 + 0.05, G.deck.T.y
         if type(dy) == "number" and dy > G.TILE_H * 0.5 and dy < G.TILE_H and dright > G.TILE_W * 0.5 and dright < G.TILE_W + 0.5 then
-          strip = math.max(rmx + (G.TILE_W - dright) - 0.45, 1.1)
-          ox = math.max(rmx - 0.25, -0.4)
+          strip = math.min(math.max(rmx + (G.TILE_W - dright) - 0.35, 1.1), 4.0)
+          ox = math.max(rmx - 0.2, -0.4)
           oy = math.max(rmy - 0.25, -0.2)
         end
       end
@@ -3090,8 +3092,10 @@ function AMU_FIND.cfg_tip(title, lines)
     local rows = { { n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = {
       { n = G.UIT.T, config = { text = tostring(title), scale = 0.34, colour = G.C.BLUE or dark } } } } }
     for _, t in ipairs(lines or {}) do
+      local txt, col = t, dark
+      if type(t) == "table" then txt, col = t.text, t.colour or dark end   -- a line can be { text = ..., colour = ... }
       rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.01 }, nodes = {
-        { n = G.UIT.T, config = { text = tostring(t), scale = 0.27, colour = dark } } } }
+        { n = G.UIT.T, config = { text = tostring(txt), scale = 0.27, colour = col } } } }
     end
     return { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = {
       { n = G.UIT.C, config = { align = "cl", padding = 0.03 }, nodes = rows } } }
@@ -4681,7 +4685,7 @@ function AMU_FIND.current_info(folder, scan)
   if info and info.source == "git" then
     local loc = type(info.commits) == "table" and info.commits[1] and AMU_FIND.d10(info.commits[1].d) or nil
     if loc and head and head > loc then
-      out.date, out.how = head, "newest commit on GitHub (your git clone is older)"
+      out.date, out.how = head, "newest commit on GitHub; your downloaded copy may not have it yet"
       out.stamp = AMU_FIND.norm_stamp(scan.installed_head_at)
     elseif loc then
       out.date, out.how = loc, "last commit in your git clone"
@@ -5213,6 +5217,24 @@ function AMU_FORKIGN.row_tip(args)
     if n > 0 then
       local w = AMU_FORK_KIND[k].word
       parts[#parts + 1] = (k == "original" or k == "parent") and ("the " .. w) or (n .. " " .. w .. (n == 1 and "" or "s"))
+    end
+  end
+  do
+    -- the original and the parent are named (Owner/Name) like everywhere else in this menu
+    local named = {}
+    for _, k in ipairs({ "original", "parent" }) do
+      if (counts[k] or 0) > 0 then
+        for _, f in ipairs(entry.forks or {}) do
+          if amu_fork_kind(f) == k then named[k] = named[k] or tostring(f.repo or "") end
+        end
+      end
+    end
+    for i, part in ipairs(parts) do
+      for _, k in ipairs({ "original", "parent" }) do
+        if part == "the " .. AMU_FORK_KIND[k].word and named[k] and named[k] ~= "" then
+          parts[i] = AMU_FORK_KIND[k].word .. " (" .. named[k] .. ")"
+        end
+      end
     end
   end
   add("Found: " .. (#parts > 0 and table.concat(parts, ", ") or "nothing newer"), 0.28)
@@ -5748,7 +5770,7 @@ G.UIDEF.amu_fork_picker = function(ref)
     else
       cur_tip_lines[1] = "Run Scan Now to find out when your copy last changed."
     end
-    if cur_newest then cur_tip_lines[#cur_tip_lines + 1] = "Your copy is the most recently updated one." end
+    if cur_newest then cur_tip_lines[#cur_tip_lines + 1] = { text = "Your copy is the most recently updated one.", colour = AMU_FIND.NEWEST_DARK } end
     cur_tip_lines[#cur_tip_lines + 1] = "A green name marks the most recently updated copy."
     local cur_tip = AMU_FIND.cfg_tip("Your current copy", cur_tip_lines)
     local cur_nodes = {
@@ -5821,7 +5843,16 @@ G.UIDEF.amu_fork_picker = function(ref)
     if (fork.stars or 0) > 0 then info_parts[#info_parts + 1] = "\226\152\133 " .. fork.stars end
     local date_str = AMU_FIND.fork_date(fork)
     if date_str then info_parts[#info_parts + 1] = date_str end
-    local info_str = amu_fit("   " .. table.concat(info_parts, "   "), 0.27, CARD_W - 0.5 - amu_text_w(kind_tag, 0.27))
+    local info_avail = CARD_W - 0.5 - amu_text_w(kind_tag, 0.27)
+    local info_scale = 0.27
+    local info_str = "   " .. table.concat(info_parts, "   ")
+    -- never cut the date off: tighten the gaps first, then use a smaller size
+    if amu_text_w(info_str, info_scale) > info_avail then info_str = " " .. table.concat(info_parts, "  ") end
+    for _, sc in ipairs({ 0.25, 0.23, 0.21 }) do
+      if amu_text_w(info_str, info_scale) <= info_avail then break end
+      info_scale = sc
+    end
+    info_str = amu_fit(info_str, info_scale, info_avail)
 
     local display_name, name_colour = tostring(fork.repo or ""), G.C.UI.TEXT_LIGHT
     if is_upstream then
@@ -5854,7 +5885,7 @@ G.UIDEF.amu_fork_picker = function(ref)
       }},
       { n = G.UIT.R, config = { align = "cl", padding = 0.01, on_demand_tooltip = tip }, nodes = {
         { n = G.UIT.T, config = { text = kind_tag, scale = 0.27, colour = amu_fork_kind_colour(kind), shadow = true } },
-        { n = G.UIT.T, config = { text = info_str, scale = 0.27, colour = purple } } } },
+        { n = G.UIT.T, config = { text = info_str, scale = info_scale, colour = purple } } } },
     }
 
     local notes = AMU_FIND.fork_notes(fork)
@@ -5872,10 +5903,18 @@ G.UIDEF.amu_fork_picker = function(ref)
     local rel = tostring(fork.latest_release_tag or "")
     local reld = AMU_FIND.d10(fork.latest_release_at)
     local open_label = "Open fork page" .. (rel ~= "" and ("     Release: " .. rel .. (reld and ("  " .. reld) or "")) or "")
+    local open_scale = 0.3
+    if amu_text_w(open_label, open_scale) > CARD_W - 3.7 and rel ~= "" then
+      open_label = "Open fork page   Release: " .. rel .. (reld and (" " .. reld) or "")
+    end
+    for _, sc in ipairs({ 0.27, 0.24, 0.21 }) do
+      if amu_text_w(open_label, open_scale) <= CARD_W - 3.7 then break end
+      open_scale = sc
+    end
     card[#card + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = {
       { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = CARD_W - 3.4, minh = 0.38, r = 0.09,
           colour = G.C.BLUE, button = "amu_open_fork_" .. slot, hover = true, shadow = true, on_demand_tooltip = tip }, nodes = {
-        { n = G.UIT.T, config = { text = amu_fit(open_label, 0.3, CARD_W - 3.7), scale = 0.3, colour = G.C.UI.TEXT_LIGHT } } } },
+        { n = G.UIT.T, config = { text = amu_fit(open_label, open_scale, CARD_W - 3.7), scale = open_scale, colour = G.C.UI.TEXT_LIGHT } } } },
       { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
       { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 0.42, minh = 0.42, r = 0.07,
           colour = is_ign and G.C.RED or RGBA(0.78, 0.78, 0.86, 1), button = "amu_ignore_fork_" .. slot, hover = true, shadow = true }, nodes = {

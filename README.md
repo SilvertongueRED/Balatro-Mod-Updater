@@ -157,6 +157,10 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 ## Changelog
 
 ### 1.0.4
+- Changed: the bottom-right pop-ups use the whole width between the deck and the screen edge (the deck's visible card edge is used, not its wider card area), so the text wraps much less.
+- Changed: Fork Finder hover names the original or parent as Owner/Name ("Found: parent (owner/mod)"), and the "newest commit on GitHub" note no longer says your clone is older in a way that sounds like a problem.
+- Changed: "Your copy is the most recently updated one." is green in the hover.
+- Fixed: the Fork Finder row no longer cuts off "changed <date>" or "Release: <tag>"; gaps are tightened and the text is made a little smaller before anything is cut.
 - Fixed: after **Switch Back** (to the original) the Fork Finder now knows you are on the original, like it does for a fork: the hover shows "Using now" with "(restart to apply)", your copy takes the original's date, and the original card says **Restart to apply**.
 - Fixed: after switching to a fork or back, the Fork Finder is rebuilt the same way the filter buttons rebuild it, so you no longer have to click the filter to see the right hover and list.
 - Fixed: during a run, the bottom-right pop-ups (**All mods up to date!**, **N new forks found**) now sit in the empty strip to the right of the deck, in the bottom right corner of the screen, and their text wraps to fit it. They no longer cover the deck or its counts. Outside a run they stay in the bottom right corner.
