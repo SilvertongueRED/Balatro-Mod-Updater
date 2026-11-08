@@ -15,6 +15,7 @@ Keeps your Balatro mods, **Steamodded** and **Lovely Injector** up to date, back
 - [Settings](#settings-autoupdater_configjson)
 - [Troubleshooting](#known-limits-and-troubleshooting)
 - [Changelog](#changelog)
+- [More from SilvertongueRED](#more-from-silvertonguered)
 
 ## Features
 
