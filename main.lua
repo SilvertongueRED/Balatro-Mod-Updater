@@ -5876,17 +5876,20 @@ G.UIDEF.amu_fork_picker = function(ref)
     local cur_name = amu_fit(tostring(cur_links[1].name), 0.3, math.max(1.6, 8.4 - #cur_links * 2.4 - amu_text_w(label, 0.3)))
     if amu_text_w(label, 0.3) + amu_text_w(cur_name, 0.3) + amu_text_w(date_txt, 0.27) > 8.9 - #cur_links * 2.4 then date_txt = "" end
     local cur_tip_lines = {}
-    if cur_info.date then
-      for _, l in ipairs(AMU_FIND.wrap("Last change " .. cur_info.date .. ": " .. cur_info.how, 0.27, 5.6, 3)) do cur_tip_lines[#cur_tip_lines + 1] = l end
-    else
-      cur_tip_lines[1] = "Run Scan Now to find out when your copy last changed."
-    end
     if cur_newest then cur_tip_lines[#cur_tip_lines + 1] = { text = "Your copy is the most recently updated one.", colour = AMU_FIND.NEWEST_DARK }
     elseif win ~= nil then
       cur_tip_lines[#cur_tip_lines + 1] = { text = "Most recently updated: " .. tostring(win.repo or "") .. "  " .. tostring(AMU_FIND.d10(AMU_FIND.fork_stamp(win)) or ""), colour = AMU_FIND.NEWEST_DARK }
       cur_tip_lines[#cur_tip_lines + 1] = { text = "Using now: " .. tostring(cur_links[1].name), colour = G.C.BLUE or dark }
     end
     cur_tip_lines[#cur_tip_lines + 1] = "A green name marks the most recently updated copy."
+    if cur_info.date then
+      local how = tostring(cur_info.how or "")
+      local a1, b1 = how:match("^(.-);%s*(.+)$")
+      if a1 then how = a1 .. " (" .. b1 .. ")" end
+      for _, l in ipairs(AMU_FIND.wrap("Last change " .. cur_info.date .. ": " .. how, 0.27, 5.6, 4)) do cur_tip_lines[#cur_tip_lines + 1] = l end
+    else
+      cur_tip_lines[#cur_tip_lines + 1] = "Run Scan Now to find out when your copy last changed."
+    end
     local cur_tip = AMU_FIND.cfg_tip("Your current copy", cur_tip_lines)
     local cur_nodes = {
       { n = G.UIT.C, config = { align = "cl", padding = 0.03, minw = 3.3, on_demand_tooltip = cur_tip }, nodes = {

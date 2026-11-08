@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.21
+- Changed: the hover on "Your current" in View forks reads in a clearer order: the most recently updated line first, then the green name note, then "Last change <date>: newest commit on GitHub (your downloaded copy may not have it yet)". Colours are unchanged.
+
 ### 1.0.20
 - Changed: in the fork hover, the dates line says "Their last change <date>" (the fork you are hovering) next to "Your copy <date>".
 
