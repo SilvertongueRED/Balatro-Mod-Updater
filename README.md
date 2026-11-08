@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.9
+- Fixed: updating a git mod failed with "untracked working tree files would be overwritten" when you had a loose file (like release-notes/v5.0.1.md) that upstream then committed. The Updater now stashes just those files (recoverable in git stash list), retries the pull, and notes it.
+
 ### 1.0.8
 - Changed: the bottom-right pop-ups are wider again (the left gap to the deck is about half as big), so the text wraps less.
 

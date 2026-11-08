@@ -1554,6 +1554,22 @@ function Update-GitModCore([string]$folderPath, [string]$folderName) {
     }
     $pull = Run-Git $folderPath $pullArgs
 
+    # Untracked local files that upstream now ships (e.g. release-notes/v5.0.1.md made by hand, then
+    # committed upstream): git refuses to pull. Stash just those files (recoverable) and retry once.
+    if ($pull.code -ne 0 -and ([string]($pull.out -join "`n")) -match "untracked working tree files would be overwritten") {
+      $txt = [string]($pull.out -join "`n")
+      $m = [regex]::Match($txt, "(?s)overwritten by (?:merge|checkout):\s*(.*?)\s*(?:Please move|Aborting|$)")
+      $paths = @()
+      if ($m.Success) { $paths = @($m.Groups[1].Value -split "[\r\n]+" | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch "^(error|warning):" }) }
+      if ($paths.Count -gt 0) {
+        $st = Run-Git $folderPath (@("stash","push","-u","-q","-m","amu: untracked files that upstream now ships","--") + $paths)
+        if ($st.code -eq 0) {
+          $pull = Run-Git $folderPath $pullArgs
+          if ($pull.code -eq 0) { $summary.skipped_mods += "$folderName (git: moved your untracked $($paths -join ', ') aside because upstream now ships it; saved in 'git stash list')" }
+        }
+      }
+    }
+
     $conflicts = Get-UnmergedFiles $folderPath
     if ($conflicts.Count -gt 0) {
       Run-Git $folderPath @("rebase","--abort") | Out-Null
