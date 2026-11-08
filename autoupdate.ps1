@@ -326,7 +326,7 @@ function Get-GhJson([string]$uri, $headers) {
   if ($config.use_github_cache -eq $false) { return (Invoke-RestMethod -Uri $uri -Headers $headers) }
   $key = Get-GhCacheKey $uri
   $etagFile = Join-Path $script:ghCacheDir "$key.etag"
-  $bodyFile = Join-Path $script:ghCacheDir "$key.json"
+  $bodyFile = Join-Path $script:ghCacheDir "$key.ghc"   # NOT .json: Steamodded reads every .json inside a mod folder as a mod and flags a cached Steamodded fork answer as a duplicate Steamodded
   $h = @{}
   foreach ($k in $headers.Keys) { $h[$k] = $headers[$k] }
   $haveCache = $false
@@ -364,6 +364,22 @@ function Get-GhJson([string]$uri, $headers) {
   } catch {}
   return (ConvertFrom-Json -InputObject $content)
 }
+# Cache files from older versions ended in .json, which Steamodded treats as mod files ("Duplicate installation of Steamodded
+# detected" when a cached answer was about a repo with Steamodded in its name). Rename them so they keep working and stay invisible.
+function Convert-LegacyGhCache() {
+  try {
+    if (Test-Path -LiteralPath $script:ghCacheDir) {
+      Get-ChildItem -LiteralPath $script:ghCacheDir -Filter "*.json" -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $nn = [System.IO.Path]::ChangeExtension($_.Name, ".ghc")
+        try {
+          if (Test-Path -LiteralPath (Join-Path $script:ghCacheDir $nn)) { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop }
+          else { Rename-Item -LiteralPath $_.FullName -NewName $nn -ErrorAction Stop }
+        } catch {}
+      }
+    }
+  } catch {}
+}
+Convert-LegacyGhCache
 # Old cache files (not used for 30 days) are removed at the end of a run.
 function Clear-OldGhCache() {
   try {
@@ -2049,7 +2065,7 @@ function New-ForkEntry([string]$kind, $info, [string]$installedRepo, [string]$in
   $entryFile = $null
   if ($config.use_github_cache -ne $false -and $script:forkInstPushed -and $info.pushed_at) {
     $ekey = "forkentry3|$kind|$installedRepo|$installedBranch|$($script:forkInstPushed)|$full|$(Format-ForkDate $info.pushed_at)"
-    $entryFile = Join-Path $script:ghCacheDir ("fe_" + (Get-GhCacheKey $ekey) + ".json")
+    $entryFile = Join-Path $script:ghCacheDir ("fe_" + (Get-GhCacheKey $ekey) + ".ghc")
     $prev = Read-JsonIfExists $entryFile
     if ($prev) {
       $script:forkEntryReused++

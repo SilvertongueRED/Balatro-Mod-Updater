@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.15
+- Fixed: the game could crash at start with "Duplicate installation of Steamodded detected ... Possible location: Balatro-Mod-Updater/_gh_cache". Steamodded reads every .json file inside a mod folder as a mod, and the Updater's GitHub answer cache used .json files, some about repos with "Steamodded" in their name. The cache now uses .ghc files, and old .json cache files are renamed automatically.
+
 ### 1.0.14
 - Changed: one rule everywhere in the Fork Finder. When your copy is not the most recently updated one, the hover shows the most recently updated copy in green and "Using now: <your copy>" in blue. This now also applies to mods you have not switched (before, only switched mods showed "Using now"), and to the "Your current copy" row hover in View Forks.
 
