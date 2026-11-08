@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.12
+- Fixed: the Fork Finder gave no sign that a scan was still running after a fork switch (the button just looked greyed out). The button now reads "Scanning" while a scan runs and "Scan Now" when it is done.
+
 ### 1.0.11
 - Fixed: after a fork switch (Restart later), Scan Now could stay greyed out and do nothing in either filter. The scan result was only watched by one game event that could get lost; a second per-frame watcher now ends the scan, so the button always comes back.
 

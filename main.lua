@@ -1178,6 +1178,7 @@ end
 -- Everything lives in this ONE table because Lua allows only 200 top-level locals per file.
 ---------------------------------------------------------------------------
 local AMU_FIND = {
+  scan_label = { text = "Scan Now" },   -- Scan Now button text; reads "Scanning" while a scan runs
   MAX = 20,                                   -- longest search text
   HOLD = 0.6,                                 -- seconds to hold S / R3 to clear the box
   toggles = { text = "" },                    -- the text boxes write what you type into these
@@ -3997,6 +3998,7 @@ amu_extra_tabs_raw = function()
       label = "Fork Finder",
       tab_definition_function = function()
         if not amu_fork_suggestions then amu_fork_suggestions = load_fork_suggestions() end
+        AMU_FIND.scan_label.text = amu_fork_scanning and "Scanning" or "Scan Now"
         if not amu_fork_scanning then pcall(function() amu_fork_status.text = amu_fork_summary() end) end
         AMU_TOKEN_UI.init()
         G.FUNCS.amu_token_flash()
@@ -4019,7 +4021,7 @@ amu_extra_tabs_raw = function()
               { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 1.8, minh = 0.5, r = 0.1,
                 colour = amu_fork_scanning and RGBA(0.5, 0.5, 0.5, 0.9) or G.C.GREEN,
                 button = "amu_scan_forks", hover = true, shadow = true }, nodes = {
-                { n = G.UIT.T, config = { text = "Scan Now", scale = 0.34, colour = purple } } } },
+                { n = G.UIT.T, config = { ref_table = AMU_FIND.scan_label, ref_value = "text", scale = 0.34, colour = purple } } } },
               amu_gap(0.12),
               { n = G.UIT.C, config = { align = "cm", padding = 0.04, minw = 3.1, minh = 0.5, r = 0.1,
                 colour = G.C.BLUE, button = "amu_fork_filter", hover = true, shadow = true }, nodes = {
@@ -5431,6 +5433,7 @@ local function run_fork_scan()
   end
 
   amu_fork_scanning = true
+  AMU_FIND.scan_label.text = "Scanning"
   amu_fork_status.text = "Scanning for forks... (may take a minute)"
   AMU_FIND.scan_started = os.time()
   local keys_before = AMU_FIND.fork_keys()
@@ -5462,6 +5465,7 @@ local function run_fork_scan()
       local msg = channel:pop()
       if msg then
         amu_fork_scanning = false
+        AMU_FIND.scan_label.text = "Scan Now"
         amu_fork_suggestions = load_fork_suggestions()
         amu_fork_status.text = amu_fork_summary()
         local ts = amu_fork_suggestions and amu_fork_suggestions.token_status
