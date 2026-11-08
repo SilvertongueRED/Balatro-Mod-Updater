@@ -156,10 +156,13 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.3
+- Fixed: during a run, the bottom-right pop-ups (**All mods up to date!**, **N new forks found**) sat on top of the deck. They now sit above the deck and its counts. Outside a run they stay in the bottom right corner.
+
 ### 1.0.2
 - Fixed: on the **Backups** tab, a pinned row no longer lets "Pinned to backup <date>" run behind the **PINNED** badge, and the **Unpin** button stays inside the panel. The row is laid out to fit the panel width.
 - Fixed: after a fork switch, **Fork Finder** knows which fork you are on. Right after pressing **Switch to Fork** the fork card shows **Restart to apply**; after the restart it shows **Active**, the fork leaves the list of newer forks (it is still in the all-forks view), and the other forks are compared with the fork you use now, without a new scan.
-- Fixed: the bottom-right pop-ups (**All mods up to date!**, **N new forks found**) were cut off at the right edge in some window sizes, for example borderless. They are now placed inside the game area, which the game fits to any window, monitor or resolution. During a run they sit above the deck and its counts instead of on top of them.
+- Fixed: the bottom-right pop-ups (**All mods up to date!**, **N new forks found**) were cut off at the right edge in some window sizes, for example borderless. They are now placed inside the game area, which the game fits to any window, monitor or resolution.
 - Fixed: after a fork scan, the Fork Finder list could keep showing the old result until you pressed the filter button (twice, to get back to your chosen filter). The list is now rebuilt when the scan ends and once more a moment later.
 - Fixed: the Updater's backup of its own folder could fail with "Could not find file ...update_timing.log", because the game rewrites that log while the backup is being zipped. If zipping fails, the backup is now made from a copy and files that disappear are skipped.
 
