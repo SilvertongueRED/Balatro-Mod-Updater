@@ -53,6 +53,32 @@ function Test-GameGone() {
   try { return [bool]$script:gameProc.HasExited } catch { return $false }
 }
 
+# Hard stop: a second thread waits for Balatro to exit and then ends this script, unless a step that writes files (installing a
+# mod, a framework update, saving a JSON file) is running; it waits for that step to finish first. Without it, one slow step
+# (a long GitHub call, a fork comparison) kept Steam on "Resume" because the script only looked between steps.
+$script:amuBusy = [hashtable]::Synchronized(@{ n = 0 })
+function Enter-Busy() { $script:amuBusy.n = [int]$script:amuBusy.n + 1 }
+function Leave-Busy() { $script:amuBusy.n = [Math]::Max(0, [int]$script:amuBusy.n - 1) }
+try {
+  if ($script:gameProc) {
+    $wdRs = [runspacefactory]::CreateRunspace()
+    $wdRs.Open()
+    $wdPs = [powershell]::Create()
+    $wdPs.Runspace = $wdRs
+    [void]$wdPs.AddScript({
+      param($gamePid, $state)
+      try {
+        $gp = [System.Diagnostics.Process]::GetProcessById([int]$gamePid)
+        [void]$gp.WaitForExit()
+        $waited = 0
+        while ([int]$state.n -gt 0 -and $waited -lt 600) { Start-Sleep -Milliseconds 250; $waited++ }
+        [Environment]::Exit(0)
+      } catch {}
+    }).AddArgument($script:gameProc.Id).AddArgument($script:amuBusy)
+    [void]$wdPs.BeginInvoke()
+  }
+} catch {}
+
 function Ensure-Dir([string]$path) {
   if (-not (Test-Path -LiteralPath $path)) { New-Item -ItemType Directory -Path $path | Out-Null }
 }
@@ -67,7 +93,8 @@ function Read-JsonIfExists([string]$path) {
 function Save-JsonNoBom([string]$path, $obj) {
   $json = ($obj | ConvertTo-Json -Depth 10)
   $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText($path, $json, $utf8NoBom)
+  Enter-Busy
+  try { [System.IO.File]::WriteAllText($path, $json, $utf8NoBom) } finally { Leave-Busy }
 }
 
 # ---- changelogs.json: short "what changed" notes shown when you hover a mod in the Backups tab ----
@@ -386,8 +413,11 @@ function Get-GhJson([string]$uri, $headers) {
     if ($etag -and $content.Length -lt 900000) {
       if (-not (Test-Path -LiteralPath $script:ghCacheDir)) { New-Item -ItemType Directory -Path $script:ghCacheDir -Force | Out-Null }
       $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-      [System.IO.File]::WriteAllText($bodyFile, $content, $utf8NoBom)
-      [System.IO.File]::WriteAllText($etagFile, $etag, $utf8NoBom)
+      Enter-Busy
+      try {
+        [System.IO.File]::WriteAllText($bodyFile, $content, $utf8NoBom)
+        [System.IO.File]::WriteAllText($etagFile, $etag, $utf8NoBom)
+      } finally { Leave-Busy }
     }
   } catch {}
   return (ConvertFrom-Json -InputObject $content)
@@ -2724,7 +2754,7 @@ $summary.untracked_mods = @()
 $summary.folder_name_stale = @()
 
 # Save the game files if this Steam build isn't saved yet; may pause the mod and framework updates below (see Invoke-GameCheck).
-Invoke-GameCheck
+Enter-Busy; try { Invoke-GameCheck } finally { Leave-Busy }
 
 if (-not $script:holdUpdates) {
 try {
@@ -2766,7 +2796,7 @@ try {
     if ($name -eq "_AutoModUpdater_Backups") { return }
 
     $swMod = [System.Diagnostics.Stopwatch]::StartNew()
-    try { Update-OneMod $path $name } finally { Add-Timing "update check: $name" $swMod }
+    Enter-Busy; try { Update-OneMod $path $name } finally { Leave-Busy; Add-Timing "update check: $name" $swMod }
   }
 } catch {
   $summary.errors += "Top-level scan failed: $($_.Exception.Message)"
@@ -3217,9 +3247,9 @@ if ($CheckForks) {
   exit 0
 }
 
-Repair-ForkLovelyDeps
+Enter-Busy; try { Repair-ForkLovelyDeps } finally { Leave-Busy }
 
-if (Test-GameGone) { $script:quitEarly = $true } elseif ($script:holdUpdates) { Ensure-FrameworkBaseline } else { Update-Frameworks }
+if (Test-GameGone) { $script:quitEarly = $true } else { Enter-Busy; try { if ($script:holdUpdates) { Ensure-FrameworkBaseline } else { Update-Frameworks } } finally { Leave-Busy } }
 Save-PinReleases
 
 # Mod folders whose NAME carries a version (e.g. "Some-Mod-v1.3.0") that no longer matches the mod's own manifest version.

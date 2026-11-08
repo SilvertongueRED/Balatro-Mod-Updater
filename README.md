@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.26
+- Fixed: Steam kept showing the game as running after you quit during an update check or fork scan. The 1.0.22 fix only looked between steps, so one slow step still held Steam. A second thread in autoupdate.ps1 now ends the script as soon as Balatro exits. A step that writes files (installing a mod, a framework update, saving a JSON file or a GitHub answer) always finishes first, so nothing is left half written.
+
 ### 1.0.25
 - Changed: in the "Your current" hover the Last change line uses a small star icon instead of a square bullet and reads like "Last change 08-13-25: on GitHub" (month-day-year).
 
