@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.6
+- Fixed: after switching a mod to an OLDER copy (for example back to the parent while a newer fork was installed), the Fork Finder no longer calls the copy you just switched to the "most recently updated" one. The copy you left is still counted, the hover names it as the most recently updated, and the row label ("Parent") is only green when the copy you run now really is the newest.
+
 ### 1.0.5
 - Changed: the bottom-right pop-ups use the whole width between the deck and the screen edge (the deck's visible card edge is used, not its wider card area), so the text wraps much less.
 - Changed: Fork Finder hover names the original or parent as Owner/Name ("Found: parent (owner/mod)"), and the "newest commit on GitHub" note no longer says your clone is older in a way that sounds like a problem.

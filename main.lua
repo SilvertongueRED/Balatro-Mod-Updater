@@ -4956,6 +4956,7 @@ AMU_FIND.switch_pending = AMU_FIND.switch_pending or {}
 -- back_now[folder] = the original repo you just pressed Switch Back to (memory only, like switch_pending). Before the restart the
 -- mod is still the fork on disk, but the lists already treat the original as the copy you run.
 AMU_FIND.back_now = AMU_FIND.back_now or {}
+AMU_FIND.left_behind = AMU_FIND.left_behind or {}   -- folder -> { repo, date, stamp } of the copy you left with a switch (until the restart)
 function AMU_FIND.fork_now(folder)
   local src = config.mod_fork_source and config.mod_fork_source[folder]
   local r = type(src) == "table" and src.fork_repo or nil
@@ -5030,9 +5031,14 @@ end
 -- exact commit / release time. Copies sharing the very same newest commit (a fork that just synced with its parent) tie: the
 -- original wins, then the parent, then other forks; your own copy wins a tie with any of them. nil when your own date is unknown
 -- (then nothing is marked, because your copy might be the newest).
-function AMU_FIND.newest_pick(cur, forks)
+function AMU_FIND.newest_pick(cur, forks, left)
   if not (cur and cur.date) then return nil end
   local win, wstamp, wrank = "cur", cur.stamp or (cur.date .. "T00:00:00"), 0
+  -- The copy you just switched away from is not in the fork list (the scan compares against the installed copy), but it still
+  -- counts: if it is newer than the copy you switched to, it is the most recently updated one, not yours.
+  if type(left) == "table" and left.repo and left.stamp and left.stamp > wstamp then
+    win, wstamp, wrank = { repo = left.repo, last_commit_at = left.stamp, _left = true }, left.stamp, 99
+  end
   for _, f in ipairs(forks or {}) do
     local st = AMU_FIND.fork_stamp(f)
     if st then
@@ -5041,6 +5047,31 @@ function AMU_FIND.newest_pick(cur, forks)
     end
   end
   return win
+end
+
+-- Remember the copy that is installed right now (name and newest commit time) before a switch, so it stays a candidate for
+-- "most recently updated". Only the first switch counts: until the restart the installed copy does not change.
+function AMU_FIND.remember_left(folder)
+  pcall(function()
+    if AMU_FIND.left_behind[folder] then return end
+    local d = amu_fork_suggestions and amu_fork_suggestions.suggestions and amu_fork_suggestions.suggestions[folder]
+    if type(d) ~= "table" then return end
+    local info = AMU_FIND.current_info(folder, d)
+    local repo = d.installed_repo or d.current_repo
+    if info and info.date and type(repo) == "string" and repo ~= "" then
+      AMU_FIND.left_behind[folder] = { repo = repo, date = info.date, stamp = info.stamp or AMU_FIND.norm_stamp(info.date) }
+    end
+  end)
+end
+-- true when the copy you run (after a switch) is the most recently updated one
+function AMU_FIND.now_is_newest(folder, entry)
+  local ok, res = pcall(function()
+    local cur = AMU_FIND.current_info(folder, entry)
+    local nd, ns = AMU_FIND.fork_now_day(folder)
+    if nd then cur = { date = nd, stamp = ns } end
+    return AMU_FIND.newest_pick(cur, entry.forks, AMU_FIND.left_behind[folder]) == "cur"
+  end)
+  return ok and res == true
 end
 
 local function amu_fork_kind_colour(kind)
@@ -5243,7 +5274,7 @@ function AMU_FORKIGN.row_tip(args)
     local nd, ns = AMU_FIND.fork_now_day(args and args.folder or "")
     if nd then cur = { date = nd, stamp = ns, how = AMU_FIND.fork_now_how(args and args.folder or "") } end
   end
-  local win = AMU_FIND.newest_pick(cur, entry.forks)
+  local win = AMU_FIND.newest_pick(cur, entry.forks, AMU_FIND.left_behind[args and args.folder or ""])
   local function addw(text, scale, colour, maxlines)
     for _, ln in ipairs(AMU_FIND.wrap(text, scale, 6.0, maxlines or 2)) do add(ln, scale, colour) end
   end
@@ -5481,6 +5512,7 @@ local function switch_to_fork(folder_name, fork_repo)
     return
   end
 
+  AMU_FIND.remember_left(folder_name)
   if not config.mod_fork_source then config.mod_fork_source = {} end
   config.mod_fork_source[folder_name] = {
     fork_repo   = fork_repo,
@@ -5570,6 +5602,7 @@ local function switch_back_fork(folder_name)
     return
   end
 
+  AMU_FIND.remember_left(folder_name)
   -- which repo is "the original"? The saved source knows; else the scan's entry of kind original.
   do
     local st = config.mod_fork_source and config.mod_fork_source[folder_name]
@@ -5755,7 +5788,7 @@ G.UIDEF.amu_fork_picker = function(ref)
     if nd then cur_info = { date = nd, stamp = ns, how = AMU_FIND.fork_now_how(folder) } end
   end
   local restart_pending = cur_fork_repo ~= nil and AMU_FIND.switch_pending[folder] == true
-  local win = AMU_FIND.newest_pick(cur_info, forks)
+  local win = AMU_FIND.newest_pick(cur_info, forks, AMU_FIND.left_behind[folder])
   local cur_newest = (win == "cur")
   local cur_row = nil
   if #cur_links > 0 then
@@ -6046,7 +6079,12 @@ build_fork_mods_page = function(page)
         end
         local row_tip = { filler = { func = AMU_FORKIGN.row_tip, args = { entry = entry, display = display, folder = folder } } }
         local fork_label = amu_fit(fork_text, 0.34, 3.7)
-        local label_colour = has_upstream and orange or (is_switched and G.C.GREEN or G.C.UI.TEXT_LIGHT)
+        -- green = the copy you run now is the most recently updated one; after a switch to something older it is not green
+        local label_colour
+        if has_upstream then label_colour = orange
+        elseif is_switched and AMU_FIND.now_is_newest(folder, entry) then label_colour = G.C.GREEN
+        elseif is_switched and (entry.counts or {}).parent then label_colour = orange
+        else label_colour = G.C.UI.TEXT_LIGHT end
 
         local action_btn
         if is_switched then
