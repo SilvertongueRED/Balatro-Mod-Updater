@@ -1590,11 +1590,20 @@ function AMU_FIND.toast.show(text, opts)
     local card = { n = G.UIT.C, config = { align = "cm", padding = 0.09, r = 0.1, emboss = 0.04,
       colour = G.C.L_BLACK or G.C.BLACK, outline = 0.9, outline_colour = opts.colour or G.C.GREEN,
       button = opts.action and "amu_toast_click" or nil, hover = opts.action and true or nil, shadow = true }, nodes = lines }
+    -- In a run the deck and its counts fill the bottom right corner, so lift the box above the deck (and the small count above it).
+    -- Everything is in game units, so this follows any window, monitor or borderless size.
+    local oy = -0.2
+    pcall(function()
+      if G.STAGE == G.STAGES.RUN and G.deck and G.deck.T and G.TILE_H then
+        local dy = G.deck.T.y
+        if type(dy) == "number" and dy > G.TILE_H * 0.5 and dy < G.TILE_H then oy = -(G.TILE_H - dy) - 1.3 end
+      end
+    end)
     T.box = UIBox({
       definition = { n = G.UIT.ROOT, config = { align = "cm", colour = G.C.CLEAR }, nodes = { card } },
       -- "bri" = inside the bottom right corner of the game area (without the "i" the box sits OUTSIDE it, below and to the right, and gets
       -- cut off). The game area is fitted to any window, monitor or borderless size, so this follows it.
-      config = { align = "bri", offset = { x = -0.4, y = -0.2 }, major = G.ROOM_ATTACH, bond = "Weak", instance_type = "POPUP" },
+      config = { align = "bri", offset = { x = -0.4, y = oy }, major = G.ROOM_ATTACH, bond = "Weak", instance_type = "POPUP" },
     })
     T.action = opts.action
   end)
