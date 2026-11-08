@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.20
+- Changed: in the fork hover, the dates line says "Their last change <date>" (the fork you are hovering) next to "Your copy <date>".
+
 ### 1.0.19
 - Changed: the Fork Finder top line is clearer. The newer-forks list reads like "0 new fork(s) (3 have any fork) - last scanned 11-08 14:32" and the all-forks list reads like "35 any fork(s) - last scanned 11-08 14:32".
 

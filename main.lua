@@ -5789,7 +5789,7 @@ local function amu_fork_tip(args)
 
   -- 2. dates on one small grey line
   local bits = {}
-  if day then bits[#bits + 1] = (AMU_FIND.d10(fork.last_commit_at) and "Last change " or "Last push ") .. day end
+  if day then bits[#bits + 1] = (AMU_FIND.d10(fork.last_commit_at) and "Their last change " or "Their last push ") .. day end
   if cur and cur.date then bits[#bits + 1] = "Your copy " .. cur.date end
   if #bits > 0 then add(table.concat(bits, "   |   "), 0.24, grey) end
   divider()
