@@ -5100,7 +5100,12 @@ local function amu_fork_is_translation(f)
   if f._tr ~= nil then return f._tr end
   local result = false
   local kind = amu_fork_kind(f)
-  if kind ~= "original" and kind ~= "parent" then
+  local fc, lf = f.files_changed or 0, f.loc_files or 0
+  if kind ~= "original" and kind ~= "parent" and fc > 0 then
+    -- the changed files decide: a fork is "just a translation" only when (almost) every changed file is a language file.
+    -- A fork that also changes real code or assets stays listed, whatever its name or commit messages say.
+    result = (fc - lf) <= 1 and lf >= 1
+  elseif kind ~= "original" and kind ~= "parent" then
     local name = tostring(f.repo or ""):lower():match("/(.+)$") or ""
     for _, w in ipairs(AMU_TR_WORDS) do
       if name:find(w) then result = true break end
@@ -5110,7 +5115,6 @@ local function amu_fork_is_translation(f)
         if AMU_TR_TOKENS[tok] then result = true break end
       end
     end
-    if not result and (f.files_changed or 0) > 0 and (f.loc_files or 0) / f.files_changed >= 0.75 then result = true end
     if not result and type(f.changelog) == "table" and #f.changelog > 0 then
       local hits = 0
       for _, m in ipairs(f.changelog) do
@@ -5349,32 +5353,33 @@ end
 
 -- One-line description of what the list is showing right now.
 amu_fork_summary = function()
+  -- A switch waiting for a restart always stays on this line, so it cannot be missed (it lives in memory until the restart).
+  do
+    local names = {}
+    for folder, on in pairs(AMU_FIND.switch_pending) do if on then names[#names + 1] = folder end end
+    if #names > 0 then
+      table.sort(names)
+      return amu_fit("Restart to apply: " .. table.concat(names, ", "), 0.3, 8.6)
+    end
+  end
   if not amu_fork_suggestions or not amu_fork_suggestions.suggestions then
     return "No fork data yet - press Scan Now."
   end
-  local shown_entries = get_fork_mod_entries()
-  local shown = #shown_entries
+  local shown = #get_fork_mod_entries()
   local all = #get_fork_mod_entries(true, true)
   local text
   if config.fork_newer_only ~= false then
-    text = "Showing newer forks only: " .. shown .. " mod(s)  (" .. all .. " have any fork)"
+    text = "Showing newer forks only: " .. shown .. " mod(s) (" .. all .. " have any fork)"
   else
     text = "Showing every fork: " .. shown .. " mod(s)"
   end
-  if config.fork_hide_translations ~= false then
-    local hidden = amu_count_forks(get_fork_mod_entries(nil, true)) - amu_count_forks(shown_entries)
-    if hidden > 0 then text = text .. "  [" .. hidden .. " translation(s) hidden]" end
-  end
   local mode = amu_fork_suggestions.scan_mode
-  local when = tostring(amu_fork_suggestions.checked_at or ""):match("^(%d%d%d%d%-%d%d%-%d%d)T(%d%d:%d%d)")
-  if when then
-    local d, t = tostring(amu_fork_suggestions.checked_at):match("^(%d%d%d%d%-%d%d%-%d%d)T(%d%d:%d%d)")
-    text = text .. "  - last scan " .. d .. " " .. t .. ((mode == "newer") and " (newer only)" or " (every fork)")
+  local d, t = tostring(amu_fork_suggestions.checked_at or ""):match("^%d%d%d%d%-(%d%d%-%d%d)T(%d%d:%d%d)")
+  if d then
+    text = text .. " - scanned " .. d .. " " .. t
+    if config.fork_newer_only == false and mode == "newer" then text = text .. " (newer only, Scan Now for all)" end
   end
-  if config.fork_newer_only == false and mode == "newer" then
-    text = text .. " - Scan Now for every fork"
-  end
-  return text
+  return amu_fit(text, 0.3, 8.6)
 end
 
 G.FUNCS.amu_fork_filter = function(e)

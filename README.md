@@ -156,6 +156,12 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.13
+- Fixed: the "last scan" note at the top of the Fork Finder was cut off. It now reads "scanned 11-08 12:10" and fits.
+- Changed: the "[N translation(s) hidden]" count is gone from the top line.
+- Changed: a switch that is waiting for a restart now stays on the top line ("Restart to apply: <mods>") instead of being replaced by the next refresh.
+- Changed: a fork counts as "just a translation" only when nearly all of its changed files are language files. A fork that also changes real code or assets stays listed even with Translations: Hidden, whatever its name says.
+
 ### 1.0.12
 - Fixed: the Fork Finder gave no sign that a scan was still running after a fork switch (the button just looked greyed out). The button now reads "Scanning" while a scan runs and "Scan Now" when it is done.
 
