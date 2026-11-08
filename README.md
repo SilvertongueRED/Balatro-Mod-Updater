@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.14
+- Changed: one rule everywhere in the Fork Finder. When your copy is not the most recently updated one, the hover shows the most recently updated copy in green and "Using now: <your copy>" in blue. This now also applies to mods you have not switched (before, only switched mods showed "Using now"), and to the "Your current copy" row hover in View Forks.
+
 ### 1.0.13
 - Fixed: the "last scan" note at the top of the Fork Finder was cut off. It now reads "scanned 11-08 12:10" and fits.
 - Changed: the "[N translation(s) hidden]" count is gone from the top line.

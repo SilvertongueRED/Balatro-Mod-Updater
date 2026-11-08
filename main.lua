@@ -5307,6 +5307,9 @@ function AMU_FORKIGN.row_tip(args)
     local wait = AMU_FIND.switch_pending[args and args.folder or ""]
     add("Using now: " .. tostring(now_repo), 0.27, blue)
     if wait then add("(restart to apply)", 0.27, blue) end   -- own line: on one line the hover box cut it off
+  elseif win ~= nil and win ~= "cur" and tostring(entry.installed_repo or "") ~= "" then
+    -- same rule everywhere: when you are not on the most recently updated copy, say what you ARE using (blue)
+    add("Using now: " .. tostring(entry.installed_repo), 0.27, blue)
   end
   addw("Press the Forks button to read about each fork and tick Ignore scans.", 0.26, nil, 2)
   return { n = G.UIT.R, config = { align = "cl", padding = 0.03 }, nodes = {
@@ -5838,7 +5841,11 @@ G.UIDEF.amu_fork_picker = function(ref)
     else
       cur_tip_lines[1] = "Run Scan Now to find out when your copy last changed."
     end
-    if cur_newest then cur_tip_lines[#cur_tip_lines + 1] = { text = "Your copy is the most recently updated one.", colour = AMU_FIND.NEWEST_DARK } end
+    if cur_newest then cur_tip_lines[#cur_tip_lines + 1] = { text = "Your copy is the most recently updated one.", colour = AMU_FIND.NEWEST_DARK }
+    elseif win ~= nil then
+      cur_tip_lines[#cur_tip_lines + 1] = { text = "Most recently updated: " .. tostring(win.repo or "") .. "  " .. tostring(AMU_FIND.d10(AMU_FIND.fork_stamp(win)) or ""), colour = AMU_FIND.NEWEST_DARK }
+      cur_tip_lines[#cur_tip_lines + 1] = { text = "Using now: " .. tostring(cur_links[1].name), colour = G.C.BLUE or dark }
+    end
     cur_tip_lines[#cur_tip_lines + 1] = "A green name marks the most recently updated copy."
     local cur_tip = AMU_FIND.cfg_tip("Your current copy", cur_tip_lines)
     local cur_nodes = {
