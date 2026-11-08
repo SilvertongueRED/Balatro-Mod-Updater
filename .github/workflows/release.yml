@@ -1,0 +1,22 @@
+name: Release
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build zip and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(jq -r .version automodupdater.json)
+          ZIP="Balatro-Mod-Updater-v${VERSION}.zip"
+          git archive --format=zip --prefix=Balatro-Mod-Updater/ HEAD -o "$ZIP"
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            gh release upload "v${VERSION}" "$ZIP" --clobber
+          else
+            gh release create "v${VERSION}" "$ZIP" --target "${GITHUB_SHA}" --title "Mod Updater ${VERSION}" --notes-file "release-notes/v${VERSION}.md"
+          fi
