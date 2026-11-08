@@ -1,5 +1,7 @@
 # Balatro Mod Updater
 
+![Balatro Mod Updater](images/banner.png)
+
 Keeps your Balatro mods, **Steamodded** and **Lovely Injector** up to date, backs everything up before it changes anything, and rescues you when an update breaks the game.
 
 > **Windows only.** Needs Windows PowerShell 5.1, [Steamodded](https://github.com/Steamopollys/Steamodded) 1.x and Lovely.
@@ -19,6 +21,8 @@ Keeps your Balatro mods, **Steamodded** and **Lovely Injector** up to date, back
 
 ## Features
 
+![The Mod Updater front page](images/mod-updater-front-page.png)
+
 | | |
 |---|---|
 | **Updates from anywhere** | Mods installed from a **Git** page, **GitHub Releases** or **Nexus Mods**, plus Steamodded and Lovely. Always jumps straight to the newest version. |
@@ -29,7 +33,15 @@ Keeps your Balatro mods, **Steamodded** and **Lovely Injector** up to date, back
 | **Search, sort, filter** | Every list tab has live search, sort, show filters and first/last page buttons, with full controller support. |
 | **Restart now or later** | After updates you pick **Restart now** or **Later**. |
 
-Auto-checking at startup is **off by default**. Turn it on in the mod's Config tab.
+Auto-checking at startup is **off by default**. Turn it on in the mod's Config tab. While a check runs, the main menu shows **Shuffling mods...**:
+
+![Shuffling mods while the check runs](images/shuffling-mods.gif)
+
+When it finds updates it installs them and asks **Restart now** or **Later**. When everything is current a small pop-up says so in the bottom right corner:
+
+![Updates found](images/updates-found-prompt.png)
+
+![All mods up to date pop-up](images/all-mods-up-to-date-popup.png)
 
 ## Installation
 
@@ -64,6 +76,11 @@ Auto-checking at startup is **off by default**. Turn it on in the mod's Config t
 ```
 - Only **MAIN** files are used and the newest upload wins. Use `file_name_regex` to pick one file when a mod has several.
 - Nexus only allows API downloads for **Premium** accounts. On a free account you get "update available" with a link.
+- Nexus mods need your personal API key. In **Config** click **How do I get a key?**; the key is at the bottom of your Nexus API keys page. Copy it, then click **Paste key**.
+
+![How to get a Nexus key](images/nexus-key-help.png)
+
+![The personal API key at the bottom of the Nexus page](images/nexus-api-key-page.png)
 
 ### Git
 - Leftover merge conflict markers (`<<<<<<<`) are repaired automatically.
@@ -71,7 +88,7 @@ Auto-checking at startup is **off by default**. Turn it on in the mod's Config t
 - `git_reset_on_diverge: true` in `autoupdater_config.json` resets mods whose author rewrote history (a backup is made first).
 
 ### Steamodded and Lovely
-- Steamodded is checked by reading its `version.lua`. Lovely is checked by comparing `version.dll` with the latest release.
+- Steamodded is checked by reading its `version.lua`. Lovely is checked by comparing its file in the game folder (`winmm.dll` since Lovely 0.10.0, `version.dll` before) with the latest release.
 - Updates are staged and applied by `apply_pending.ps1` after Balatro closes. Click **Restart now** to apply them.
 - Applying never replaces Steamodded with the same or an older version, and old staged updates are removed once you are current.
 
@@ -85,18 +102,58 @@ Auto-checking at startup is **off by default**. Turn it on in the mod's Config t
 | **No Source** | Mods with no git clone or `update.json`. Paste their GitHub or Nexus link to create one. |
 | **Config** | Nexus key, GitHub token, auto-check, pin retry, game backup options. |
 
-Every screen has a red **Close all** button (**hold B** on a controller or press **Esc**). Controller: **LT / RT** switch tabs, **LB / RB** turn pages (hold to jump to the first or last page), **R3** jumps to search (hold to clear).
+Every screen has a red **Close All Menus** button (**hold B** on a controller or press **Esc**). Controller: **LT / RT** switch tabs, **LB / RB** turn pages (hold to jump to the first or last page), **R3** jumps to search (hold to clear).
+
+### Mod Toggles
+![Mod Toggles tab](images/mod-toggles.png)
+
+### Backups
+Each row shows the version in use and when it was last updated. **Backups** opens the saved copies of that mod, **Restore & Pin** puts one back and stops updates for it until you press **Unpin**.
+
+![Backups tab](images/backups-list.png)
+
+![A pinned mod on the Backups tab](images/backups-pinned.png)
+
+### No Source
+Paste the mod's GitHub or Nexus page link and the Updater writes its `update.json` for you.
+
+![Paste a GitHub or Nexus link](images/no-source-paste-link.png)
+
+![The mod is tracked from now on](images/no-source-success.png)
+
+### Config
+![Config tab](images/config-tab.png)
 
 ## Fork Finder and the GitHub token
 
-Fork Finder lists forks of your mods with newer work (**Show newer forks only**, the default) or every recently active fork (**Show all forks**). **Scan Now** scans for whichever is selected.
+Fork Finder lists forks of your mods with newer work (**Show newer forks only**, the default) or every recently active fork (**Show all forks**). **Scan Now** scans for whichever is selected. A scan only looks for forks: it never updates or changes a mod.
+
+![Fork Finder buttons and status line](images/fork-finder-top.png)
+
+While a scan runs, the status line and **NEWER SCAN IN PROGRESS** ride a wave, and the last result stays on screen with its date until the new one is in. With a GitHub token a repeat scan usually takes well under a minute.
+
+![A scan in progress](images/fork-finder-scan.gif)
+
+Hover a mod in the list to see which copy is the most recently updated one. **View Forks** lists every fork of that mod: hover a fork for what it changed, how many commits it has that you don't (and the other way round), and press **Switch to Fork**. **Switch Back** returns to the copy you had. Tick **Ignore scans** on forks you never want to see again.
+
+![List hover](images/fork-finder-list-hover.png)
+
+![Your current copy](images/fork-finder-your-copy-hover.png)
+
+![A fork's hover in View Forks](images/fork-finder-fork-hover.png)
 
 GitHub only allows 60 requests per hour without a token, so a scan of a big mod list stops early. **Fix it once, in about a minute:**
 
-1. Open **Fork Finder**, click **GitHub token**, then **Open GitHub page**.
-2. Name: `Balatro Mod Updater`. Expiration: `90 days`. Repository access: **Public repositories (read-only)**. Leave all permissions untouched.
+1. Open **Fork Finder**, click **GitHub token**, then **Open GitHub page** (log in if GitHub asks).
+2. The token name and **Expiration: 90 days** are already filled in. Set **Repository access** to **Public repositories (read-only)** and leave every permission untouched.
 3. Click **Generate token** and copy it (starts with `github_pat_`).
 4. Back in the game click **Paste token**, then **Scan Now**.
+
+![The GitHub token help in the game](images/github-token-help.png)
+
+![GitHub's new token page, already filled in](images/github-token-page-1.png)
+
+![Leave the permissions empty and click Generate token](images/github-token-page-2.png)
 
 The token only reads public data. When it expires the next scan offers **Yes, replace it**.
 
@@ -112,6 +169,9 @@ The token only reads public data. When it expires the next scan offers **Yes, re
 ## If the game won't start after an update
 
 1. **Crash before the main menu:** a recovery screen lists the mods that were just updated. Choose **Put them all back and restart**, **Choose which mods to put back...**, or **Show the crash report** (changes nothing).
+
+   ![The crash recovery screen](images/crash-recovery-screen.png)
+
 2. **The game reaches the main menu after a failed start:** the **Crash Detected** question appears. Nothing changes until you answer.
 3. **Neither screen shows up:** close Balatro and double-click `Undo last update.bat`. Press **Enter** to put everything back, type numbers like `1,3` for only some, or `K` to keep everything.
 4. **A Steam update broke your mods:** the Updater switches back to the saved game by itself. By hand, close Balatro and run `Use backed up game.bat`.
@@ -133,6 +193,7 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 ## Known limits and troubleshooting
 
 **Install and environment**
+- **Steam still shows Resume after you quit.** The Updater ends its background check within a few seconds of the game closing. If Steam still waits, read `quit_watch.log` in the Updater folder: it records each check and what was stopped at quit.
 - **The game window never appears after Restart now.** Read `amu_restart_helper.log` in the Balatro save folder. Since 1.0.1 the helper restarts the game once by itself when Lovely hangs at start-up; if it says `stuck` twice, send that log and the two newest files in `Mods\lovely\log`.
 - **Game does not relaunch after Restart now.** Task Scheduler may be blocked by antivirus or a work policy. The Updater falls back to the `steam://` link: start the game from Steam yourself.
 - **Updates never run.** Check that Windows PowerShell 5.1 is installed and scripts are allowed to start.
@@ -156,6 +217,16 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 - **Old copies of a mod inside `Mods`:** two mods with the same ID crash the game. Move backups and `.bak` copies out of `Mods`.
 
 ## Changelog
+
+### 1.0.27
+- Fixed: Steam still showed the game as running after you quit during an update check or fork scan. Waiting on the internet (downloads, GitHub calls, git fetch) is now cut at once when the game closes, a step that writes files gets at most 20 seconds, and any git process the check started is ended with it. A git lock left by a cut-short fetch is cleared at the next check. `quit_watch.log` in the Updater folder records each quit.
+- Fixed (since 1.0.26): the background check kept running after it was done, so the game only noticed through its 5 minute timeout, and **Unpin** stayed on "Checking for a newer version..." for good. The check now ends itself as soon as it is done, and the Unpin check also stops waiting after the usual timeout and reads the result.
+- Faster: **Scan Now** only scans forks. It no longer runs the whole mod update first (mods are still updated at every launch and by **Check for updates now**) and reads your mods exactly as installed.
+- Faster: with a GitHub token, the fork scan checks the GitHub answers it used last time up to 8 at once. Every answer is still checked with GitHub during the scan, so results are as fresh as before. A repeat scan went from minutes to about 14 seconds on a list of about 60 mods.
+- Faster: the update check fetches up to 6 git mods at once. A fetch that fails that way is run again the normal way.
+- Faster: backups and unzipping use .NET directly instead of Compress-Archive / Expand-Archive. The Updater's own backup leaves out its GitHub cache and saved Steamodded / Lovely copies (a restore keeps the current ones anyway). One self-update had taken over 13 minutes because of this.
+- Changed: with nothing to list, Fork Finder says "No newer forks found on last scan (MM-DD-YY)." While a scan runs it adds **NEWER SCAN IN PROGRESS**, and that and the "Scanning for forks..." line ride the same wave as "Shuffling mods...". Other messages on that line stay still.
+- Changed: the **Open fork page / Release** button in View Forks is a little wider and its text uses the biggest size that still fits.
 
 ### 1.0.26
 - Fixed: Steam kept showing the game as running after you quit during an update check or fork scan. The 1.0.22 fix only looked between steps, so one slow step still held Steam. A second thread in autoupdate.ps1 now ends the script as soon as Balatro exits. A step that writes files (installing a mod, a framework update, saving a JSON file or a GitHub answer) always finishes first, so nothing is left half written.

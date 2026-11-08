@@ -968,6 +968,8 @@ local function run_single_mod_check(folder_name, on_done)
   ]], ch_name)
   local t = love.thread.newThread(thread_code)
   t:start(cmd)
+  local single_t0 = love.timer and love.timer.getTime and love.timer.getTime() or 0
+  local single_os0 = os.time()
 
   G.E_MANAGER:add_event(Event({
     blockable = false,
@@ -975,6 +977,16 @@ local function run_single_mod_check(folder_name, on_done)
     no_delete = true,   -- survive the event-queue wipe when a run starts
     func = function()
       local msg = channel:pop()
+      -- Safety net like the startup check: if PowerShell never reports back, stop waiting after the usual timeout and use
+      -- last_run.json when it was written after this check started, so the message can never stay on "Checking..." for good.
+      if not msg and love.timer and love.timer.getTime and (love.timer.getTime() - single_t0) > (tonumber(config.ui_timeout_seconds) or 300) then
+        local fresh = false
+        pcall(function()
+          local info = love.filesystem.getInfo("Mods/" .. tostring(mod_path):match("([^/\\]+)[/\\]*$") .. "/last_run.json")
+          if info and info.modtime and info.modtime >= single_os0 - 2 then fresh = true end
+        end)
+        msg = fresh and "done" or "error"
+      end
       if msg then
         amu_per_mod_checking[folder_name] = nil
         local summary_path = join_path(mod_path, "last_run.json")
@@ -4064,7 +4076,9 @@ amu_extra_tabs_raw = function()
             }},
             { n = G.UIT.R, config = { align = "cm", padding = 0 }, nodes = { { n = G.UIT.B, config = { w = 0.1, h = 0.07 } } } },
             { n = G.UIT.R, config = { align = "cm", padding = 0.01, minh = 0.34 }, nodes = {
-              { n = G.UIT.T, config = { ref_table = amu_fork_status, ref_value = "text", scale = 0.33, colour = purple } },
+              { n = G.UIT.O, config = { object = AMU_WAVE_TEXT({ ref_table = amu_fork_status, ref_value = "text", scale = 0.33, colour = purple,
+                -- only the scanning message waves; other messages shown during a scan ("Opened ... in your browser.") stay still
+                active = function() return amu_fork_scanning and tostring(amu_fork_status.text or ""):sub(1, 18) == "Scanning for forks" end }) } },
               amu_gap(0.2),
               { n = G.UIT.C, config = { align = "cm", padding = 0.02, minw = 2.3, minh = 0.36, r = 0.09,
                 colour = G.C.BLUE, button = "amu_fork_ign_filter", hover = true, shadow = true }, nodes = {
@@ -4126,6 +4140,37 @@ pcall(write_ps1_config_overlay)
 ---------------------------------------------------------------------------
 -- Loading definition: transparent (no panel), purple text
 ---------------------------------------------------------------------------
+
+-- A line of text whose letters ride the same travelling wave as "Shuffling mods..." on the main menu, with "..." counting up.
+-- o.text = fixed text, or o.ref_table / o.ref_value = text that follows a table field (the line resizes itself when it changes).
+-- o.active = optional function: the wave only runs while it returns true (otherwise the text sits still).
+function AMU_WAVE_TEXT(o)
+  o = o or {}
+  local str = o.ref_table and { { ref_table = o.ref_table, ref_value = o.ref_value or "text" } } or { tostring(o.text or "") }
+  local text = DynaText({
+    string = str, colours = { o.colour or G.C.UI.TEXT_LIGHT }, scale = o.scale or 0.4, shadow = o.shadow, silent = true,
+  })
+  local orig_align = text.align_letters
+  text.align_letters = function(self)
+    orig_align(self)
+    local on = (o.active == nil) or (o.active() and true or false)
+    local amp = (on and not (G.SETTINGS and G.SETTINGS.reduced_motion))
+      and math.sqrt(self.scale) * (self.font.FONTSCALE / G.TILESIZE) * 3000 or 0
+    local t = G.TIMERS.REAL
+    local letters = self.strings[self.focused_string] and self.strings[self.focused_string].letters or {}
+    local shown = 1 + math.floor(t * 2.5) % 3
+    local dot_n = 0
+    for k, letter in ipairs(letters) do
+      letter.offset.y = amp * math.sin(4.2 * t - 0.42 * k)
+      if letter.char == "." then
+        dot_n = dot_n + 1
+        -- only the first three dots count up (the "..."), and only while the wave runs; hidden dots keep their space
+        letter.pop_in = (on and dot_n <= 3 and dot_n > shown) and 0 or 1
+      end
+    end
+  end
+  return text
+end
 
 G.UIDEF.amu_loading_box = function(ref)
   ref = ref or {}
@@ -5487,6 +5532,9 @@ local function run_fork_scan()
   AMU_FIND.scan_label.text = "Scanning"
   amu_fork_status.text = "Scanning for forks... (may take a minute)"
   AMU_FIND.scan_started = os.time()
+  pcall(function()
+    if #AMU_FIND.entries("forks", config.sort_forks) == 0 then amu_reopen_if_open("amu_fork_mod_list") end
+  end)
   local keys_before = AMU_FIND.fork_keys()
 
   local channel = love.thread.getChannel("amu_fork_scan")
@@ -6063,19 +6111,21 @@ G.UIDEF.amu_fork_picker = function(ref)
     -- the "open the fork's page" button, right under the changes
     local rel = tostring(fork.latest_release_tag or "")
     local reld = AMU_FIND.d10(fork.latest_release_at)
-    local open_label = "Open fork page" .. (rel ~= "" and ("     Release: " .. rel .. (reld and ("  " .. reld) or "")) or "")
-    local open_scale = 0.3
-    if amu_text_w(open_label, open_scale) > CARD_W - 3.7 and rel ~= "" then
-      open_label = "Open fork page   Release: " .. rel .. (reld and (" " .. reld) or "")
-    end
-    for _, sc in ipairs({ 0.27, 0.24, 0.21 }) do
-      if amu_text_w(open_label, open_scale) <= CARD_W - 3.7 then break end
-      open_scale = sc
+    -- Biggest text that still fits inside the button: try each size with the roomy spacing, then the tighter spacing.
+    local wide_label  = "Open fork page" .. (rel ~= "" and ("     Release: " .. rel .. (reld and ("  " .. reld) or "")) or "")
+    local tight_label = "Open fork page" .. (rel ~= "" and ("   Release: " .. rel .. (reld and (" " .. reld) or "")) or "")
+    -- The button uses the empty space right of "Ignore scans" (it was 0.6 narrower); the text keeps 0.15 clear at each end.
+    local OPEN_BTN_W = CARD_W - 2.8
+    local OPEN_TXT_W = OPEN_BTN_W - 0.3
+    local open_label, open_scale = tight_label, 0.21
+    for _, sc in ipairs({ 0.4, 0.38, 0.36, 0.34, 0.32, 0.3, 0.27, 0.24, 0.21 }) do
+      if amu_text_w(wide_label, sc) <= OPEN_TXT_W then open_label, open_scale = wide_label, sc; break end
+      if amu_text_w(tight_label, sc) <= OPEN_TXT_W then open_label, open_scale = tight_label, sc; break end
     end
     card[#card + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02 }, nodes = {
-      { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = CARD_W - 3.4, minh = 0.38, r = 0.09,
+      { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = OPEN_BTN_W, minh = 0.38, r = 0.09,
           colour = G.C.BLUE, button = "amu_open_fork_" .. slot, hover = true, shadow = true, on_demand_tooltip = tip }, nodes = {
-        { n = G.UIT.T, config = { text = amu_fit(open_label, open_scale, CARD_W - 3.7), scale = open_scale, colour = G.C.UI.TEXT_LIGHT } } } },
+        { n = G.UIT.T, config = { text = amu_fit(open_label, open_scale, OPEN_TXT_W), scale = open_scale, colour = G.C.UI.TEXT_LIGHT } } } },
       { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
       { n = G.UIT.C, config = { align = "cm", padding = 0.03, minw = 0.42, minh = 0.42, r = 0.07,
           colour = is_ign and G.C.RED or RGBA(0.78, 0.78, 0.86, 1), button = "amu_ignore_fork_" .. slot, hover = true, shadow = true }, nodes = {
@@ -6141,13 +6191,23 @@ build_fork_mods_page = function(page)
   local rows = {}
 
   if #entries == 0 then
-    local msg = (amu_fork_suggestions and amu_fork_suggestions.suggestions)
-      and ((config.fork_newer_only ~= false) and "No newer forks found." or "No forks found.")
-      or "No fork data yet. Press 'Scan Now'."
+    local msg
+    if amu_fork_suggestions and amu_fork_suggestions.suggestions then
+      -- "No newer forks found on last scan (11-08-26)." The date is the day of the scan these results come from.
+      local y, m, d = tostring(amu_fork_suggestions.checked_at or ""):match("^(%d%d%d%d)-(%d%d)-(%d%d)")
+      msg = ((config.fork_newer_only ~= false) and "No newer forks found" or "No forks found") .. " on last scan"
+        .. (y and (" (" .. m .. "-" .. d .. "-" .. y:sub(3, 4) .. ")") or "") .. "."
+    else
+      msg = amu_fork_scanning and "No fork data yet." or "No fork data yet. Press 'Scan Now'."
+    end
     local searching = AMU_FIND.active("forks") and AMU_FIND.total.forks > 0
     if searching then msg = "No mods match your search" end
-    rows[1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H }, nodes = {
-      { n = G.UIT.T, config = { text = msg, scale = 0.42, colour = purple } } } }
+    local first = { { n = G.UIT.T, config = { text = msg, scale = 0.42, colour = purple } } }
+    if amu_fork_scanning and not searching then
+      first[#first + 1] = { n = G.UIT.B, config = { w = 0.3, h = 0.1 } }
+      first[#first + 1] = { n = G.UIT.O, config = { object = AMU_WAVE_TEXT({ text = "NEWER SCAN IN PROGRESS", scale = 0.38, colour = orange }) } }
+    end
+    rows[1] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H }, nodes = first }
     if not searching and amu_fork_suggestions and amu_fork_suggestions.suggestions and config.fork_newer_only ~= false then
       rows[2] = { n = G.UIT.R, config = { align = "cl", padding = 0.02, minh = AMU_FORK_ROW_H }, nodes = {
         { n = G.UIT.T, config = { text = "Press 'Show all forks' to see older ones too.", scale = 0.36, colour = G.C.UI.TEXT_LIGHT } } } }

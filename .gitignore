@@ -40,3 +40,4 @@ Test *.bat
 _backup_pre_*/
 _to_delete/
 Nexus Release Prep/
+quit_watch.log

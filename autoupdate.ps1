@@ -32,33 +32,76 @@ $ErrorActionPreference = "Stop"
 # that is already running (a mod being installed) always finishes first, so no mod is left half written. The rest is simply
 # checked at the next launch. Runs started by hand (the .bat files) or for a restore / switch have no Balatro parent and
 # are never cut short.
+# quit_watch.log (next to autoupdate.ps1) records what the quit watch saw, so a Steam "Resume" that lingers can be traced.
+$script:quitLog = Join-Path ($SelfDir.Trim().Trim('"')) "quit_watch.log"
+function Write-QuitLog([string]$msg) {
+  try {
+    if ((Test-Path -LiteralPath $script:quitLog) -and (Get-Item -LiteralPath $script:quitLog).Length -gt 40000) {
+      $keep = @(Get-Content -LiteralPath $script:quitLog -Tail 60)
+      Set-Content -LiteralPath $script:quitLog -Value $keep
+    }
+    Add-Content -LiteralPath $script:quitLog -Value ((Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff") + "  [" + $PID + "] " + $msg)
+  } catch {}
+}
 $script:gameProc = $null
 $script:quitEarly = $false
 try {
   if (-not $Interactive -and -not $RollbackRecent -and $RestoreModName -eq "" -and $RestoreFrameworkName -eq "" -and $UseGameBackup -eq "" -and $SwitchModName -eq "" -and $SwitchBackModName -eq "") {
+    $quitMode = if ($CheckForks) { "fork scan" } else { "update check" }
+    $chain = New-Object System.Collections.Generic.List[string]
     $walkId = $PID
     for ($i = 0; $i -lt 5 -and -not $script:gameProc; $i++) {
       $row = Get-CimInstance Win32_Process -Filter "ProcessId=$walkId" -ErrorAction Stop
       if (-not $row -or -not $row.ParentProcessId) { break }
       $par = Get-Process -Id ([int]$row.ParentProcessId) -ErrorAction SilentlyContinue
-      if (-not $par) { break }
+      if (-not $par) { [void]$chain.Add("pid " + $row.ParentProcessId + " (not running)"); break }
+      [void]$chain.Add($par.ProcessName + " " + $par.Id)
       if ($par.ProcessName -ieq "Balatro") { $script:gameProc = $par; [void]$par.Handle }
       $walkId = [int]$row.ParentProcessId
     }
+    if ($script:gameProc) { Write-QuitLog ($quitMode + " started, watching Balatro pid " + $script:gameProc.Id + " (parents: " + ($chain -join " <- ") + ")") }
+    else { Write-QuitLog ($quitMode + " started, NO Balatro parent found, so no quit watch (parents: " + ($chain -join " <- ") + ")") }
   }
-} catch { $script:gameProc = $null }
+} catch { $script:gameProc = $null; Write-QuitLog ("could not look for Balatro: " + $_.Exception.Message) }
 
 function Test-GameGone() {
   if (-not $script:gameProc) { return $false }
   try { return [bool]$script:gameProc.HasExited } catch { return $false }
 }
 
-# Hard stop: a second thread waits for Balatro to exit and then ends this script, unless a step that writes files (installing a
-# mod, a framework update, saving a JSON file) is running; it waits for that step to finish first. Without it, one slow step
-# (a long GitHub call, a fork comparison) kept Steam on "Resume" because the script only looked between steps.
-$script:amuBusy = [hashtable]::Synchronized(@{ n = 0 })
+# End the run. When the quit watch is on, its second thread is still waiting for Balatro to close, and that thread kept
+# powershell.exe alive after the script was done, so the game never heard "done" (startup check finished only by the game's
+# 5 minute timeout, the Unpin check stayed on "Checking..."). [Environment]::Exit ends the process with every thread.
+function Stop-AmuRun([int]$code = 0) {
+  if ($script:gameProc) {
+    try { Write-QuitLog ("finished, ending the process (exit code " + $code + ")") } catch {}
+    [Environment]::Exit($code)
+  }
+  exit $code
+}
+# A run with the quit watch that stops on an error nobody caught must also end its process (same reason as above).
+trap {
+  if ($script:gameProc) {
+    try { Write-QuitLog ("stopped by an error: " + $_.Exception.Message) } catch {}
+    try { if ($summaryPath -and $summary) { $summary.errors += ("Stopped: " + $_.Exception.Message); Save-JsonNoBom $summaryPath $summary } } catch {}
+    [Environment]::Exit(1)
+  }
+  break
+}
+
+# Hard stop: a second thread waits for Balatro to exit and then ends this script and everything it started (git, downloads).
+# Steam keeps showing a game as running until every process started from it has exited, so both matter: a script that kept going
+# (a long GitHub call, a fork comparison) and a git.exe left behind when the script ends. Only a step that writes files (installing
+# a mod, a framework update, saving a JSON file) is allowed to finish first, for at most 20 seconds. Waiting on the internet
+# (a download, a GitHub call, git fetch) is not such a step: it writes nothing into a mod, so it is cut at once.
+$script:amuBusy = [hashtable]::Synchronized(@{ n = 0; net = 0 })
 function Enter-Busy() { $script:amuBusy.n = [int]$script:amuBusy.n + 1 }
 function Leave-Busy() { $script:amuBusy.n = [Math]::Max(0, [int]$script:amuBusy.n - 1) }
+function Enter-Net() { $script:amuBusy.net = [int]$script:amuBusy.net + 1 }
+function Leave-Net() { $script:amuBusy.net = [Math]::Max(0, [int]$script:amuBusy.net - 1) }
+# Every web call in this script goes through these two, so each one is marked as "waiting on the internet".
+function Invoke-WebRequest { Enter-Net; try { Microsoft.PowerShell.Utility\Invoke-WebRequest @args } finally { Leave-Net } }
+function Invoke-RestMethod { Enter-Net; try { Microsoft.PowerShell.Utility\Invoke-RestMethod @args } finally { Leave-Net } }
 try {
   if ($script:gameProc) {
     $wdRs = [runspacefactory]::CreateRunspace()
@@ -66,18 +109,49 @@ try {
     $wdPs = [powershell]::Create()
     $wdPs.Runspace = $wdRs
     [void]$wdPs.AddScript({
-      param($gamePid, $state)
+      param($gamePid, $state, $logPath)
+      function Log([string]$m) {
+        try { Add-Content -LiteralPath $logPath -Value ((Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff") + "  [" + [System.Diagnostics.Process]::GetCurrentProcess().Id + "] " + $m) } catch {}
+      }
+      $gone = $false
       try {
         $gp = [System.Diagnostics.Process]::GetProcessById([int]$gamePid)
         [void]$gp.WaitForExit()
-        $waited = 0
-        while ([int]$state.n -gt 0 -and $waited -lt 600) { Start-Sleep -Milliseconds 250; $waited++ }
-        [Environment]::Exit(0)
-      } catch {}
-    }).AddArgument($script:gameProc.Id).AddArgument($script:amuBusy)
+        $gone = $true
+      } catch [System.ArgumentException] { $gone = $true } catch { Log ("watch could not wait for Balatro: " + $_.Exception.Message) }
+      if (-not $gone) { return }
+      Log ("Balatro closed; writing steps running: " + ([int]$state.n - [int]$state.net) + " (of " + [int]$state.n + ", " + [int]$state.net + " only waiting on the internet)")
+      $waited = 0
+      while (([int]$state.n - [int]$state.net) -gt 0 -and $waited -lt 80) { Start-Sleep -Milliseconds 250; $waited++ }
+      if ($waited -ge 80) { Log "a writing step was still running after 20 s, ending anyway" } elseif ($waited -gt 0) { Log ("writing step finished after " + ($waited * 250) + " ms") }
+      try {
+        $me = [int][System.Diagnostics.Process]::GetCurrentProcess().Id
+        $names = New-Object System.Collections.Generic.List[string]
+        for ($pass = 0; $pass -lt 3; $pass++) {
+          $rows = @(Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object ProcessId, ParentProcessId, Name)
+          $kids = New-Object System.Collections.Generic.List[int]
+          $queue = New-Object System.Collections.Generic.Queue[int]
+          $queue.Enqueue($me)
+          while ($queue.Count -gt 0) {
+            $cur = $queue.Dequeue()
+            foreach ($r in $rows) {
+              $rid = [int]$r.ProcessId
+              if ([int]$r.ParentProcessId -eq $cur -and $rid -ne $me -and -not $kids.Contains($rid)) { $kids.Add($rid); $queue.Enqueue($rid); $names.Add([string]$r.Name + " " + $rid) }
+            }
+          }
+          if ($kids.Count -eq 0) { break }
+          foreach ($k in $kids) { try { Stop-Process -Id $k -Force -ErrorAction SilentlyContinue } catch {} }
+          Start-Sleep -Milliseconds 100
+        }
+        if ($names.Count -gt 0) { Log ("stopped child processes: " + ($names -join ", ")) } else { Log "no child processes left" }
+      } catch { Log ("could not stop child processes: " + $_.Exception.Message) }
+      Log "ending the script"
+      try { [System.Diagnostics.Process]::GetCurrentProcess().Kill() } catch {}
+      [Environment]::Exit(0)
+    }).AddArgument($script:gameProc.Id).AddArgument($script:amuBusy).AddArgument($script:quitLog)
     [void]$wdPs.BeginInvoke()
   }
-} catch {}
+} catch { Write-QuitLog ("could not start the quit watch: " + $_.Exception.Message) }
 
 function Ensure-Dir([string]$path) {
   if (-not (Test-Path -LiteralPath $path)) { New-Item -ItemType Directory -Path $path | Out-Null }
@@ -154,6 +228,8 @@ function Split-ReleaseNotes([string]$body, [int]$max = 8) {
 $script:releaseNotes = @{}   # folder name -> @{ tag = ...; notes = @(...) } for non-git updates done in this run
 
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+# Windows PowerShell 5.1 opens only 2 connections at a time to one site, which would undo the parallel checks below.
+try { if ([Net.ServicePointManager]::DefaultConnectionLimit -lt 16) { [Net.ServicePointManager]::DefaultConnectionLimit = 16 } } catch {}
 # Windows PowerShell 5.1's progress bar makes Invoke-WebRequest downloads many times slower.
 $ProgressPreference = "SilentlyContinue"
 
@@ -377,7 +453,77 @@ function Get-GhCacheKey([string]$s) {
   try { $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($s)) } finally { $sha.Dispose() }
   return (($bytes | ForEach-Object { $_.ToString("x2") }) -join "")
 }
+# Fork scan speed-up: every address the last scan asked GitHub is asked again at the start, up to 8 at once, with the saved
+# ETag ("has it changed?"). Get-GhJson then uses that answer instead of asking again, so each answer is exactly as fresh as
+# before (checked during this scan). Addresses the scan did not ask last time, and any that failed here, are asked the normal way.
+# Only with a GitHub token: GitHub does not count a "not changed" answer against a token's hourly limit.
+$script:ghPre = @{}
+$script:ghUrlsUsed = $null
+function Invoke-GhPrefetch([string[]]$urls, $headers) {
+  $script:ghPre = @{}
+  if (-not $urls -or $urls.Count -eq 0) { return }
+  $items = @()
+  foreach ($u in $urls) {
+    try {
+      $key = Get-GhCacheKey $u
+      $ef = Join-Path $script:ghCacheDir "$key.etag"
+      $bf = Join-Path $script:ghCacheDir "$key.ghc"
+      if ((Test-Path -LiteralPath $ef) -and (Test-Path -LiteralPath $bf)) {
+        $et = ([System.IO.File]::ReadAllText($ef)).Trim()
+        if ($et -ne "") { $items += ,@($u, $et) }
+      }
+    } catch {}
+  }
+  if ($items.Count -eq 0) { return }
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  $res = [hashtable]::Synchronized(@{})
+  $hdr = @{}
+  foreach ($k in $headers.Keys) { $hdr[$k] = $headers[$k] }
+  $pool = $null; $jobs = @()
+  Enter-Net
+  try {
+    $pool = [runspacefactory]::CreateRunspacePool(1, 8)
+    $pool.Open()
+    foreach ($it in $items) {
+      $ps = [powershell]::Create()
+      $ps.RunspacePool = $pool
+      [void]$ps.AddScript({
+        param($u, $et, $hdr, $res)
+        $ProgressPreference = "SilentlyContinue"
+        $h = @{}
+        foreach ($k in $hdr.Keys) { $h[$k] = $hdr[$k] }
+        $h["If-None-Match"] = $et
+        try {
+          $r = Invoke-WebRequest -Uri $u -Headers $h -UseBasicParsing -TimeoutSec 30
+          $tag = ""
+          try { $tag = [string]$r.Headers["ETag"] } catch {}
+          $res[$u] = @{ s = 200; c = [string]$r.Content; e = $tag; sent = $et }
+        } catch {
+          $st = 0
+          try { $st = [int]$_.Exception.Response.StatusCode } catch {}
+          if ($st -eq 304) { $res[$u] = @{ s = 304; sent = $et } }
+        }
+      }).AddArgument($it[0]).AddArgument($it[1]).AddArgument($hdr).AddArgument($res)
+      $jobs += @{ ps = $ps; h = $ps.BeginInvoke() }
+    }
+    $limit = (Get-Date).AddSeconds(120)
+    while ((@($jobs | Where-Object { -not $_.h.IsCompleted })).Count -gt 0 -and (Get-Date) -lt $limit) {
+      if (Test-GameGone) { $script:quitEarly = $true; break }
+      Start-Sleep -Milliseconds 50
+    }
+  } catch {
+  } finally {
+    Leave-Net
+    foreach ($j in $jobs) { try { if ($j.h.IsCompleted) { [void]$j.ps.EndInvoke($j.h) }; $j.ps.Dispose() } catch {} }
+    try { if ($pool) { $pool.Close(); $pool.Dispose() } } catch {}
+  }
+  foreach ($k in @($res.Keys)) { $script:ghPre[$k] = $res[$k] }
+  try { $script:apiSecTotal += $sw.Elapsed.TotalSeconds } catch {}
+  Add-Timing ("GitHub answers checked " + $items.Count + " at once (" + $script:ghPre.Count + " answered)") $sw
+}
+
 function Get-GhJson([string]$uri, $headers) {
+  if ($null -ne $script:ghUrlsUsed) { [void]$script:ghUrlsUsed.Add($uri) }
   if ($config.use_github_cache -eq $false) { return (Invoke-RestMethod -Uri $uri -Headers $headers) }
   $key = Get-GhCacheKey $uri
   $etagFile = Join-Path $script:ghCacheDir "$key.etag"
@@ -391,6 +537,24 @@ function Get-GhJson([string]$uri, $headers) {
       if ($et -ne "") { $h["If-None-Match"] = $et; $haveCache = $true }
     }
   } catch { $haveCache = $false }
+  # An answer already fetched at the start of this fork scan (Invoke-GhPrefetch) for the same ETag we hold.
+  $pre = $null
+  if ($script:ghPre.Count -gt 0 -and $script:ghPre.ContainsKey($uri)) {
+    $pre = $script:ghPre[$uri]
+    $script:ghPre.Remove($uri)
+    if (-not $haveCache -or [string]$pre.sent -ne [string]$h["If-None-Match"]) { $pre = $null }
+  }
+  if ($pre -and $pre.s -eq 304) {
+    $script:ghCacheHits++
+    $raw = [System.IO.File]::ReadAllText($bodyFile, [System.Text.Encoding]::UTF8)
+    try { [System.IO.File]::SetLastWriteTime($bodyFile, (Get-Date)) } catch {}
+    return (ConvertFrom-Json -InputObject $raw)
+  }
+  $preEtag = ""
+  if ($pre -and $pre.s -eq 200) {
+    $content = [string]$pre.c
+    $preEtag = [string]$pre.e
+  } else {
   $swApi = [System.Diagnostics.Stopwatch]::StartNew()
   try {
     $resp = Invoke-WebRequest -Uri $uri -Headers $h -UseBasicParsing
@@ -406,10 +570,11 @@ function Get-GhJson([string]$uri, $headers) {
     throw
   }
   $content = [string]$resp.Content
+  }
   $script:ghCacheFresh++
   try {
-    $etag = ""
-    try { $etag = [string]$resp.Headers["ETag"] } catch {}
+    $etag = $preEtag
+    if (-not $pre) { try { $etag = [string]$resp.Headers["ETag"] } catch {} }
     if ($etag -and $content.Length -lt 900000) {
       if (-not (Test-Path -LiteralPath $script:ghCacheDir)) { New-Item -ItemType Directory -Path $script:ghCacheDir -Force | Out-Null }
       $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -455,12 +620,80 @@ $targetModFilter = $TargetMod.Trim().Trim('"')
 $backupRoot = Join-Path $modsDirResolved "_Balatro-Mod-Updater_Backups"
 try { Ensure-Dir $backupRoot } catch { $summary.errors += "Couldn't create backup folder '$backupRoot': $($_.Exception.Message)" }
 
+# Zipping with .NET directly. Compress-Archive / Expand-Archive in Windows PowerShell 5.1 do a lot of work per file and took
+# minutes on the Updater's own folder. Same zip format, so older backups and the restore code work unchanged.
+# Like the old "folder\*" wildcard, hidden items at the top (the hidden .git folder of a git clone) are left out; a restore keeps
+# the mod's own .git anyway. $skipTop names more top-level items to leave out. Files that cannot be read (in use) are skipped
+# and counted. Returns that count.
+function New-ZipFast([string]$srcDir, [string]$dest, [string[]]$skipTop) {
+  Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+  Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+  $root = [IO.Path]::GetFullPath($srcDir).TrimEnd('\', '/')
+  $part = "$dest.partial"
+  if (Test-Path -LiteralPath $part) { Remove-Item -LiteralPath $part -Force }
+  $skipped = 0
+  $fs = [IO.File]::Open($part, [IO.FileMode]::CreateNew)
+  try {
+    $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+      $stack = New-Object System.Collections.Generic.Stack[string]
+      $stack.Push($root)
+      while ($stack.Count -gt 0) {
+        $d = $stack.Pop()
+        $rel = if ($d.Length -gt $root.Length) { $d.Substring($root.Length + 1).Replace('\', '/') + '/' } else { '' }
+        $items = @(Get-ChildItem -LiteralPath $d -Force -ErrorAction SilentlyContinue)
+        if ($items.Count -eq 0 -and $rel -ne '') { [void]$zip.CreateEntry($rel) }
+        foreach ($it in $items) {
+          if ($rel -eq '') {
+            if ($it.Name -eq ".git" -or ($it.Attributes -band [IO.FileAttributes]::Hidden)) { continue }
+            if ($skipTop -and ($skipTop -contains $it.Name)) { continue }
+          }
+          if ($it.PSIsContainer) {
+            if (-not ($it.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $stack.Push($it.FullName) }
+            continue
+          }
+          try { [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $it.FullName, $rel + $it.Name, [System.IO.Compression.CompressionLevel]::Optimal) }
+          catch { $skipped++ }
+        }
+      }
+    } finally { $zip.Dispose() }
+  } finally { $fs.Dispose() }
+  Move-Item -LiteralPath $part -Destination $dest -Force
+  return $skipped
+}
+
+# Unzip into a new, empty folder with .NET (fast). Anything unusual falls back to Expand-Archive, which then reports real errors.
+function Expand-ZipFast([string]$zipPath, [string]$dest) {
+  $done = $false
+  try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+    $empty = (-not (Test-Path -LiteralPath $dest)) -or (@(Get-ChildItem -LiteralPath $dest -Force -ErrorAction Stop).Count -eq 0)
+    if ($empty) { [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $dest); $done = $true }
+  } catch { $done = $false }
+  if (-not $done) { Expand-Archive -LiteralPath $zipPath -DestinationPath $dest -Force }
+}
+
 function Backup-Folder([string]$folderPath, [string]$folderName) {
   if (-not $config.make_backups) { return $null }
   $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
   $dest = Join-Path $backupRoot "$folderName-$stamp.zip"
+  # The Updater's own caches and its saved Steamodded / Lovely copies are not part of the mod, and a restore of the Updater keeps
+  # the current ones anyway, so its backup leaves them out (they made that backup take minutes).
+  $skipTop = @()
+  if (Test-IsSelfFolder $folderPath) { $skipTop = @("_gh_cache", "_framework_backups", "_pending_framework_updates") }
   try {
     if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force }
+    $fastOk = $false
+    try {
+      Enter-Busy
+      try { $nSkip = New-ZipFast $folderPath $dest $skipTop } finally { Leave-Busy }
+      $fastOk = $true
+      if ($nSkip -gt 0) { $summary.skipped_mods += "$folderName (backup left out $nSkip file(s) that were in use)" }
+    } catch {
+      try { if (Test-Path -LiteralPath "$dest.partial") { Remove-Item -LiteralPath "$dest.partial" -Force } } catch {}
+      try { if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force } } catch {}
+    }
+    if ($fastOk) { return (Split-Path -Leaf $dest) }
     try {
       Compress-Archive -Path (Join-Path $folderPath "*") -DestinationPath $dest -Force -ErrorAction Stop
     } catch {
@@ -604,7 +837,7 @@ function Restore-ModBackup([string]$modName, [string]$backupFile) {
   # Extract backup to a temp directory first so we can copy cleanly
   $tmpExtract = Join-Path ([IO.Path]::GetTempPath()) ("amu_restore_" + [Guid]::NewGuid().ToString("N"))
   Ensure-Dir $tmpExtract
-  Expand-Archive -LiteralPath $backupPath -DestinationPath $tmpExtract -Force
+  Expand-ZipFast $backupPath $tmpExtract
 
   # Remove existing mod contents (keep .git to avoid destroying git history)
   Get-ChildItem -LiteralPath $modPath -Force |
@@ -792,7 +1025,7 @@ function Restore-FrameworkNow([string]$name, [string]$backupFile, [string]$resto
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("amu_fwnow_" + [Guid]::NewGuid().ToString("N"))
     Ensure-Dir $tmp
     try {
-      Expand-Archive -LiteralPath $bk -DestinationPath $tmp -Force
+      Expand-ZipFast $bk $tmp
       if (-not (Get-ChildItem -LiteralPath $tmp -Force | Select-Object -First 1)) { throw "the backup zip is empty" }
       if (Test-Path -LiteralPath $dst) {
         Get-ChildItem -LiteralPath $dst -Force | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
@@ -1446,18 +1679,90 @@ if ($RestoreModName -ne "" -and $RestoreBackupFile -ne "") {
 }
 
 
+# "git fetch --all --prune" for many mods at once (up to 6 together) before the update loop. Each mod's own fetch in the loop then
+# uses that answer (Run-Git below), so the result is the same as before, only sooner. A fetch that failed here is simply run
+# again the normal way, so a hiccup from running several at once never shows up as an error.
+$script:gitPre = @{}
+function Invoke-GitPrefetch([string[]]$paths) {
+  $script:gitPre = @{}
+  if (-not $paths -or $paths.Count -lt 2) { return }
+  if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return }
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  foreach ($p in $paths) { Clear-StaleGitLocks $p }
+  $res = [hashtable]::Synchronized(@{})
+  $pool = $null; $jobs = @()
+  Enter-Net
+  try {
+    $pool = [runspacefactory]::CreateRunspacePool(1, 6)
+    $pool.Open()
+    foreach ($p in $paths) {
+      $ps = [powershell]::Create()
+      $ps.RunspacePool = $pool
+      [void]$ps.AddScript({
+        param($dir, $res)
+        $ErrorActionPreference = "Continue"
+        try {
+          $out = & git -C $dir fetch --all --prune 2>&1
+          $res[$dir.ToLower()] = @{ out = @($out); code = $LASTEXITCODE }
+        } catch {}
+      }).AddArgument($p).AddArgument($res)
+      $jobs += @{ ps = $ps; h = $ps.BeginInvoke() }
+    }
+    $limit = (Get-Date).AddSeconds(240)
+    while ((@($jobs | Where-Object { -not $_.h.IsCompleted })).Count -gt 0 -and (Get-Date) -lt $limit) {
+      if (Test-GameGone) { $script:quitEarly = $true; break }
+      Start-Sleep -Milliseconds 100
+    }
+  } catch {
+  } finally {
+    Leave-Net
+    foreach ($j in $jobs) { try { if ($j.h.IsCompleted) { [void]$j.ps.EndInvoke($j.h) }; $j.ps.Dispose() } catch {} }
+    try { if ($pool) { $pool.Close(); $pool.Dispose() } } catch {}
+  }
+  foreach ($k in @($res.Keys)) { if ([int]$res[$k].code -eq 0) { $script:gitPre[$k] = $res[$k] } }
+  try { $script:gitSecTotal += $sw.Elapsed.TotalSeconds; $script:gitNetSec += $sw.Elapsed.TotalSeconds; $script:gitCalls += $paths.Count } catch {}
+  Add-Timing ("git fetch for " + $paths.Count + " mods at once") $sw
+}
+
 function Run-Git([string]$folderPath, [string[]]$gitArgs) {
+  if ($script:gitPre.Count -gt 0 -and ($gitArgs -join " ") -eq "fetch --all --prune") {
+    $pk = $folderPath.ToLower()
+    if ($script:gitPre.ContainsKey($pk)) { $r = $script:gitPre[$pk]; $script:gitPre.Remove($pk); return $r }
+  }
   $old = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   $swGit = [System.Diagnostics.Stopwatch]::StartNew()
+  # fetch and ls-remote only read from the internet and can be cut at once when the game closes (see the quit watch at the top).
+  $isNetRead = ($gitArgs -contains "fetch") -or ($gitArgs.Count -gt 0 -and $gitArgs[0] -eq "ls-remote")
+  if ($isNetRead) { Enter-Net }
   try {
     $out = & git -C $folderPath @gitArgs 2>&1
     $code = $LASTEXITCODE
     return @{ out = $out; code = $code }
   } finally {
+    if ($isNetRead) { Leave-Net }
     $ErrorActionPreference = $old
     try { $script:gitSecTotal += $swGit.Elapsed.TotalSeconds; $script:gitCalls++; if ($gitArgs.Count -gt 0 -and (($gitArgs -contains "fetch") -or ($gitArgs[0] -in @("pull","ls-remote","clone")))) { $script:gitNetSec += $swGit.Elapsed.TotalSeconds } } catch {}
   }
+}
+
+# A git command ended in the middle (the quit watch stops a fetch when the game closes) can leave lock files that make the next git
+# command fail. Locks older than 30 seconds are leftovers: nothing of ours is running at the start of a check.
+function Clear-StaleGitLocks([string]$folderPath) {
+  try {
+    $g = Join-Path $folderPath ".git"
+    if (-not (Test-Path -LiteralPath $g -PathType Container)) { return }
+    $limit = (Get-Date).AddSeconds(-30)
+    $locks = @(Get-ChildItem -LiteralPath $g -Filter "*.lock" -File -Force -ErrorAction SilentlyContinue)
+    $refs = Join-Path $g "refs"
+    if (Test-Path -LiteralPath $refs) { $locks += @(Get-ChildItem -LiteralPath $refs -Filter "*.lock" -File -Recurse -Force -ErrorAction SilentlyContinue) }
+    foreach ($l in $locks) {
+      if ($l.LastWriteTime -lt $limit) {
+        Remove-Item -LiteralPath $l.FullName -Force -ErrorAction SilentlyContinue
+        Write-QuitLog ("removed a leftover git lock: " + $l.FullName)
+      }
+    }
+  } catch {}
 }
 
 function Short-Out($out) {
@@ -1514,6 +1819,7 @@ function Update-GitModCore([string]$folderPath, [string]$folderName) {
 
   $git = Get-Command git -ErrorAction SilentlyContinue
   if (-not $git) { $summary.skipped_mods += "$folderName (git: no git in PATH)"; return $true }
+  Clear-StaleGitLocks $folderPath
 
   $uj = Get-ModUpdateJson $folderPath
   $wantBranch = if ($uj -and $uj.branch) { ([string]$uj.branch).Trim() } else { "" }
@@ -1704,7 +2010,7 @@ function Install-ZipIntoMod([string]$folderPath, [string]$folderName, [string]$u
     Ensure-Dir $extractPath
 
     Invoke-WebRequest -Uri $url -OutFile $zipPath -Headers $headers -UseBasicParsing | Out-Null
-    Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
+    Expand-ZipFast $zipPath $extractPath
 
     $children = @(Get-ChildItem -LiteralPath $extractPath -Force)
     if ($children.Count -eq 0) { throw "Downloaded archive was empty." }
@@ -1717,8 +2023,12 @@ function Install-ZipIntoMod([string]$folderPath, [string]$folderName, [string]$u
     $preserve = @("update.json", ".autoupdater_state.json")
     # When the updater updates ITSELF, also keep its settings, API keys and per-user data.
     if (Test-IsSelfFolder $folderPath) { $preserve = @($script:SelfKeepNames) }
+    $keepAll = @($preserve)
     $preserveTemp = Join-Path $tmpRoot "preserve"
     Ensure-Dir $preserveTemp
+    # A kept item that the download does not contain is never touched (the clean-up below skips it and nothing is copied over it),
+    # so only the kept items the download would overwrite are set aside and put back. Saves copying the Updater's caches twice.
+    $preserve = @($preserve | Where-Object { Test-Path -LiteralPath (Join-Path $srcRoot $_) })
     foreach ($p in $preserve) {
       $pp = Join-Path $folderPath $p
       if (Test-Path -LiteralPath $pp) { Copy-Item -LiteralPath $pp -Destination (Join-Path $preserveTemp $p) -Recurse -Force }
@@ -1727,6 +2037,7 @@ function Install-ZipIntoMod([string]$folderPath, [string]$folderName, [string]$u
     try {
       Get-ChildItem -LiteralPath $folderPath -Force | ForEach-Object {
         if ($preserve -contains $_.Name) { return }
+        if ($keepAll -contains $_.Name) { return }
         Remove-Item -LiteralPath $_.FullName -Recurse -Force
       }
       Copy-Item -Path (Join-Path $srcRoot "*") -Destination $folderPath -Recurse -Force
@@ -2295,6 +2606,12 @@ function Check-Forks() {
       }
     }
 
+    $urlListPath = Join-Path $script:ghCacheDir $(if ($AllForks) { "_scan_urls_all.txt" } else { "_scan_urls_newer.txt" })
+    $script:ghUrlsUsed = New-Object System.Collections.Generic.List[string]
+    if ($hasToken -and -not $script:forkBadToken -and $config.use_github_cache -ne $false -and (Test-Path -LiteralPath $urlListPath)) {
+      try { Invoke-GhPrefetch @(Get-Content -LiteralPath $urlListPath -Encoding UTF8 | Where-Object { $_ -match '^https://api\.github\.com/' } | Select-Object -Unique) $ghHeaders } catch {}
+    }
+
     Get-ChildItem -LiteralPath $modsDirResolved -Directory -Force | ForEach-Object {
       $name = $_.Name
       $path = $_.FullName
@@ -2487,6 +2804,16 @@ function Check-Forks() {
 
   # Balatro was closed mid scan: keep the previous results instead of saving a partial list. Scanned again next launch.
   if ($script:quitEarly) { return }
+  # Remember which addresses this scan asked, so the next scan can check them all at once at the start.
+  try {
+    if ($script:ghUrlsUsed -and $script:ghUrlsUsed.Count -gt 0 -and -not $script:forkRateLimited -and -not $script:forkBadToken) {
+      if (-not (Test-Path -LiteralPath $script:ghCacheDir)) { New-Item -ItemType Directory -Path $script:ghCacheDir -Force | Out-Null }
+      $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+      Enter-Busy
+      try { [System.IO.File]::WriteAllText($urlListPath, ((@($script:ghUrlsUsed) | Select-Object -Unique) -join "`r`n"), $utf8NoBom) } finally { Leave-Busy }
+    }
+  } catch {}
+  $script:ghUrlsUsed = $null
   try {
     Save-JsonNoBom $forkSuggestionsPath $suggestions
     if ($AllForks -and -not $script:forkBadToken) { Save-JsonNoBom $forkSuggestionsAllPath $suggestions }
@@ -2754,9 +3081,26 @@ $summary.untracked_mods = @()
 $summary.folder_name_stale = @()
 
 # Save the game files if this Steam build isn't saved yet; may pause the mod and framework updates below (see Invoke-GameCheck).
+# Scan Now only looks for forks. It used to run the whole mod update first (every git fetch, even updating the Updater itself
+# while the game was running), which roughly doubled the scan and could race the update check started at launch. Mods are still
+# updated by the check at every launch and by "Check for updates now". The scan reads the mods exactly as they are installed.
+if (-not $CheckForks) {
 Enter-Busy; try { Invoke-GameCheck } finally { Leave-Busy }
+}
 
-if (-not $script:holdUpdates) {
+if (-not $script:holdUpdates -and -not $CheckForks) {
+try {
+  if ($config.update_git) {
+    $pre = @()
+    Get-ChildItem -LiteralPath $modsDirResolved -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+      if ($targetModFilter -ne "" -and $_.Name -ne $targetModFilter) { return }
+      if ($_.Name.StartsWith("_")) { return }
+      if ($skipSet.ContainsKey($_.Name) -and -not $pinnedSet.ContainsKey($_.Name)) { return }
+      if (Test-Path -LiteralPath (Join-Path $_.FullName ".git")) { $pre += $_.FullName }
+    }
+    Invoke-GitPrefetch $pre
+  }
+} catch {}
 try {
   Get-ChildItem -LiteralPath $modsDirResolved -Directory -Force | ForEach-Object {
     $name = $_.Name
@@ -3067,7 +3411,7 @@ function Update-Frameworks() {
             $summary.skipped_mods += "[Framework debug] Steamodded download: zipball_url"
           }
         }
-        Expand-Archive -LiteralPath $zipPath -DestinationPath $extract -Force
+        Expand-ZipFast $zipPath $extract
 
         # Locate the Steamodded root by finding a src\loader.lua (handles extra nesting in the zip)
         $loader = Get-ChildItem -LiteralPath $extract -Recurse -File -Filter "loader.lua" -ErrorAction SilentlyContinue |
@@ -3164,7 +3508,7 @@ function Update-Frameworks() {
       Ensure-Dir $extract
 
       Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers @{ "User-Agent"="BalatroModUpdater" } -UseBasicParsing | Out-Null
-      Expand-Archive -LiteralPath $zipPath -DestinationPath $extract -Force
+      Expand-ZipFast $zipPath $extract
 
       $dll = $null
       foreach ($n in $lovelyNames) {
@@ -3244,7 +3588,7 @@ if ($CheckForks) {
   Clear-OldGhCache
   Write-TimingDetail "fork scan"
   try { Save-JsonNoBom $summaryPath $summary } catch {}
-  exit 0
+  Stop-AmuRun 0
 }
 
 Enter-Busy; try { Repair-ForkLovelyDeps } finally { Leave-Busy }
@@ -3276,3 +3620,4 @@ try {
 Clear-OldGhCache
 Write-TimingDetail "update check"
 try { Save-JsonNoBom $summaryPath $summary } catch {}
+Stop-AmuRun 0
