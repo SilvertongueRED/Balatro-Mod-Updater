@@ -156,6 +156,9 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.11
+- Fixed: after a fork switch (Restart later), Scan Now could stay greyed out and do nothing in either filter. The scan result was only watched by one game event that could get lost; a second per-frame watcher now ends the scan, so the button always comes back.
+
 ### 1.0.10
 - Changed: the Fork Finder keeps the last every-fork scan across game restarts and across newer-only scans, and the status line now shows when the list was last scanned (date and time, and whether it was a newer-only or every-fork scan). The list is filled the moment you open the tab, no rescan needed.
 

@@ -1424,6 +1424,7 @@ end
 -- called once per frame (from the controller hook)
 function AMU_FIND.hold_tick()
   local now = (G.TIMERS and G.TIMERS.REAL) or 0
+  if AMU_FIND.scan_poll then pcall(AMU_FIND.scan_poll) end
   local h = AMU_FIND.hold
   if h and not h.fired and now - h.t0 >= AMU_FIND.HOLD then
     h.fired = true
@@ -5455,11 +5456,9 @@ local function run_fork_scan()
   local t = love.thread.newThread(thread_code)
   t:start(cmd)
 
-  G.E_MANAGER:add_event(Event({
-    blockable = false,
-    blocking = false,
-    no_delete = true,   -- survive the event-queue wipe when a run starts
-    func = function()
+  AMU_FIND.scan_seq = (AMU_FIND.scan_seq or 0) + 1
+  local scan_id = AMU_FIND.scan_seq
+  local function finish_check()
       local msg = channel:pop()
       if msg then
         amu_fork_scanning = false
@@ -5510,6 +5509,20 @@ local function run_fork_scan()
         return true
       end
       return false
+  end
+  -- Two watchers: an event (survives most queue wipes) and a per-frame poll from the controller hook. If the event is
+  -- ever lost (for example around a fork switch), the poll still ends the scan, so Scan Now never stays greyed out.
+  AMU_FIND.scan_poll = function()
+    if not amu_fork_scanning or AMU_FIND.scan_seq ~= scan_id then return end
+    finish_check()
+  end
+  G.E_MANAGER:add_event(Event({
+    blockable = false,
+    blocking = false,
+    no_delete = true,   -- survive the event-queue wipe when a run starts
+    func = function()
+      if AMU_FIND.scan_seq ~= scan_id or not amu_fork_scanning then return true end
+      return finish_check()
     end
   }))
 end
