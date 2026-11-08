@@ -156,10 +156,12 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
-### 1.0.3
-- Fixed: during a run, the bottom-right pop-ups (**All mods up to date!**, **N new forks found**) sat on top of the deck. They now sit above the deck and its counts. Outside a run they stay in the bottom right corner.
+### 1.0.4
 - Fixed: the hover box on a Fork Finder row cut off "(restart to apply)" after you switched fork. It now has its own line.
 - Fixed: during a run, the list on the **Mod Toggles**, **Backups**, **Fork Finder** and **No Source** tabs could stay blank (the pager and counts were there, the rows were not) until a page was changed. The list now fills itself on the first frame instead of waiting in the game's busy event queue.
+
+### 1.0.3
+- Fixed: during a run, the bottom-right pop-ups (**All mods up to date!**, **N new forks found**) sat on top of the deck. They now sit above the deck and its counts. Outside a run they stay in the bottom right corner.
 
 ### 1.0.2
 - Fixed: on the **Backups** tab, a pinned row no longer lets "Pinned to backup <date>" run behind the **PINNED** badge, and the **Unpin** button stays inside the panel. The row is laid out to fit the panel width.
