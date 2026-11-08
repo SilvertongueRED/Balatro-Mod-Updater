@@ -1578,32 +1578,64 @@ function AMU_FIND.toast.show(text, opts)
   if not (G and G.E_MANAGER and Event and UIBox and G.UIT and G.ROOM_ATTACH) then return false end
   T.hide()
   local ok = pcall(function()
+    -- Where can the pop-up go? In a run the deck fills the bottom right of the game area, but the strip to the right of the deck
+    -- (the game's right margin plus the gap beside the deck) is empty. Use that strip, in the bottom right corner of the screen, and
+    -- wrap the text to fit it. Outside a run the box sits in the bottom right corner of the game area on one line per message line.
+    -- Everything is in game units, so this follows any window, monitor or borderless size.
+    local strip, ox, oy = nil, -0.4, -0.2
+    pcall(function()
+      if G.STAGE == G.STAGES.RUN and G.deck and G.deck.T and G.ROOM and G.TILE_W and G.TILE_H and love and love.graphics then
+        local sw, sh = love.graphics.getDimensions()
+        local unit = G.TILESIZE * G.TILESCALE
+        local rmx = sw / unit - G.ROOM.T.x - G.TILE_W      -- empty margin right of the game area
+        local rmy = sh / unit - G.ROOM.T.y - G.TILE_H      -- empty margin below the game area
+        local dright, dy = G.deck.T.x + G.deck.T.w, G.deck.T.y
+        if type(dy) == "number" and dy > G.TILE_H * 0.5 and dy < G.TILE_H and dright > G.TILE_W * 0.5 and dright < G.TILE_W + 0.5 then
+          strip = math.max(rmx + (G.TILE_W - dright) - 0.45, 1.1)
+          ox = math.max(rmx - 0.25, -0.4)
+          oy = math.max(rmy - 0.25, -0.2)
+        end
+      end
+    end)
+    local function wrap(piece, scale, avail)
+      local out, cur = {}, ""
+      for word in tostring(piece):gmatch("%S+") do
+        local try = (cur == "") and word or (cur .. " " .. word)
+        if cur == "" or #try * 0.56 * scale <= avail then cur = try else out[#out + 1] = cur; cur = word end
+      end
+      if cur ~= "" then out[#out + 1] = cur end
+      return out
+    end
+    local pieces = type(text) == "table" and text or { text }
+    local scale = 0.3
+    if strip then
+      local avail = strip - 0.3
+      local longest = 1
+      for _, t in ipairs(pieces) do for w in tostring(t):gmatch("%S+") do longest = math.max(longest, #w) end end
+      for _, s in ipairs({ 0.3, 0.27, 0.24, 0.22 }) do scale = s; if longest * 0.56 * s <= avail then break end end
+    end
+    local hint_scale = scale * 0.7
     local lines = {}
-    for _, t in ipairs(type(text) == "table" and text or { text }) do
+    local function add_line(t, sc, col)
       lines[#lines + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        { n = G.UIT.T, config = { text = t, scale = 0.3, colour = G.C.UI.TEXT_LIGHT or G.C.WHITE, shadow = true } } } }
+        { n = G.UIT.T, config = { text = t, scale = sc, colour = col, shadow = sc >= 0.3 } } } }
+    end
+    for _, t in ipairs(pieces) do
+      for _, ln in ipairs(strip and wrap(t, scale, strip - 0.3) or { t }) do add_line(ln, scale, G.C.UI.TEXT_LIGHT or G.C.WHITE) end
     end
     if opts.click_hint then
-      lines[#lines + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
-        { n = G.UIT.T, config = { text = opts.click_hint, scale = 0.21, colour = G.C.UI.TEXT_INACTIVE or G.C.GREY } } } }
+      for _, ln in ipairs(strip and wrap(opts.click_hint, hint_scale, strip - 0.3) or { opts.click_hint }) do
+        add_line(ln, hint_scale, G.C.UI.TEXT_INACTIVE or G.C.GREY)
+      end
     end
     local card = { n = G.UIT.C, config = { align = "cm", padding = 0.09, r = 0.1, emboss = 0.04,
       colour = G.C.L_BLACK or G.C.BLACK, outline = 0.9, outline_colour = opts.colour or G.C.GREEN,
       button = opts.action and "amu_toast_click" or nil, hover = opts.action and true or nil, shadow = true }, nodes = lines }
-    -- In a run the deck and its counts fill the bottom right corner, so lift the box above the deck (and the small count above it).
-    -- Everything is in game units, so this follows any window, monitor or borderless size.
-    local oy = -0.2
-    pcall(function()
-      if G.STAGE == G.STAGES.RUN and G.deck and G.deck.T and G.TILE_H then
-        local dy = G.deck.T.y
-        if type(dy) == "number" and dy > G.TILE_H * 0.5 and dy < G.TILE_H then oy = -(G.TILE_H - dy) - 1.3 end
-      end
-    end)
     T.box = UIBox({
       definition = { n = G.UIT.ROOT, config = { align = "cm", colour = G.C.CLEAR }, nodes = { card } },
       -- "bri" = inside the bottom right corner of the game area (without the "i" the box sits OUTSIDE it, below and to the right, and gets
-      -- cut off). The game area is fitted to any window, monitor or borderless size, so this follows it.
-      config = { align = "bri", offset = { x = -0.4, y = oy }, major = G.ROOM_ATTACH, bond = "Weak", instance_type = "POPUP" },
+      -- cut off). ox and oy push it out into the empty margin so it ends up in the corner of the screen itself.
+      config = { align = "bri", offset = { x = ox, y = oy }, major = G.ROOM_ATTACH, bond = "Weak", instance_type = "POPUP" },
     })
     T.action = opts.action
   end)
