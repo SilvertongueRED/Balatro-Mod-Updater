@@ -151,6 +151,32 @@ This is the first 1.0 release: it is the 0.8.x series (crash protection, saved g
 - Put-back mods are **pinned**: they are not updated again until you unpin them in the **Backups** tab, or until their source has a different (newer) version and **Retry pinned mods when newer** is on.
 - **A Steam update of Balatro broke your mods:** the Updater switches back to the saved copy of the old game by itself and freezes updates (see 1.0.0). If you need to do it by hand, close Balatro and double-click **`Use backed up game.bat`**.
 
+## Known limits and troubleshooting
+**Install and environment**
+- **The game does not relaunch after Restart now.** Task Scheduler may be blocked by antivirus or a work policy. The Updater then falls back to the `steam://` link: start the game from Steam yourself.
+- **Windows only.** The crash screen and the restart helper do not work on other systems or the Steam Deck.
+- **Updates never run.** Check that Windows PowerShell 5.1 is installed and that scripts are allowed to start.
+- **Antivirus flags `autoupdate.ps1`.** A script that downloads files can look suspicious to antivirus programs. The whole script is readable in this repository.
+
+**Network limits (not a bug in the mod)**
+- **GitHub allows 60 requests per hour without a token.** Fork scans fail first. Use the **GitHub token** button in Fork Finder.
+- **Expired GitHub token.** The Updater notices after an update check and offers to replace it. Replace it, or press **Clear** on the token screen to stop the message.
+- **Nexus key rejected or rate limited.** Free keys have limits. Paste the key again, or wait an hour.
+- **Download cut off in the middle of an update.** This can leave a half-extracted mod. Restore the newest backup from the **Backups** tab.
+
+**Steamodded and Lovely**
+- **An update is staged, not applied.** The results window says it is ready: click **Restart now**. If you just quit, it is applied when the game closes, so it shows on the next start.
+- **Restoring Steamodded or Lovely by hand.** The backups are zips in the Updater's `_framework_backups` folder, plus `winmm.dll.bak_<date>` files next to Lovely.
+
+**Folder names with a version in them**
+- Some mods ship in a folder with the version in its name. Updates change the files, not the folder name, so the name keeps showing the old version. Rename the folder by hand with the game closed (the results window lists these folders).
+- Renaming a folder resets that mod's toggle and pin in the Updater, because they are saved by folder name. Backups made under the old name stay under the old name.
+
+**Conflicts with other mods**
+- **Mods that replace `love.wheelmoved`.** Better Mouse and Gamepad is one. The results window re-installs its wheel handler every frame. If wheel scrolling fails, check which other mods are installed.
+- **Controller mods that use R3 or S.** The search key may do nothing. Click the search box with the mouse.
+- **An old copy of a mod inside `Mods`.** Two mods with the same ID crash the game. Move backups and `.bak` copies out of the `Mods` folder.
+
 ## Optional settings (`autoupdater_config.json`)
 - `github_token`: raises GitHub's limit from 60 to 5000 checks per hour. You don't need to edit this file: in the **Fork Finder** tab click **GitHub token** and follow the steps (free, read-only, takes about a minute).
 - `report_untracked`: `false` stops listing untracked mods.
