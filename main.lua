@@ -5101,20 +5101,28 @@ local function amu_fork_is_translation(f)
   local result = false
   local kind = amu_fork_kind(f)
   local fc, lf = f.files_changed or 0, f.loc_files or 0
-  if kind ~= "original" and kind ~= "parent" and fc > 0 then
-    -- the changed files decide: a fork is "just a translation" only when (almost) every changed file is a language file.
-    -- A fork that also changes real code or assets stays listed, whatever its name or commit messages say.
-    result = (fc - lf) <= 1 and lf >= 1
-  elseif kind ~= "original" and kind ~= "parent" then
+  if kind ~= "original" and kind ~= "parent" then
     local name = tostring(f.repo or ""):lower():match("/(.+)$") or ""
+    local named = false
     for _, w in ipairs(AMU_TR_WORDS) do
-      if name:find(w) then result = true break end
+      if name:find(w) then named = true break end
     end
-    if not result then
+    if not named then
       for tok in name:gmatch("[a-z0-9]+") do
-        if AMU_TR_TOKENS[tok] then result = true break end
+        if AMU_TR_TOKENS[tok] then named = true break end
       end
     end
+    if fc > 0 then
+      -- A language word in the repo name is enough to call it a translation, unless it clearly changes much more than a few
+      -- non-language files (config, version, icon and similar small edits do not count as "more").
+      -- Without a language word in the name, (almost) every changed file must be a language file.
+      if named then result = (fc - lf) <= 6
+      else result = (fc - lf) <= 1 and lf >= 1 end
+    else
+      result = named
+    end
+  end
+  if kind ~= "original" and kind ~= "parent" and fc == 0 then
     if not result and type(f.changelog) == "table" and #f.changelog > 0 then
       local hits = 0
       for _, m in ipairs(f.changelog) do
@@ -5371,10 +5379,11 @@ amu_fork_summary = function()
   local shown = #get_fork_mod_entries()
   local all = #get_fork_mod_entries(true, true)
   local text
+  -- the filter button already says which list this is, so the line only gives the numbers
   if config.fork_newer_only ~= false then
-    text = "Showing newer forks only: " .. shown .. " mod(s) (" .. all .. " have any fork)"
+    text = shown .. " mod(s) (" .. all .. " have any fork)"
   else
-    text = "Showing every fork: " .. shown .. " mod(s)"
+    text = shown .. " mod(s)"
   end
   local mode = amu_fork_suggestions.scan_mode
   local d, t = tostring(amu_fork_suggestions.checked_at or ""):match("^%d%d%d%d%-(%d%d%-%d%d)T(%d%d:%d%d)")

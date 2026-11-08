@@ -156,6 +156,10 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 
 ## Changelog
 
+### 1.0.16
+- Changed: the Fork Finder top line is shorter so the scan date fits. It no longer starts with "Showing newer forks only:" or "Showing every fork:" (the filter button already says that). It reads like "2 mod(s) (3 have any fork) - scanned 11-08 13:15".
+- Changed: with Translations: Hidden, a fork whose name has a language word (espanol, ESP, translation, and similar) is hidden unless it changes more than 6 non-language files. Forks without a language word in the name are hidden only when nearly all their changed files are language files.
+
 ### 1.0.15
 - Fixed: the game could crash at start with "Duplicate installation of Steamodded detected ... Possible location: Balatro-Mod-Updater/_gh_cache". Steamodded reads every .json file inside a mod folder as a mod, and the Updater's GitHub answer cache used .json files, some about repos with "Steamodded" in their name. The cache now uses .ghc files, and old .json cache files are renamed automatically.
 
