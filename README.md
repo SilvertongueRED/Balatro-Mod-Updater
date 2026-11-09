@@ -26,7 +26,7 @@ Keeps your Balatro mods, **Steamodded** and **Lovely Injector** up to date, back
 | | |
 |---|---|
 | **Updates from anywhere** | Mods installed from a **Git** page, **GitHub Releases** or **Nexus Mods**, plus Steamodded and Lovely. Always jumps straight to the newest version. |
-| **Backups first** | Every mod and framework is backed up before it is updated. Restore or **pin** any backup from the Backups tab. |
+| **Backups first** | Every mod and framework is backed up before it is updated. Restore or **pin** any backup, or delete old ones to the Recycle Bin, from the Backups tab. |
 | **Crash protection** | If an update crashes the game, a recovery screen offers to put the updated mods back. |
 | **Fork Finder** | Finds forks of your mods that have newer work and lets you switch to one (and back). |
 | **Saved game copies** | Saves Balatro's game files and switches back to the old version when a Steam update would break your mods. |
@@ -97,7 +97,7 @@ When it finds updates it installs them and asks **Restart now** or **Later**. Wh
 | Tab | What it does |
 |---|---|
 | **Mod Toggles** | Turn update checks on or off per mod, **All on / All off**, **Save list / Restore list**, per-mod **Check** button, sort (A-Z / Recent) and **Show** filter (All / ON / OFF). |
-| **Backups** | Version in use and last update for each mod, restore or pin a backup, **Unpin**, sort and **Show** filter (All / Pinned). Hover a row for a summary of the newest changes. |
+| **Backups** | Version in use and last update for each mod, restore or pin a backup, **delete** backups (one at a time or several ticked at once), **Unpin**, sort and **Show** filter (All / Pinned). Hover a row for a summary of the newest changes. |
 | **Fork Finder** | Forks with newer work, **Switch to Fork / Switch Back**, **Scan Now**, GitHub token setup. |
 | **No Source** | Mods with no git clone or `update.json`. Paste their GitHub or Nexus link to create one. |
 | **Config** | Nexus key, GitHub token, auto-check, pin retry, game backup options. |
@@ -113,6 +113,14 @@ Each row shows the version in use and when it was last updated. **Backups** open
 ![Backups tab](images/backups-list.png)
 
 ![A pinned mod on the Backups tab](images/backups-pinned.png)
+
+**Deleting old backups.** Each backup in a mod's list has a red **Delete** button and a tick box. Press **Delete** to remove that one, or tick several and press **Delete Selected (n)** above them. Either way you are asked to confirm first:
+
+![Backups list with three backups ticked for deletion](images/backups-delete-list.png)
+
+![The confirmation before backups are deleted](images/backups-delete-confirm.png)
+
+Deleted backups go to the **Windows Recycle Bin**, so you can take them back out of it there. Nothing is deleted for good. A small script, `delete_backups.ps1`, does the moving, and it only touches `.zip` and `.dll` files inside the Updater's backup folders. Afterwards the list opens again with the remaining backups, or the Backups tab if none are left. This works with the mouse, keyboard and controller. A mod pinned at a backup you delete stays pinned (you just cannot go back to that copy). The saved Balatro game copies have no Delete button.
 
 ### No Source
 Paste the mod's GitHub or Nexus page link and the Updater writes its `update.json` for you.
@@ -217,6 +225,10 @@ Put-back mods are **pinned**: they are not updated again until you unpin them in
 - **Old copies of a mod inside `Mods`:** two mods with the same ID crash the game. Move backups and `.bak` copies out of `Mods`.
 
 ## Changelog
+
+### 1.0.28
+- New: delete backups from a mod's **Backups** window. Every backup has a red **Delete** button and a tick box, and **Delete Selected (n)** above them deletes all the ticked ones. Both ask to confirm first, send the files to the Windows Recycle Bin (never a permanent delete) and then show the list again, or the Backups tab when no backup is left. Works with controller too. Covers mod backups and the Steamodded / Lovely copies, not the saved game copies.
+- New: `delete_backups.ps1`, a small script that does the moving. It only touches `.zip` and `.dll` files directly inside the backup folder it is given, and it leaves a file where it is when the Recycle Bin refuses it.
 
 ### 1.0.27
 - Fixed: Steam still showed the game as running after you quit during an update check or fork scan. Waiting on the internet (downloads, GitHub calls, git fetch) is now cut at once when the game closes, a step that writes files gets at most 20 seconds, and any git process the check started is ended with it. A git lock left by a cut-short fetch is cleared at the next check. `quit_watch.log` in the Updater folder records each quit.
