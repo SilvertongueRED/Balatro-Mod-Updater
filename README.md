@@ -6,6 +6,8 @@ Keeps your Balatro mods, **Steamodded** and **Lovely Injector** up to date, back
 
 > **Windows only.** Needs Windows PowerShell 5.1, [Steamodded](https://github.com/Steamopollys/Steamodded) 1.x and Lovely.
 
+**Also on Nexus Mods:** [nexusmods.com/balatro/mods/1002](https://www.nexusmods.com/balatro/mods/1002). Download it there or from the [GitHub releases](https://github.com/SilvertongueRED/Balatro-Mod-Updater/releases).
+
 ## Contents
 - [Features](#features)
 - [Installation](#installation)
@@ -46,7 +48,7 @@ When it finds updates it installs them and asks **Restart now** or **Later**. Wh
 ## Installation
 
 1. Install Steamodded and Lovely.
-2. Put the `Balatro-Mod-Updater` folder in your Balatro `Mods` folder.
+2. Download the zip from [Nexus Mods](https://www.nexusmods.com/balatro/mods/1002) or the [GitHub releases](https://github.com/SilvertongueRED/Balatro-Mod-Updater/releases) and put the `Balatro-Mod-Updater` folder in your Balatro `Mods` folder.
 3. Start Balatro and open **Mods > Mod Updater**.
 4. Optional: add your Nexus API key (**Config > How do I get a key?**) and turn on **Auto-check at startup**.
 
@@ -408,6 +410,8 @@ First 1.0 release: the 0.8.x series polished and bug-fixed.
 
 <!-- other-mods:start -->
 ## More from SilvertongueRED
+
+**Mod Updater is on Nexus Mods:** [nexusmods.com/balatro/mods/1002](https://www.nexusmods.com/balatro/mods/1002).
 
 **Fit to Screen (Menu Resizer) is now on Nexus Mods:** [nexusmods.com/balatro/mods/1001](https://www.nexusmods.com/balatro/mods/1001). It stops tall pause menus and sidebars from being cut off at the top and bottom of your screen.
 
