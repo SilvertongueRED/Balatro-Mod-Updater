@@ -4723,7 +4723,7 @@ G.UIDEF.amu_backup_picker = function(ref)
       blank({ align = "cl", padding = 0.04, minw = 3.8 }),
       gap(0.15),
       blank({ align = "cm", padding = 0.05, minw = 1.9, minh = 0.45 }),
-      gap(0.15),
+      gap(0.85),
       { n = G.UIT.C, config = { align = "cm", padding = 0.05, minw = 2.8, minh = 0.45, r = 0.1, colour = G.C.RED,
           button = "amu_bkdel_selected", hover = true, shadow = true }, nodes = {
         { n = G.UIT.T, config = { ref_table = AMU_BKDEL.count, ref_value = "text", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } },
@@ -4757,7 +4757,7 @@ G.UIDEF.amu_backup_picker = function(ref)
         }},
         { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
         btn_node,
-        can_delete and { n = G.UIT.B, config = { h = 0.1, w = 0.15 } } or nil,
+        can_delete and { n = G.UIT.B, config = { h = 0.1, w = 0.85 } } or nil,
         can_delete and { n = G.UIT.C, config = { align = "cm", padding = 0.05, minw = 1.3, minh = 0.45, r = 0.1, colour = G.C.RED,
           button = "amu_bkdel_" .. tostring(i), hover = true, shadow = true }, nodes = {
           { n = G.UIT.T, config = { text = "Delete", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } } or nil,
@@ -4786,7 +4786,7 @@ G.UIDEF.amu_backup_picker = function(ref)
 
   return {
     n = G.UIT.ROOT,
-    config = { align = "cm", minw = can_delete and 10.8 or 7.4, minh = minh, padding = 0.24, r = 0.2, colour = bg, shadow = true, hover = true },
+    config = { align = "cm", minw = can_delete and 11.2 or 7.4, minh = minh, padding = 0.24, r = 0.2, colour = bg, shadow = true, hover = true },
     nodes = {
       { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
         { n = G.UIT.T, config = { text = "Backups: " .. display, scale = 0.52, colour = purple, shadow = true } }
@@ -4795,7 +4795,7 @@ G.UIDEF.amu_backup_picker = function(ref)
         { n = G.UIT.T, config = { text = is_game and "Takes effect when the game restarts. Mod updates pause on a saved copy." or "Takes effect when the game restarts. Stays pinned until you press Unpin.", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } }
         or { n = G.UIT.B, config = { h = 0.12, w = 0.1 } },
       { n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
-        { n = G.UIT.C, config = { align = "cl", padding = 0.12, minw = can_delete and 10.0 or 6.6, r = 0.12, colour = panel }, nodes = rows }
+        { n = G.UIT.C, config = { align = "cl", padding = 0.12, minw = can_delete and 10.4 or 6.6, r = 0.12, colour = panel }, nodes = rows }
       }},
       { n = G.UIT.B, config = { h = 0.14, w = 0.1 } },
       is_game and { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
