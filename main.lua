@@ -4719,7 +4719,7 @@ G.UIDEF.amu_backup_picker = function(ref)
   if can_delete then
     local function gap(w) return { n = G.UIT.B, config = { h = 0.1, w = w } } end
     local function blank(cfg) return { n = G.UIT.C, config = cfg, nodes = { gap(0.1) } } end
-    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cl", padding = 0.04 }, nodes = {
       blank({ align = "cl", padding = 0.04, minw = 3.8 }),
       gap(0.15),
       blank({ align = "cm", padding = 0.05, minw = 1.9, minh = 0.45 }),
@@ -4751,7 +4751,7 @@ G.UIDEF.amu_backup_picker = function(ref)
     end
 
     rows[#rows + 1] = {
-      n = G.UIT.R, config = { align = "cm", padding = 0.04 }, nodes = {
+      n = G.UIT.R, config = { align = can_delete and "cl" or "cm", padding = 0.04 }, nodes = {
         { n = G.UIT.C, config = { align = "cl", padding = 0.04, minw = 3.8 }, nodes = {
           { n = G.UIT.T, config = { text = label, scale = 0.34, colour = G.C.UI.TEXT_LIGHT } }
         }},
