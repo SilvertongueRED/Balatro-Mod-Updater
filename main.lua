@@ -4517,6 +4517,164 @@ end
 -- (defined here, after open_overlay/close_overlay are in scope)
 ---------------------------------------------------------------------------
 
+-- DELETE BACKUPS (picker): a red Delete button and a tick box per backup, plus "Delete Selected" above them.
+-- Deleting always asks first, sends the files to the Recycle Bin (delete_backups.ps1) and comes back to the list.
+-- (Kept on one global table: main.lua is close to Lua's limit of local variables.)
+AMU_BKDEL = { sel = {}, count = { text = "Delete Selected (0)" }, ref = nil, files = {} }
+
+function AMU_BKDEL.tick()
+  local n = 0
+  for _, v in pairs(AMU_BKDEL.sel) do if v then n = n + 1 end end
+  AMU_BKDEL.count.text = "Delete Selected (" .. n .. ")"
+  return n
+end
+
+-- Open the picker again with a fresh list. No backups left: go back to the Backups tab itself.
+function AMU_BKDEL.picker()
+  local ref = AMU_BKDEL.ref or {}
+  local backups
+  if ref.framework then backups = AMU_FRAMEWORKS.backups(ref.folder) else backups = list_backups_for_mod(ref.folder) end
+  if #backups == 0 then
+    close_overlay()
+    G.FUNCS.amu_back_to_menu()
+    return
+  end
+  open_overlay(G.UIDEF.amu_backup_picker({ folder = ref.folder, display = ref.display, backups = backups, framework = ref.framework }))
+end
+
+function AMU_BKDEL.ask(files)
+  AMU_BKDEL.files = files
+  open_overlay(G.UIDEF.amu_backup_delete_confirm(false))
+end
+
+G.FUNCS.amu_bkdel_selected = function(e)
+  local ref = AMU_BKDEL.ref or {}
+  local files = {}
+  for i, bf in ipairs(ref.backups or {}) do
+    if AMU_BKDEL.sel["k" .. i] then files[#files + 1] = bf end
+  end
+  if #files == 0 then AMU_BKDEL.count.text = "Tick a backup first"; return end
+  AMU_BKDEL.ask(files)
+end
+
+G.FUNCS.amu_bkdel_cancel = function(e) AMU_BKDEL.picker() end
+
+-- "Yes, delete": hand the files to delete_backups.ps1 (Recycle Bin), then show the list again.
+G.FUNCS.amu_bkdel_yes = function(e)
+  local ref, files = AMU_BKDEL.ref or {}, AMU_BKDEL.files or {}
+  if #files == 0 then AMU_BKDEL.picker(); return end
+  local save_dir = love.filesystem.getSaveDirectory()
+  local mods_dir = join_path(save_dir, "Mods")
+  local mod_path = (SMODS.current_mod and SMODS.current_mod.path) or join_path(mods_dir, mod_folder_name)
+  local ps1 = join_path(mod_path, "delete_backups.ps1")
+  local bk_dir = ref.framework and join_path(mod_path, "_framework_backups") or join_path(mods_dir, "_Balatro-Mod-Updater_Backups")
+  local rel_dir = ref.framework and ("Mods/" .. mod_folder_name .. "/_framework_backups") or "Mods/_Balatro-Mod-Updater_Backups"
+  if not (is_windows() and file_exists(ps1)) then
+    amu_backup_status.text = "Nothing was deleted: " .. (is_windows() and "delete_backups.ps1 is missing." or "Windows only.")
+    AMU_BKDEL.picker()
+    return
+  end
+  local list = {}
+  for _, bf in ipairs(files) do list[#list + 1] = winpath(join_path(bk_dir, bf)) end
+  pcall(love.filesystem.remove, "AMU_delete_result.txt")
+  pcall(love.filesystem.write, "AMU_delete_list.txt", table.concat(list, "\n") .. "\n")
+  local cmd = table.concat({
+    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+    "-File", safe_quote(winpath(ps1)),
+    "-ListFile", safe_quote(winpath(join_path(save_dir, "AMU_delete_list.txt"))),
+    "-ResultFile", safe_quote(winpath(join_path(save_dir, "AMU_delete_result.txt"))),
+    "-AllowedDir", safe_quote(winpath(bk_dir)),
+  }, " ")
+
+  local function finish()
+    local gone, left = 0, 0
+    for _, bf in ipairs(files) do
+      if love.filesystem.getInfo(rel_dir .. "/" .. bf) then left = left + 1 else gone = gone + 1 end
+    end
+    pcall(love.filesystem.remove, "AMU_delete_list.txt")
+    local why = ""
+    pcall(function()
+      for l in tostring(love.filesystem.read("AMU_delete_result.txt") or ""):gmatch("[^\r\n]+") do
+        if l:sub(1, 5) == "fail|" then why = l:match("^fail|[^|]*|(.*)$") or ""; break end
+      end
+    end)
+    pcall(love.filesystem.remove, "AMU_delete_result.txt")
+    if left == 0 then
+      amu_backup_status.text = (ref.display or ref.folder or "") .. ": " .. (gone == 1 and "1 backup" or (gone .. " backups")) .. " moved to the Recycle Bin."
+    else
+      amu_backup_status.text = (ref.display or ref.folder or "") .. ": " .. left .. " not deleted" .. (why ~= "" and (" (" .. amu_fit(why, 0.3, 6.5) .. ")") or ".")
+    end
+    AMU_BKDEL.picker()
+  end
+
+  open_overlay(G.UIDEF.amu_backup_delete_confirm(true))   -- "Moving to the Recycle Bin..." while it runs
+  if love and love.thread and love.thread.newThread and love.thread.getChannel then
+    local channel = love.thread.getChannel("amu_bkdel_status")
+    channel:clear()
+    local t = love.thread.newThread(AMU_HIDE_SRC .. [[
+      local cmd = ...
+      local ok = pcall(function() amu_run(cmd) end)
+      love.thread.getChannel("amu_bkdel_status"):push(ok and "done" or "error")
+    ]])
+    t:start(cmd)
+    G.E_MANAGER:add_event(Event({
+      blockable = false, blocking = false, no_delete = true,
+      func = function()
+        if channel:pop() then finish(); return true end
+        return false
+      end
+    }))
+  else
+    AMU_RUN(cmd)
+    finish()
+  end
+end
+
+G.UIDEF.amu_backup_delete_confirm = function(busy)
+  local purple = AMU_FIND.theme_purple()
+  local bg     = RGBA(0.08, 0.08, 0.08, 0.96)
+  local panel  = RGBA(0.12, 0.12, 0.12, 0.96)
+  local ref    = AMU_BKDEL.ref or {}
+  local files  = AMU_BKDEL.files or {}
+  local n = #files
+  local function line(t, c, s)
+    return { n = G.UIT.R, config = { align = "cm", padding = 0.02 }, nodes = {
+      { n = G.UIT.T, config = { text = t, scale = s or 0.36, colour = c or G.C.UI.TEXT_LIGHT } } } }
+  end
+  local title = busy and "Deleting..." or (n == 1 and "Delete this backup?" or ("Delete " .. n .. " backups?"))
+  local nodes = {
+    { n = G.UIT.R, config = { align = "cm", padding = 0.08, func = "amu_modal_tick" }, nodes = {
+      { n = G.UIT.T, config = { text = title, scale = 0.5, colour = purple, shadow = true } } } },
+    line(tostring(ref.display or ref.folder or ""), purple, 0.4),
+  }
+  local pin = ref.framework and (config.framework_pins and config.framework_pins[ref.folder]) or (not ref.framework and config.mod_pinned and config.mod_pinned[ref.folder])
+  local pinned_file = type(pin) == "table" and pin.backup_file or ""
+  local has_pin = false
+  for i, bf in ipairs(files) do
+    if bf == pinned_file then has_pin = true end
+    if i <= 5 then nodes[#nodes + 1] = line(ref.framework and AMU_FRAMEWORKS.label(bf) or format_backup_label(ref.folder, bf)) end
+  end
+  nodes[#nodes + 1] = { n = G.UIT.B, config = { h = 0.1, w = 0.1 } }
+  if busy then
+    nodes[#nodes + 1] = line("Moving to the Recycle Bin...", purple)
+  else
+    nodes[#nodes + 1] = line("They move to your Recycle Bin.", nil, 0.34)
+    nodes[#nodes + 1] = line("You can take them back out of it there.", nil, 0.34)
+    if has_pin then nodes[#nodes + 1] = line("One is the copy this mod is pinned at. It stays pinned.", purple, 0.32) end
+    nodes[#nodes + 1] = { n = G.UIT.B, config = { h = 0.15, w = 0.1 } }
+    local function b(label, func, colour, w, id)
+      return { n = G.UIT.C, config = { id = id, align = "cm", padding = 0.06, minw = w, minh = 0.62, r = 0.1,
+        colour = colour, button = func, hover = true, shadow = true }, nodes = {
+        { n = G.UIT.T, config = { text = label, scale = 0.4, colour = G.C.UI.TEXT_LIGHT } } } }
+    end
+    nodes[#nodes + 1] = { n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
+      b("Cancel", "amu_bkdel_cancel", panel, 2.4, "amu_modal_main"),
+      { n = G.UIT.B, config = { h = 0.1, w = 0.2 } },
+      b("Yes, delete", "amu_bkdel_yes", G.C.RED, 3.0) } }
+  end
+  return { n = G.UIT.ROOT, config = { align = "cm", minw = 8.2, padding = 0.22, r = 0.2, colour = bg, shadow = true, hover = true }, nodes = nodes }
+end
+
 -- Overlay that lists available backups for a single mod and lets the user
 -- revert to one (which also pins the mod so updates are frozen).
 G.UIDEF.amu_backup_picker = function(ref)
@@ -4538,10 +4696,18 @@ G.UIDEF.amu_backup_picker = function(ref)
   local max_show = 5
   local shown = math.min(#backups, max_show)
   local is_game = (folder == "_game")
+  local can_delete = (not is_game) and is_windows() and #backups > 0
+
+  AMU_BKDEL.ref = { folder = folder, display = display, backups = backups, framework = is_fw }
+  AMU_BKDEL.sel = {}
+  AMU_BKDEL.count.text = "Delete Selected (0)"
+  AMU_BKDEL.files = {}
 
   -- Register one revert G.FUNC per visible backup entry
   for i = 1, shown do
     local bf = backups[i]
+    AMU_BKDEL.sel["k" .. i] = false
+    G.FUNCS["amu_bkdel_" .. tostring(i)] = function(e) AMU_BKDEL.ask({ bf }) end
     G.FUNCS["amu_revert_" .. tostring(i)] = function(e)
       close_overlay()
       if is_fw then AMU_FRAMEWORKS.revert(folder, bf) else revert_and_pin_mod(folder, bf) end
@@ -4550,6 +4716,12 @@ G.UIDEF.amu_backup_picker = function(ref)
   end
 
   local rows = {}
+  if can_delete then
+    rows[#rows + 1] = { n = G.UIT.R, config = { align = "cr", padding = 0.03 }, nodes = {
+      { n = G.UIT.C, config = { align = "cm", padding = 0.05, minw = 2.8, minh = 0.45, r = 0.1, colour = G.C.RED,
+          button = "amu_bkdel_selected", hover = true, shadow = true }, nodes = {
+        { n = G.UIT.T, config = { ref_table = AMU_BKDEL.count, ref_value = "text", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } } } }
+  end
   for i = 1, shown do
     local bf    = backups[i]
     local label = is_fw and AMU_FRAMEWORKS.label(bf) or format_backup_label(folder, bf)
@@ -4578,6 +4750,11 @@ G.UIDEF.amu_backup_picker = function(ref)
         }},
         { n = G.UIT.B, config = { h = 0.1, w = 0.15 } },
         btn_node,
+        can_delete and { n = G.UIT.B, config = { h = 0.1, w = 0.15 } } or nil,
+        can_delete and amu_tight_toggle({ ref_table = AMU_BKDEL.sel, ref_value = "k" .. i, callback = AMU_BKDEL.tick }) or nil,
+        can_delete and { n = G.UIT.C, config = { align = "cm", padding = 0.05, minw = 1.3, minh = 0.45, r = 0.1, colour = G.C.RED,
+          button = "amu_bkdel_" .. tostring(i), hover = true, shadow = true }, nodes = {
+          { n = G.UIT.T, config = { text = "Delete", scale = 0.32, colour = G.C.UI.TEXT_LIGHT } } } } or nil,
       }
     }
   end
@@ -4596,11 +4773,11 @@ G.UIDEF.amu_backup_picker = function(ref)
     }
   end
 
-  local minh = math.max(3.5, shown * 0.55 + 2.2)
+  local minh = math.max(3.5, shown * (can_delete and 0.68 or 0.55) + 2.2 + (can_delete and 0.5 or 0))
 
   return {
     n = G.UIT.ROOT,
-    config = { align = "cm", minw = 7.4, minh = minh, padding = 0.24, r = 0.2, colour = bg, shadow = true, hover = true },
+    config = { align = "cm", minw = can_delete and 10.4 or 7.4, minh = minh, padding = 0.24, r = 0.2, colour = bg, shadow = true, hover = true },
     nodes = {
       { n = G.UIT.R, config = { align = "cm", padding = 0.08 }, nodes = {
         { n = G.UIT.T, config = { text = "Backups: " .. display, scale = 0.52, colour = purple, shadow = true } }
@@ -4609,7 +4786,7 @@ G.UIDEF.amu_backup_picker = function(ref)
         { n = G.UIT.T, config = { text = is_game and "Takes effect when the game restarts. Mod updates pause on a saved copy." or "Takes effect when the game restarts. Stays pinned until you press Unpin.", scale = 0.28, colour = G.C.UI.TEXT_LIGHT } } } }
         or { n = G.UIT.B, config = { h = 0.12, w = 0.1 } },
       { n = G.UIT.R, config = { align = "cm", padding = 0.05 }, nodes = {
-        { n = G.UIT.C, config = { align = "cl", padding = 0.12, minw = 6.6, r = 0.12, colour = panel }, nodes = rows }
+        { n = G.UIT.C, config = { align = "cl", padding = 0.12, minw = can_delete and 9.6 or 6.6, r = 0.12, colour = panel }, nodes = rows }
       }},
       { n = G.UIT.B, config = { h = 0.14, w = 0.1 } },
       is_game and { n = G.UIT.R, config = { align = "cm", padding = 0.03 }, nodes = {
